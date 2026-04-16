@@ -1,0 +1,20 @@
+=====================================
+Starting cleanup job at 2026年 04月 16日 星期四 17:24:17 CST
+2026-04-16 17:24:17,921 [INFO] Scanning from: /home/tianyu/Projects/DataPipeline
+2026-04-16 17:24:17,921 [INFO] Quarantine target folder: /home/tianyu/Projects/DataPipeline/quarantine_data
+2026-04-16 17:24:17,999 [ERROR] [ERROR] Failed to move /home/tianyu/Projects/DataPipeline/pick_cube/20260330/lirui/20af14a0-7299-47f7-a6cc-65212f8a9a1a: [Errno 13] Permission denied: 'data.csv'
+2026-04-16 17:24:18,056 [ERROR] [ERROR] Failed to move /home/tianyu/Projects/DataPipeline/pick_cube/20260330/lirui/f3e3d352-99e1-4b78-81c8-9816c3cfcae2: [Errno 13] Permission denied: 'data.csv'
+2026-04-16 17:24:18,133 [ERROR] [ERROR] Failed to move /home/tianyu/Projects/DataPipeline/pick_cube/20260330/lirui/b2a1b0cb-e645-4cb6-9f17-4e24a80b7403: [Errno 13] Permission denied: 'data.csv'
+2026-04-16 17:24:18,187 [ERROR] [ERROR] Failed to move /home/tianyu/Projects/DataPipeline/pick_cube/20260330/lirui/1be1d9e2-b7a2-4848-8d3d-beb48c869fc5: [Errno 13] Permission denied: 'data.csv'
+2026-04-16 17:24:18,275 [ERROR] [ERROR] Failed to move /home/tianyu/Projects/DataPipeline/pick_cube/20260330/lirui/1c7525d9-2443-421f-84a7-39e33b72b23c: [Errno 13] Permission denied: 'data.csv'
+Completed cleanup job at 2026年 04月 16日 星期四 17:24:18 CST
+=====================================
+Starting cleanup job at 2026年 04月 16日 星期四 17:32:36 CST
+2026-04-16 17:32:36,322 [INFO] Scanning from: /home/tianyu/Projects/DataPipeline
+2026-04-16 17:32:36,322 [INFO] Quarantine target folder: /home/tianyu/Projects/DataPipeline/quarantine_data
+2026-04-16 17:32:36,323 [INFO] [MOVED] /home/tianyu/Projects/DataPipeline/pick_cube/20260330/lirui/20af14a0-7299-47f7-a6cc-65212f8a9a1a -> /home/tianyu/Projects/DataPipeline/quarantine_data/pick_cube/20260330/lirui/20af14a0-7299-47f7-a6cc-65212f8a9a1a
+2026-04-16 17:32:36,323 [INFO] [MOVED] /home/tianyu/Projects/DataPipeline/pick_cube/20260330/lirui/f3e3d352-99e1-4b78-81c8-9816c3cfcae2 -> /home/tianyu/Projects/DataPipeline/quarantine_data/pick_cube/20260330/lirui/f3e3d352-99e1-4b78-81c8-9816c3cfcae2
+2026-04-16 17:32:36,323 [INFO] [MOVED] /home/tianyu/Projects/DataPipeline/pick_cube/20260330/lirui/b2a1b0cb-e645-4cb6-9f17-4e24a80b7403 -> /home/tianyu/Projects/DataPipeline/quarantine_data/pick_cube/20260330/lirui/b2a1b0cb-e645-4cb6-9f17-4e24a80b7403
+2026-04-16 17:32:36,323 [INFO] [MOVED] /home/tianyu/Projects/DataPipeline/pick_cube/20260330/lirui/1be1d9e2-b7a2-4848-8d3d-beb48c869fc5 -> /home/tianyu/Projects/DataPipeline/quarantine_data/pick_cube/20260330/lirui/1be1d9e2-b7a2-4848-8d3d-beb48c869fc5
+2026-04-16 17:32:36,323 [INFO] [MOVED] /home/tianyu/Projects/DataPipeline/pick_cube/20260330/lirui/1c7525d9-2443-421f-84a7-39e33b72b23c -> /home/tianyu/Projects/DataPipeline/quarantine_data/pick_cube/20260330/lirui/1c7525d9-2443-421f-84a7-39e33b72b23c
+Completed cleanup job at 2026年 04月 16日 星期四 17:32:36 CST
