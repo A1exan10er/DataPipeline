@@ -1,2 +1,8 @@
-pick_cube
-pick_in_hole
+Test_Data/
+NAS_Sample_Data/
+datapipeline-env/
+motion_abnormality_report*/
+__pycache__/
+*.pyc
+.codex/
+.agents/
