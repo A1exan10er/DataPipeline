@@ -1,0 +1,7 @@
+test_sample/
+umi-val-env/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/

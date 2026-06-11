@@ -1,6 +1,6 @@
 # Data Quality Pipeline Implementation Plan
 
-Last updated: 2026-06-04
+Last updated: 2026-06-09
 
 ## Goal
 
@@ -16,8 +16,15 @@ touch NAS data. It must never delete source data automatically.
 
 - `Test_Data/` contains small local episodes for script behavior and performance
   checks.
+- `Test_Folder_For_DataPipeline/` contains larger local task episode sets for
+  pipeline performance and robustness testing.
 - `NAS_Sample_Data/` contains copied NAS task folders for structure analysis and
   compatibility testing against more recent data layouts.
+- `QA_Pipeline/` contains the current main multi-phase QA implementation. It
+  already covers metadata, duration/count, timestamp, video, and robot-state
+  checks using SQLite state and CSV/JSONL/Markdown reports.
+- `UMI_Data_Validation/` contains UMI EEF-pose inverse-kinematics validation code
+  that should be integrated into the QA pipeline as a later specialized phase.
 - `Werkzeuge/docs/NAS_SAMPLE_DATA_STRUCTURE.md` documents observed NAS data
   structure, modality folders, episode naming styles, robot/controller variants,
   and recent structure updates.
@@ -26,6 +33,17 @@ touch NAS data. It must never delete source data automatically.
 - The final production pipeline may run on a server that can connect to NAS, but
   it should not be deployed against NAS until local tests and dry-run reports are
   reviewed.
+
+See `PIPELINE_INTEGRATION_PLAN.md` for the current integration roadmap based on
+the newly added folders.
+
+See `STANDSTILL_TRIM_IMPLEMENTATION_PLAN.md` for the focused plan to detect
+abnormal standstill at episode beginnings/endings and later cut matching CSV and
+video ranges into a separate cleaned dataset root.
+
+See `PIPELINE_MONITORING_AND_ISSUE_REPORTING_PLAN.md` for the plan to make each
+phase report live status, append exact issue events while processing, and keep
+run-level monitoring records for long NAS-scale jobs.
 
 ## Safety Principles
 
@@ -192,6 +210,8 @@ Checks:
 - episode duration is not a task-level statistical outlier.
 - CSV row counts are close to metadata rows or expected frame count.
 - image timestamp row counts are close to video frame count when available.
+- image timestamp row counts and primary action row counts differ by no more
+  than the configured absolute threshold, currently `3`.
 
 Initial policy:
 
@@ -519,13 +539,16 @@ Progress checklist:
 
 ## Near-Term Next Steps
 
-1. Create the initial `quality_pipeline.py` CLI with read-only `scan`.
-2. Define inventory and finding schemas.
-3. Implement structure and metadata checks.
-4. Integrate duration logic from `Werkzeuge/check_episode_durations.py`.
-5. Add a configurable `configs/quality_rules.yaml`.
-6. Run the first reports on `Test_Data/` and `NAS_Sample_Data/`.
-7. Update this file after each completed phase.
+1. Use `QA_Pipeline/scripts/run_pipeline.py` as the core QA entry point.
+2. Add a real `QA_Pipeline/README.md`.
+3. Move hardcoded thresholds into `QA_Pipeline/configs/quality_rules.yaml`.
+4. Extend calibration into a general statistical baseline builder.
+5. Integrate `UMI_Data_Validation/ik_benchmark.py` as a QA phase.
+6. Add dry-run quarantine planning.
+7. Add safe quarantine moving with audit and rollback logs.
+8. Run smoke tests on `Test_Data/`.
+9. Run performance tests on `Test_Folder_For_DataPipeline/`.
+10. Review false positives and update thresholds before NAS use.
 
 ## Progress Log
 
@@ -534,3 +557,42 @@ Progress checklist:
 - 2026-06-04: Added read-only motion abnormality prototype and sample analysis
   note. Ran a bounded scan on `NAS_Sample_Data/`; results are useful for review
   but thresholds are not yet approved for automatic quarantine.
+- 2026-06-08: Added `PIPELINE_INTEGRATION_PLAN.md` after reviewing the newly
+  added `Test_Folder_For_DataPipeline/`, `QA_Pipeline/`, and
+  `UMI_Data_Validation/` folders. `QA_Pipeline` is now the recommended core
+  implementation; missing production layers are quarantine planning, safe moving,
+  config management, statistical baselines, and UMI IK phase integration.
+- 2026-06-09: Added a report-only Phase 2 video/action length alignment check in
+  `QA_Pipeline`. It compares image `timestamps.csv` row counts against the
+  primary action `data.csv` row count and emits `video_action_length_mismatch`
+  with `status: fail` when the absolute difference is greater than the central
+  config threshold. No quarantine move is performed.
+- 2026-06-09: Added `STANDSTILL_TRIM_IMPLEMENTATION_PLAN.md` after reviewing
+  `annotate_standstill.py`, sample episode CSV/video layout, and current Phase 5
+  standstill findings. The proposed first step is report-only edge standstill
+  trim planning, with synchronized CSV/video materialization deferred to a
+  separate safe output-root workflow.
+- 2026-06-09: Implemented `QA_Pipeline/scripts/plan_standstill_trim.py` as a
+  read-only edge-standstill trim planner with CSV/JSONL/Markdown outputs,
+  central config, and multiprocessing via `--workers`. On local samples,
+  `NAS_Sample_Data` scanned 4,465 episodes in 15.236s with 8 workers, and
+  `Test_Folder_For_DataPipeline` scanned 5,946 episodes in 8.518s with 8
+  workers. Serial and parallel reports were byte-identical.
+- 2026-06-09: Added `PIPELINE_MONITORING_AND_ISSUE_REPORTING_PLAN.md` after
+  reviewing the current phase runner, SQLite state model, finding exports, and
+  progress callbacks. The plan keeps existing final reports but adds live
+  run-status files and append-only exact issue events.
+- 2026-06-09: Implemented the first live-monitoring layer through
+  `QA_Pipeline/scripts/pipeline/run_monitor.py` and wired it into
+  `QA_Pipeline/scripts/run_pipeline.py`. Runs now create `run_status.json`,
+  `phase_status.jsonl`, `issue_events.jsonl`, `episode_issues.csv`, and
+  `live_summary.md` under `<output-dir>/runs/<run-id>/`, plus a run-local copy
+  of final reports.
+- 2026-06-09: Added `QA_Pipeline/scripts/generate_dashboard.py` and wired
+  `dashboard.html` into normal and run-local final report export. The dashboard
+  shows final episode status counts, issue breakdowns, filters, and exact issue
+  records without requiring a web server.
+- 2026-06-10: Added `QA_PIPELINE_USER_GUIDE.md`, explaining pipeline inputs,
+  outputs, live status, dashboard usage, status decision rules, phase-by-phase
+  pass/not-pass criteria, standstill trim planning, server/NAS workflow, and
+  safety rules.

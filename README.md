@@ -19,6 +19,10 @@ episode.
 DataPipeline/
   NAS_Sample_Data/       Sample task folders copied from NAS
   Test_Data/             Smaller local test episodes
+  Test_Folder_For_DataPipeline/
+                         Larger local performance-test episode data
+  QA_Pipeline/           Main multi-phase data quality checking pipeline
+  UMI_Data_Validation/   UMI EEF-pose inverse-kinematics validation code
   Documents/             Data format reference PDFs
   Werkzeuge/             Extra documentation and data quality tools
   *.py                   Maintenance scripts
@@ -164,6 +168,51 @@ python3 annotate_standstill.py ./Test_Data/20260421/test_data/episode_0029/obser
 The script rewrites CSV files in place. Existing `is_standstill` columns are
 updated; missing columns are appended.
 
+### `QA_Pipeline/scripts/plan_standstill_trim.py`
+
+Creates a read-only trim plan for abnormal standstill at the beginning and end
+of episodes. It does not rewrite CSVs, cut videos, or move data. Reports are
+written as CSV, JSONL, and Markdown.
+
+Run a parallel sample scan:
+
+```bash
+python3 QA_Pipeline/scripts/plan_standstill_trim.py --roots NAS_Sample_Data --output-dir /tmp/standstill_trim_nas_sample --workers 8 --progress
+```
+
+The thresholds and source modality order are configured in
+`QA_Pipeline/configs/quality_rules.json` under `standstill_trim`.
+
+### `QA_Pipeline/scripts/run_pipeline.py`
+
+Runs the multi-phase QA pipeline. By default it now creates a live run directory
+under `<output-dir>/runs/<run-id>/` while processing.
+
+```bash
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots Test_Data \
+  --db-path /tmp/qa_pipeline/qa.db \
+  --output-dir /tmp/qa_pipeline/out \
+  --phases 1,2,3 \
+  --workers 8 \
+  --run-id sample-run
+```
+
+Useful live files:
+
+- `run_status.json`: current phase, progress, issue counts, latest issue.
+- `phase_status.jsonl`: phase start/end and progress snapshots.
+- `issue_events.jsonl`: append-only exact issue records.
+- `episode_issues.csv`: CSV issue ledger for the run.
+- `live_summary.md`: human-readable live summary.
+
+Final reports include `dashboard.html`, a static dashboard showing episode
+status counts, issue breakdowns, episode filters, and exact issue details. Open
+it directly in a browser from the output directory or the run-specific
+`final/` directory.
+
+To disable live monitoring, pass `--disable-live-monitor`.
+
 ### `correct_teleop_folders.py`
 
 Finds folders named `actions.joint_position` whose `data.csv` actually contains
@@ -249,6 +298,27 @@ manifests.
 `IMPLEMENTATION_PLAN.md` tracks the planned safety-first NAS data quality
 pipeline, including phases, safety gates, abnormal-value checks, quarantine
 design, and current progress.
+
+`QA_PIPELINE_USER_GUIDE.md` explains how to run the QA pipeline, how phase and
+final statuses are decided, how each phase separates pass and not-pass cases,
+and how to read the reports and dashboard.
+
+`PIPELINE_INTEGRATION_PLAN.md` explains how the new `Test_Folder_For_DataPipeline`,
+`QA_Pipeline`, and `UMI_Data_Validation` folders should be used together to build
+the full NAS-scale QA and quarantine workflow.
+
+`DATA_QUALITY_STEPS_2_3_GAP_ANALYSIS.md` compares the current scripts against
+`Documents/数据质检.pdf` Step 2 and Step 3 requirements and lists the required
+fixes.
+
+`QA_Pipeline/configs/quality_rules.json` is the central QA threshold config. For
+example, Step 2 video/action length mismatch defaults to `3` frames or timestamp
+rows, meaning an episode is marked unusable in the reports when an image
+timestamp stream differs from the primary action stream by more than three rows.
+The same config controls abnormal-FPS loss (`10%` by default) and hard
+frame-drop thresholds: normal image videos default to `15%`, tactile videos
+default to `20%`, and any image stream with `25` consecutive dropped frames is
+marked unusable.
 
 ## Dependencies
 

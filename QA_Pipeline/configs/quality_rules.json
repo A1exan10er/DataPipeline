@@ -1,0 +1,48 @@
+{
+  "phase2_duration": {
+    "length_alignment": {
+      "max_video_action_difference": 3
+    }
+  },
+  "phase3_timestamp": {
+    "abnormal_fps": {
+      "loss_fail_ratio": 0.10,
+      "gain_warning_ratio": 0.10
+    },
+    "frame_drops": {
+      "normal_video_drop_ratio_fail": 0.15,
+      "tactile_video_drop_ratio_fail": 0.20,
+      "max_consecutive_fail": 25,
+      "max_consecutive_warn": 10
+    }
+  },
+  "phase5_robot_state": {
+    "gripper": {
+      "mean_remap_threshold_m": 0.005
+    },
+    "robots": {
+      "aloha": {
+        "gripper_limits_m": [0.0, 0.1]
+      },
+      "arx5": {
+        "gripper_limits_m": [0.0, 0.082]
+      }
+    }
+  },
+  "standstill_trim": {
+    "enabled": true,
+    "motion_delta_threshold_rad": 0.001,
+    "standstill_min_duration_ms": 5000,
+    "edge_tolerance_ms": 1000,
+    "keep_context_ms": 500,
+    "min_remaining_duration_ms": 5000,
+    "max_trim_ratio": 0.40,
+    "source_modalities": [
+      "observation.state.joint_position",
+      "actions.joint_position",
+      "observation.state.eef_pose",
+      "actions.eef_pose",
+      "action.eef_pose"
+    ]
+  }
+}

@@ -1,8 +1,15 @@
 Test_Data/
+Test_Folder_For_DataPipeline/
 NAS_Sample_Data/
 datapipeline-env/
 motion_abnormality_report*/
 __pycache__/
 *.pyc
+.DS_Store
 .codex/
 .agents/
+*/.git/
+*/.DS_Store
+QA_Pipeline/outputs/
+UMI_Data_Validation/test_sample/
+UMI_Data_Validation/umi-val-env/
