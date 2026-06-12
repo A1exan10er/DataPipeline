@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from scripts.generate_dashboard import generate_dashboard
 from scripts.pipeline.qa_core import EpisodeState
 
 
@@ -45,6 +46,7 @@ class RunMonitor:
         phases: list[int],
         workers: int,
         refresh_interval_seconds: float,
+        dashboard_interval_seconds: float,
     ) -> None:
         self.db_path = Path(db_path)
         self.output_root = Path(output_root)
@@ -54,6 +56,7 @@ class RunMonitor:
         self.phases = phases
         self.workers = workers
         self.refresh_interval_seconds = max(0.1, refresh_interval_seconds)
+        self.dashboard_interval_seconds = max(1.0, dashboard_interval_seconds)
         self.started_at = _now()
         self.started_perf = time.perf_counter()
         self.current_phase: int | None = None
@@ -61,6 +64,7 @@ class RunMonitor:
         self.current_phase_total = 0
         self.current_phase_processed = 0
         self.last_refresh_perf = 0.0
+        self.last_dashboard_perf = 0.0
         self.last_finding_id = 0
         self.issue_counts: Counter[str] = Counter()
         self.severity_counts: Counter[str] = Counter()
@@ -71,8 +75,10 @@ class RunMonitor:
 
     def start(self, states: list[EpisodeState]) -> None:
         self.last_finding_id = self._max_finding_id()
+        self._write_latest_run_pointer()
         self._write_run_status(states, "running")
         self._write_live_summary(states)
+        self._write_live_dashboard(force=True)
 
     def start_phase(self, phase_number: int, total: int, skipped: int, states: list[EpisodeState]) -> None:
         self.current_phase = phase_number
@@ -137,6 +143,7 @@ class RunMonitor:
         )
         self._write_run_status(states, "running")
         self._write_live_summary(states)
+        self._write_live_dashboard(force=force)
         self.last_refresh_perf = now_perf
 
     def _initialize_files(self) -> None:
@@ -145,6 +152,20 @@ class RunMonitor:
         with (self.run_dir / "episode_issues.csv").open("w", encoding="utf-8", newline="") as file_obj:
             writer = csv.DictWriter(file_obj, fieldnames=ISSUE_FIELDNAMES)
             writer.writeheader()
+
+    def _write_latest_run_pointer(self) -> None:
+        _write_text_atomic(self.output_root / "latest_run.txt", str(self.run_dir) + "\n")
+
+    def _write_live_dashboard(self, force: bool = False) -> None:
+        now_perf = time.perf_counter()
+        if not force and now_perf - self.last_dashboard_perf < self.dashboard_interval_seconds:
+            return
+        try:
+            generate_dashboard(self.db_path, self.output_root / "dashboard.html")
+            generate_dashboard(self.db_path, self.run_dir / "dashboard.html")
+        except sqlite3.Error:
+            return
+        self.last_dashboard_perf = now_perf
 
     def _poll_issue_events(self) -> list[dict[str, Any]]:
         rows = self._new_finding_rows()

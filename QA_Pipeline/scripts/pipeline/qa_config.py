@@ -13,6 +13,27 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "quality
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "phase1_metadata": {
+        "checksum": {
+            "required": True,
+            "verify_hashes": False,
+            "accepted_algorithms": ["sha256", "md5"],
+            "max_missing_paths_in_details": 50,
+        },
+        "modalities": {
+            "ignore_flow_modalities": True,
+            "unknown_modality_status": "pass",
+            "singular_action_status": "pass",
+        },
+        "task_robot_tokens": {
+            "umi": ["umi"],
+            "ur": ["ur", "ur5", "ur5e"],
+            "arx": ["arx", "arx5"],
+            "arx5": ["arx", "arx5"],
+            "flexiv": ["flexiv"],
+            "aloha": ["aloha"],
+        },
+    },
     "phase2_duration": {
         "length_alignment": {
             "max_video_action_difference": 3,
@@ -42,6 +63,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "gripper_limits_m": [0.0, 0.082],
             },
         },
+    },
+    "phase6_umi_processing": {
+        "enabled": True,
+        "output_root": "outputs/umi_processed",
+        "suffix": "_w_world_base",
+        "overwrite": True,
+        "keep_intermediate": False,
+        "skip_assessment": False,
+        "assessment_args": "",
+        "fps": None,
+        "status_for_repaired": "warning",
+        "umi_tokens": ["umi"],
+        "required_modalities": [],
+        "preprocess_config": None,
+        "smooth_config": None,
+        "transform_config": None
     },
     "standstill_trim": {
         "enabled": True,

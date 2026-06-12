@@ -1,0 +1,7 @@
+{
+  "min_kept_frames": 30,
+  "crop_margin_frames": 2,
+  "video_codec": "libx264",
+  "video_crf": 18,
+  "video_preset": "medium"
+}

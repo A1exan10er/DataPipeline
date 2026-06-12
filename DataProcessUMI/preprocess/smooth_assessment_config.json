@@ -1,0 +1,9 @@
+{
+  "jump_displacement_m": 0.35,
+  "window_s": 0.5,
+  "recover_window_s": 1.0,
+  "return_tolerance_m": 0.35,
+  "merge_gap_s": 0.5,
+  "boundary_window_s": 3.0,
+  "boundary_max_unrecoverable_s": 3.0
+}

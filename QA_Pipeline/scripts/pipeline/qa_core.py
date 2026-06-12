@@ -8,6 +8,8 @@ import csv
 import json
 import sqlite3
 
+from scripts.pipeline.qa_config import config_value
+
 
 DEFAULT_DB_PATH = Path("outputs/qa_pipeline.db")
 STATUS_VALUES = ("pass", "warning", "fail", "needs_review")
@@ -282,7 +284,11 @@ def infer_context(roots: list[Path], episode_path: Path, metadata: dict) -> dict
     date = relative_parts[date_index] if date_index is not None else ""
     operator = _operator_from_parts(relative_parts, date_index)
     task_folder = _task_from_parts(relative_parts, root, date_index)
-    robot = str(metadata.get("robot", ""))
+    robot = first_present(
+        metadata.get("robot"),
+        _robot_from_episode_name(Path(episode_path).name),
+        _robot_from_layout_parts(relative_parts, date_index),
+    )
     controller = first_present(metadata.get("controller"), metadata.get("controller_type"))
     if not controller:
         controller = _controller_from_episode_name(Path(episode_path).name)
@@ -345,6 +351,59 @@ def export_quality_report(db_path: Path, output_path: Path) -> None:
         writer = csv.DictWriter(file_obj, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def export_excel_report(db_path: Path, output_path: Path) -> None:
+    """Export a human-readable Excel workbook for sharing QA results."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError as exc:
+        raise PipelineConfigurationError(
+            "Excel export requires openpyxl. Install it in datapipeline-env with: "
+            "python3 -m pip install openpyxl"
+        ) from exc
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    episode_rows = _quality_report_rows(db_path)
+    finding_rows = _excel_finding_rows(db_path)
+    summary_rows = _excel_summary_rows(episode_rows, finding_rows)
+    task_rows = _excel_task_rows(episode_rows)
+    issue_rows = _excel_issue_count_rows(finding_rows)
+
+    workbook = Workbook()
+    summary_sheet = workbook.active
+    summary_sheet.title = "Summary"
+    _write_sheet(summary_sheet, summary_rows, ["metric", "value"])
+    _write_sheet(workbook.create_sheet("Episodes"), episode_rows, [
+        "episode_path", "task", "date", "operator", "robot", "controller",
+        "status", "severity", "reasons", "checked_at",
+    ])
+    _write_sheet(workbook.create_sheet("Findings"), finding_rows, [
+        "episode_path", "task", "date", "operator", "robot", "controller",
+        "phase", "check_name", "severity", "status", "message", "details",
+    ])
+    _write_sheet(workbook.create_sheet("Issue Counts"), issue_rows, ["check_name", "count"])
+    _write_sheet(workbook.create_sheet("Task Status"), task_rows, [
+        "task", "fail", "needs_review", "warning", "pass", "pending", "total",
+    ])
+
+    header_fill = PatternFill("solid", fgColor="D9EAF7")
+    for worksheet in workbook.worksheets:
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+        for cell in worksheet[1]:
+            cell.font = Font(bold=True)
+            cell.fill = header_fill
+            cell.alignment = Alignment(vertical="center")
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        _autosize_columns(worksheet, get_column_letter)
+
+    workbook.save(output_path)
 
 
 def export_findings_jsonl(db_path: Path, output_path: Path) -> None:
@@ -537,9 +596,33 @@ def _operator_from_parts(parts: tuple[str, ...], date_index: int | None) -> str:
 def _task_from_parts(parts: tuple[str, ...], root: Path | None, date_index: int | None) -> str:
     if date_index is None:
         return ""
+    task_index = _task_index_from_parts(parts, date_index)
+    if task_index is not None:
+        return parts[task_index]
     if date_index > 0:
         return parts[date_index - 1]
     return root.name if root is not None else ""
+
+
+def _task_index_from_parts(parts: tuple[str, ...], date_index: int | None) -> int | None:
+    if date_index is None:
+        return None
+    if date_index >= 3 and _contains_known_robot_token(parts[date_index - 2]):
+        return date_index - 3
+    if date_index > 0:
+        return date_index - 1
+    return None
+
+
+def _robot_from_layout_parts(parts: tuple[str, ...], date_index: int | None) -> str:
+    if date_index is None or date_index < 3:
+        return ""
+    robot_type_folder = parts[date_index - 2]
+    tokens = set(_name_tokens(robot_type_folder))
+    for robot in _task_robot_tokens():
+        if robot in tokens:
+            return robot
+    return ""
 
 
 def _controller_from_episode_name(name: str) -> str:
@@ -547,6 +630,38 @@ def _controller_from_episode_name(name: str) -> str:
     if len(parts) >= 6 and parts[0] == "episode":
         return parts[-1]
     return ""
+
+
+def _robot_from_episode_name(name: str) -> str:
+    parts = name.split("_")
+    if len(parts) >= 6 and parts[0] == "episode":
+        return parts[-2]
+    return ""
+
+
+def _contains_known_robot_token(value: str) -> bool:
+    return bool(set(_task_robot_tokens()) & set(_name_tokens(value)))
+
+
+def _task_robot_tokens() -> list[str]:
+    configured = config_value(["phase1_metadata", "task_robot_tokens"], {})
+    if isinstance(configured, dict):
+        return sorted(str(key).lower() for key in configured)
+    return []
+
+
+def _name_tokens(value: str) -> list[str]:
+    tokens = []
+    current = []
+    for char in value.lower():
+        if char.isalnum():
+            current.append(char)
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tokens
 
 
 def _quality_report_rows(db_path: Path) -> list[dict]:
@@ -572,6 +687,113 @@ def _quality_report_rows(db_path: Path) -> list[dict]:
             }
         )
     return rows
+
+
+def _excel_finding_rows(db_path: Path) -> list[dict]:
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT f.episode_path, f.phase, f.check_name, f.severity, f.status,
+                   f.message, f.details,
+                   e.task, e.date, e.operator, e.robot, e.controller
+            FROM findings f
+            LEFT JOIN episodes e ON e.episode_path = f.episode_path
+            WHERE f.status != ?
+            ORDER BY f.episode_path, f.phase, f.id
+            """,
+            ("pass",),
+        ).fetchall()
+    return [
+        {
+            "episode_path": row["episode_path"],
+            "task": row["task"] or "",
+            "date": row["date"] or "",
+            "operator": row["operator"] or "",
+            "robot": row["robot"] or "",
+            "controller": row["controller"] or "",
+            "phase": row["phase"],
+            "check_name": row["check_name"],
+            "severity": row["severity"],
+            "status": row["status"],
+            "message": row["message"],
+            "details": _compact_json(row["details"]),
+        }
+        for row in rows
+    ]
+
+
+def _excel_summary_rows(episode_rows: list[dict], finding_rows: list[dict]) -> list[dict]:
+    status_counts = {}
+    for row in episode_rows:
+        status = row.get("status") or "pending"
+        status_counts[status] = status_counts.get(status, 0) + 1
+    severity_counts = {}
+    for row in finding_rows:
+        severity = row.get("severity") or ""
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+    rows = [
+        {"metric": "episodes", "value": len(episode_rows)},
+        {"metric": "non_pass_findings", "value": len(finding_rows)},
+    ]
+    for status in ("fail", "needs_review", "warning", "pass", "pending"):
+        rows.append({"metric": f"episodes_{status}", "value": status_counts.get(status, 0)})
+    for severity in ("critical", "major", "minor", "info"):
+        rows.append({"metric": f"findings_{severity}", "value": severity_counts.get(severity, 0)})
+    return rows
+
+
+def _excel_task_rows(episode_rows: list[dict]) -> list[dict]:
+    grouped: dict[str, dict[str, int]] = {}
+    for row in episode_rows:
+        task = row.get("task") or "(unknown)"
+        status = row.get("status") or "pending"
+        grouped.setdefault(task, {"fail": 0, "needs_review": 0, "warning": 0, "pass": 0, "pending": 0})
+        grouped[task][status] = grouped[task].get(status, 0) + 1
+    return [
+        {
+            "task": task,
+            **counts,
+            "total": sum(counts.values()),
+        }
+        for task, counts in sorted(grouped.items())
+    ]
+
+
+def _excel_issue_count_rows(finding_rows: list[dict]) -> list[dict]:
+    counts: dict[str, int] = {}
+    for row in finding_rows:
+        check_name = row.get("check_name") or "(unknown)"
+        counts[check_name] = counts.get(check_name, 0) + 1
+    return [
+        {"check_name": check_name, "count": count}
+        for check_name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _write_sheet(worksheet: Any, rows: list[dict], fieldnames: list[str]) -> None:
+    worksheet.append(fieldnames)
+    for row in rows:
+        worksheet.append([row.get(fieldname, "") for fieldname in fieldnames])
+
+
+def _autosize_columns(worksheet: Any, get_column_letter: Any) -> None:
+    for column_cells in worksheet.columns:
+        max_len = 0
+        column_index = column_cells[0].column
+        for cell in column_cells[:2000]:
+            max_len = max(max_len, len(str(cell.value or "")))
+        worksheet.column_dimensions[get_column_letter(column_index)].width = min(max(max_len + 2, 10), 60)
+
+
+def _compact_json(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return json.dumps(json.loads(value), ensure_ascii=False, separators=(",", ":"))
+    except json.JSONDecodeError:
+        return value
 
 
 def _load_findings_for_episode(db_path: Path, episode_path: str) -> list[Finding]:

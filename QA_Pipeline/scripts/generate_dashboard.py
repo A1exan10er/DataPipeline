@@ -211,6 +211,7 @@ def _render_html(payload: dict[str, Any]) -> str:
       font-weight: 700;
     }}
     .subtle {{ color: var(--muted); font-size: 13px; margin-top: 4px; }}
+    .refresh-state {{ color: var(--muted); font-size: 12px; margin-top: 4px; }}
     main {{ padding: 18px 24px 28px; }}
     .grid {{
       display: grid;
@@ -358,6 +359,7 @@ def _render_html(payload: dict[str, Any]) -> str:
   <header>
     <h1>QA Dashboard</h1>
     <div class="subtle" id="subtitle"></div>
+    <div class="refresh-state" id="refreshState"></div>
   </header>
   <main>
     <section class="grid metrics" id="metrics"></section>
@@ -412,6 +414,8 @@ def _render_html(payload: dict[str, Any]) -> str:
   </main>
   <script>
     const DATA = {data};
+    const GENERATED_AT = DATA.generated_at;
+    const AUTO_REFRESH_MS = 30000;
     const STATUS = ["fail", "needs_review", "warning", "pass", "pending"];
     const STATUS_LABELS = {{fail: "Fail", needs_review: "Needs Review", warning: "Warning", pass: "Pass", pending: "Pending"}};
     const MAX_ROWS = 500;
@@ -449,6 +453,36 @@ def _render_html(payload: dict[str, Any]) -> str:
           ${{label !== "Episodes" && label !== "Issues" ? `<div class="subtle">${{pct(value, total)}}% of episodes</div>` : ""}}
         </div>`).join("");
       document.getElementById("subtitle").textContent = `Generated ${{DATA.generated_at}} from ${{DATA.db_path}}`;
+    }}
+    function setRefreshState(text) {{
+      const node = document.getElementById("refreshState");
+      if (node) node.textContent = text;
+    }}
+    async function checkForDashboardUpdate() {{
+      if (location.protocol === "file:") {{
+        setRefreshState("Auto-update is unavailable from file://. Serve this directory with python3 -m http.server.");
+        return;
+      }}
+      try {{
+        const response = await fetch(location.href, {{cache: "no-store"}});
+        if (!response.ok) {{
+          setRefreshState(`Auto-update check failed: HTTP ${{response.status}}`);
+          return;
+        }}
+        const html = await response.text();
+        const match = html.match(/"generated_at":\\s*"([^"]+)"/);
+        const latest = match ? match[1] : "";
+        const checkedAt = new Date().toLocaleTimeString();
+        if (latest && latest !== GENERATED_AT) {{
+          document.open();
+          document.write(html);
+          document.close();
+          return;
+        }}
+        setRefreshState(`Auto-update on. Last checked ${{checkedAt}}.`);
+      }} catch (error) {{
+        setRefreshState(`Auto-update check failed: ${{error}}`);
+      }}
     }}
     function renderBars(target, entries, total) {{
       document.getElementById(target).innerHTML = entries.length ? entries.map(([name, count]) => `
@@ -542,6 +576,8 @@ def _render_html(payload: dict[str, Any]) -> str:
     initTabs();
     renderEpisodes();
     renderIssues();
+    setRefreshState(`Auto-update on. Checking every ${{AUTO_REFRESH_MS / 1000}}s.`);
+    setInterval(checkForDashboardUpdate, AUTO_REFRESH_MS);
   </script>
 </body>
 </html>

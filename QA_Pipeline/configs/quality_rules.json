@@ -1,4 +1,25 @@
 {
+  "phase1_metadata": {
+    "checksum": {
+      "required": true,
+      "verify_hashes": false,
+      "accepted_algorithms": ["sha256", "md5"],
+      "max_missing_paths_in_details": 50
+    },
+    "modalities": {
+      "ignore_flow_modalities": true,
+      "unknown_modality_status": "pass",
+      "singular_action_status": "pass"
+    },
+    "task_robot_tokens": {
+      "umi": ["umi"],
+      "ur": ["ur", "ur5", "ur5e"],
+      "arx": ["arx", "arx5"],
+      "arx5": ["arx", "arx5"],
+      "flexiv": ["flexiv"],
+      "aloha": ["aloha"]
+    }
+  },
   "phase2_duration": {
     "length_alignment": {
       "max_video_action_difference": 3
@@ -28,6 +49,22 @@
         "gripper_limits_m": [0.0, 0.082]
       }
     }
+  },
+  "phase6_umi_processing": {
+    "enabled": true,
+    "output_root": "outputs/umi_processed",
+    "suffix": "_w_world_base",
+    "overwrite": true,
+    "keep_intermediate": false,
+    "skip_assessment": false,
+    "assessment_args": "",
+    "fps": null,
+    "status_for_repaired": "warning",
+    "umi_tokens": ["umi"],
+    "required_modalities": [],
+    "preprocess_config": null,
+    "smooth_config": null,
+    "transform_config": null
   },
   "standstill_trim": {
     "enabled": true,

@@ -1,0 +1,22 @@
+{
+  "video": {
+    "max_duplicate_frame_proportion": 0.1,
+    "max_near_duplicate_frame": 10
+  },
+  "focus": {
+    "lap_var_threshold": 350.0,
+    "num_sample_frames": 20
+  },
+  "label": {
+    "tactile_affinity_threshold": 0.40
+  },
+  "action": {
+    "xyz_abs_threshold": 1.5
+  },
+  "motion": {
+    "video_static_threshold": 4.0,
+    "action_path_active": 5.0,
+    "action_extent_active": 0.3,
+    "num_sample_frames": 30
+  }
+}

@@ -1,6 +1,6 @@
 # QA Pipeline User Guide
 
-Last updated: 2026-06-10
+Last updated: 2026-06-12
 
 ## Purpose
 
@@ -20,7 +20,14 @@ remain separate reviewed steps.
 
 ## Main Entry Point
 
-Run the pipeline from the repository root:
+Enter the repository and activate the virtual environment first:
+
+```bash
+cd /home/xinzhi/DataPipeline
+source datapipeline-env/bin/activate
+```
+
+Then run the pipeline from the repository root:
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
@@ -33,21 +40,85 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --run-id test-run-001
 ```
 
-For server or larger local runs, use workers:
+For server or larger local runs, use workers conservatively. On an 8-core
+server, do not use all cores. Start with `--workers 3` or `--workers 4`, and
+let the resource guard pause the run if load or available memory becomes unsafe:
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
-  --roots /mnt/nas_homes/xinzhi/Test_Folder_For_DataPipeline \
-  --db-path outputs/server_test/qa.db \
-  --output-dir outputs/server_test \
-  --phases 1,2,3,4,5 \
-  --workers 8 \
-  --force-rerun \
-  --run-id server-test-001
+  --roots /mnt/nas/database/verified \
+  --date 20260611 \
+  --db-path outputs/qa_20260611/qa_pipeline.db \
+  --output-dir outputs/qa_20260611 \
+  --phases 1 \
+  --workers 4 \
+  --batch-size 5000 \
+  --min-free-mem-gb 4.0 \
+  --max-load-ratio 0.65 \
+  --resource-check-interval 15 \
+  --resource-max-wait-seconds 30 \
+  --force-rerun
 ```
 
-`--workers` currently speeds up Phase 4 and Phase 5. Phase 1, Phase 2, and
-Phase 3 are mostly sequential.
+`--workers` is passed to all registered phases. Phases 1 through 5 have
+parallel execution paths. Phase 6 accepts the argument but currently processes
+UMI episodes one by one because each UMI episode may run heavier video and
+trajectory processing. The resource guard is enabled by default: it limits
+workers to a safe value, pauses when host load or available memory is unsafe,
+waits up to 120 seconds by default unless overridden, then stops and asks the
+user to lower concurrency if the server does not recover.
+
+If a resource-guard stop happens inside a phase, the runner retries that phase
+by default. Completed episode states are saved to SQLite as each episode
+finishes, so a retry continues with unfinished episodes in that phase.
+
+```text
+--resource-error-retries          default 3
+--resource-retry-delay-seconds    default 30
+```
+
+`--batch-size` limits how many episode states are loaded into memory at once.
+For example, 10000 episodes with `--batch-size 1000` are processed in 10
+batches instead of one large in-memory set. After each batch, the pipeline
+releases the per-batch state list and runs Python garbage collection. Batch
+mode does not delete final reports, SQLite records, dashboards, or Phase 6 UMI
+processed outputs. On a memory-constrained server, start with `--batch-size 500`
+or `--batch-size 1000`; use larger batches only after checking memory behavior.
+
+`--batch-mode` controls how batches are formed:
+
+```text
+auto         default; uses group-aware batches when Phase 2 or 3 is selected
+fixed        simple fixed-size batches
+group-aware  keeps Phase 2/3 outlier groups complete inside a batch
+```
+
+Group-aware batching prevents Phase 2/3 outlier checks from running on partial
+groups. Phase 2 groups by task, so complete task groups are kept together.
+Phase 3 groups by task and robot, so complete task+robot groups are kept
+together when Phase 2 is not selected. If one complete group is larger than
+`--batch-size`, the group runs as an oversized batch and the pipeline prints a
+warning. This is intentional: correct group statistics are preferred over
+splitting the group.
+
+With `--force-rerun`, the selected phases are recomputed for the selected
+episodes. Existing episode rows are updated, and findings for the same
+`episode_path + phase` are replaced. If the same database is reused with a
+filter such as `--date 20260611`, records for episodes outside the selected
+date remain in the database and may still appear in the dashboard.
+
+To continue an interrupted run, reuse the same `--db-path` and `--output-dir`
+and do not pass `--force-rerun`. The current resume path still scans the input
+root and loads matching episode states before it can skip completed work, so
+large NAS roots may spend time rediscovering episodes even though previous
+phase results are already in SQLite. A future DB-resume mode should avoid this
+full discovery step.
+
+Note: Phases 2 and 3 include group-level outlier checks. In batch mode, those
+group checks are computed within each batch. Use the default `--batch-mode auto`
+or explicit `--batch-mode group-aware` so these phases do not split their
+outlier groups across batches. Phase 1 file-integrity checks are not affected
+by this.
 
 ## Inputs
 
@@ -76,6 +147,7 @@ The normal output directory contains:
 
 ```text
 quality_report.csv
+quality_report.xlsx
 quality_findings.jsonl
 quality_summary.md
 dashboard.html
@@ -93,40 +165,71 @@ outputs/<run>/runs/<run-id>/
   live_summary.md
   final/
     quality_report.csv
+    quality_report.xlsx
     quality_findings.jsonl
     quality_summary.md
     dashboard.html
 ```
 
-`quality_report.csv` has one row per episode. `quality_findings.jsonl` and
-`episode_issues.csv` have one row per exact issue.
+The live dashboard is also created as soon as a run starts and is refreshed
+periodically:
+
+```text
+outputs/<run>/dashboard.html
+outputs/<run>/runs/<run-id>/dashboard.html
+```
+
+The default live dashboard refresh interval is 30 seconds. Change it with
+`--live-dashboard-interval`. If `--disable-live-monitor` is used, the live
+dashboard is disabled and only the final dashboard is written at the end.
+When served over HTTP, the dashboard page also checks for an updated generated
+HTML file every 30 seconds and reloads itself automatically when the file
+changes. When opened directly with `file://`, browser security prevents this
+auto-update; serve the output directory with `python3 -m http.server`.
+
+`quality_report.csv` and `quality_report.xlsx` have one row per episode.
+`quality_findings.jsonl` and `episode_issues.csv` have one row per exact issue.
+The Excel workbook is intended for human review and sharing. It contains
+separate sheets for summary counts, episode status rows, exact findings, issue
+counts, and task status counts.
 
 ## Dashboard
 
-After a run, open:
+During or after a run, open:
 
 ```text
 <output-dir>/dashboard.html
 ```
 
-or the run-local copy:
+or the live run-local copy:
 
 ```text
-<output-dir>/runs/<run-id>/final/dashboard.html
+<output-dir>/runs/<run-id>/dashboard.html
 ```
+
+After completion, the final run-local copy is also written to
+`<output-dir>/runs/<run-id>/final/dashboard.html`.
 
 To serve it from a server:
 
 ```bash
-cd outputs/server_test
-python3 -m http.server 8080
+python3 -m http.server 1234 --directory outputs/qa_20260611
 ```
 
 Then open:
 
 ```text
-http://<server-ip>:8080/dashboard.html
+http://<server-ip>:1234/dashboard.html
 ```
+
+Any free port can be used. For example, if port 8080 is occupied, use 1234. If
+the port is not directly reachable from the local machine, forward it with SSH:
+
+```bash
+ssh -L 1234:localhost:1234 xinzhi@192.168.50.209
+```
+
+Then open `http://localhost:1234/dashboard.html`.
 
 The dashboard shows:
 
@@ -139,23 +242,62 @@ The dashboard shows:
 
 ## Live Status While Running
 
-Watch the human-readable live summary:
+Show the latest run's live summary without typing the run ID:
 
 ```bash
-watch -n 2 cat outputs/server_test/runs/server-test-001/live_summary.md
+python3 QA_Pipeline/scripts/qa_status.py --output-dir outputs/qa_20260611
 ```
 
-Watch exact issues as they are recorded:
+Refresh continuously:
 
 ```bash
-tail -f outputs/server_test/runs/server-test-001/issue_events.jsonl
+python3 QA_Pipeline/scripts/qa_status.py --output-dir outputs/qa_20260611 --watch
 ```
 
-Read machine-friendly run status:
+Show a specific run:
 
 ```bash
-cat outputs/server_test/runs/server-test-001/run_status.json
+python3 QA_Pipeline/scripts/qa_status.py --output-dir outputs/qa_20260611 --run-id server-test-001
 ```
+
+The main pipeline writes `latest_run.txt` under the output directory. The status
+helper reads that pointer and finds the latest run automatically. To inspect
+exact issue events, use `cat outputs/qa_20260611/latest_run.txt` to find the run
+directory, then open `issue_events.jsonl`.
+
+The HTML dashboard also exists from the beginning of the run and refreshes while
+live monitoring is enabled:
+
+```bash
+ls outputs/qa_20260611/dashboard.html
+```
+
+## Excel Reports
+
+Every normal pipeline export writes:
+
+```text
+<output-dir>/quality_report.xlsx
+```
+
+The workbook is easier to share with non-technical reviewers than CSV/JSONL. It
+contains:
+
+- `Summary`: total episodes, status counts, finding severity counts;
+- `Episodes`: one row per episode;
+- `Findings`: one row per non-pass finding with details;
+- `Issue Counts`: counts by check name;
+- `Task Status`: status counts per task.
+
+To convert an existing SQLite result database into Excel without rerunning QA:
+
+```bash
+python3 QA_Pipeline/scripts/export_excel_report.py \
+  --db-path outputs/qa_20260612_phase1_5/qa_pipeline.db \
+  --output outputs/qa_20260612_phase1_5/quality_report.xlsx
+```
+
+This requires `openpyxl` in `datapipeline-env`.
 
 ## How Status Is Decided
 
@@ -354,6 +496,35 @@ opencv-python-headless
 If OpenCV is not installed, Phase 4 stops before writing episode QA results.
 This is an environment/configuration failure, not an episode-quality finding.
 
+Performance note:
+
+Phase 4 is usually the slowest NAS phase. For every image `video.mp4`, it opens
+the MP4 with OpenCV, reads video properties, then seeks to and decodes up to 8
+sample frames. Random seeking inside compressed MP4 files over NAS is expensive
+and can raise Linux load average through I/O wait. If Phase 4 is slow or trips
+the resource guard, run it separately with fewer workers and a higher load
+threshold:
+
+```bash
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --date 20260612 \
+  --db-path outputs/qa_20260612_phase1_5/qa_pipeline.db \
+  --output-dir outputs/qa_20260612_phase1_5 \
+  --phases 4,5 \
+  --workers 2 \
+  --batch-size 500 \
+  --batch-mode fixed \
+  --min-free-mem-gb 4.0 \
+  --max-load-ratio 1.20 \
+  --resource-check-interval 60 \
+  --resource-max-wait-seconds 15 \
+  --resource-error-retries 5 \
+  --resource-retry-delay-seconds 20
+```
+
+Do not add `--force-rerun` when continuing from a stopped run.
+
 Pass cases:
 
 - each video opens successfully;
@@ -451,7 +622,7 @@ Run:
 python3 QA_Pipeline/scripts/plan_standstill_trim.py \
   --roots Test_Data \
   --output-dir outputs/standstill_trim_test \
-  --workers 8 \
+  --workers 3 \
   --progress
 ```
 
@@ -503,12 +674,17 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
-  --roots /mnt/nas_homes/xinzhi/Test_Folder_For_DataPipeline \
+  --roots /mnt/nas/database/verified \
+  --date 20260611 \
   --db-path outputs/server_smoke/qa.db \
   --output-dir outputs/server_smoke \
-  --phases 1,2,3 \
-  --max-episodes 10 \
-  --workers 8 \
+  --phases 1 \
+  --max-episodes 1000 \
+  --workers 3 \
+  --batch-size 500 \
+  --batch-mode auto \
+  --min-free-mem-gb 4.0 \
+  --max-load-ratio 0.65 \
   --force-rerun \
   --run-id server-smoke-001
 ```
@@ -516,14 +692,13 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
 5. Open dashboard:
 
 ```bash
-cd outputs/server_smoke
-python3 -m http.server 8080
+python3 -m http.server 1234 --directory outputs/server_smoke
 ```
 
 Then browse:
 
 ```text
-http://<server-ip>:8080/dashboard.html
+http://<server-ip>:1234/dashboard.html
 ```
 
 6. Review `fail` and `needs_review` episodes before running a larger test.
@@ -550,15 +725,20 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --run-id test-001
 ```
 
-Run all current phases with 8 workers:
+Run all current phases with conservative server parallelism:
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
-  --roots Test_Data \
+  --roots /mnt/nas/database/verified \
+  --date 20260611 \
   --db-path outputs/full/qa.db \
   --output-dir outputs/full \
-  --phases 1,2,3,4,5 \
-  --workers 8 \
+  --phases 1,2,3,4,5,6 \
+  --workers 3 \
+  --batch-size 500 \
+  --batch-mode auto \
+  --min-free-mem-gb 4.0 \
+  --max-load-ratio 0.65 \
   --force-rerun \
   --run-id full-001
 ```
@@ -571,17 +751,38 @@ python3 QA_Pipeline/scripts/generate_dashboard.py \
   --output outputs/full/dashboard.html
 ```
 
+Generate Excel manually from an existing database:
+
+```bash
+python3 QA_Pipeline/scripts/export_excel_report.py \
+  --db-path outputs/full/qa.db \
+  --output outputs/full/quality_report.xlsx
+```
+
 ## Safety Rules
 
 - Run on copied samples or read-only NAS mounts first.
 - Use `--max-episodes` for smoke tests.
-- Review `dashboard.html`, `quality_report.csv`, and `quality_findings.jsonl`
-  before any cleanup or quarantine step.
+- Review `dashboard.html`, `quality_report.xlsx`, `quality_report.csv`, and
+  `quality_findings.jsonl` before any cleanup or quarantine step.
 - Do not run cutting or quarantine actions on NAS source data until they have
   been validated locally and reviewed.
 - Keep output directories separate from source episode folders.
 - Use `--force-rerun` only when you intentionally want to recompute selected
-  phases.
+  phases. It replaces findings for the selected episode and phase, but it does
+  not delete records for episodes outside the current filters.
+- To resume an interrupted run, reuse the same database/output directory and
+  omit `--force-rerun`.
+- Do not use all CPU cores on an 8-core/16GB server. Start with `--workers 2`
+  and raise it only after checking load and memory.
+- Use `--batch-size 500` or `--batch-size 1000` for large NAS date runs so the
+  pipeline does not load all selected episode states at once.
+- Keep the default `--batch-mode auto` for Phase 2/3 runs. It avoids splitting
+  task or task+robot outlier groups across batches.
+- The resource guard pauses on unsafe load or memory. The default test timeout
+  is 120 seconds. On NAS video-heavy phases, shorter waits plus more retries
+  are often better, for example `--resource-max-wait-seconds 15`
+  `--resource-error-retries 5`.
 
 ## Current Limitations
 
@@ -589,7 +790,11 @@ python3 QA_Pipeline/scripts/generate_dashboard.py \
 - The standstill trim planner reports trim candidates but does not yet cut
   videos or CSVs.
 - Phase 4 requires OpenCV; without it, the pipeline exits before writing episode QA results.
-- `--workers` currently accelerates Phase 4 and Phase 5, plus the separate
-  standstill trim planner. Earlier phases are still mostly sequential.
+- Current resume still discovers episodes from the input root before skipping
+  completed work from SQLite. This can be slow on large NAS roots.
+- `--workers` is passed to all registered phases. Phases 1 through 5 can use
+  multiprocessing; Phase 6 currently processes UMI episodes sequentially.
+  The resource guard may lower the effective worker count to protect the
+  server.
 - Some thresholds are calibrated from current sample data and should be reviewed
   before full NAS-scale enforcement.

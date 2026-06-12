@@ -1,6 +1,6 @@
 # QA Pipeline 用户指南
 
-最后更新：2026-06-10
+最后更新：2026-06-12
 
 ## 目的
 
@@ -17,7 +17,14 @@ fail
 
 ## 主入口
 
-从仓库根目录运行流水线：
+先进入仓库并激活虚拟环境：
+
+```bash
+cd /home/xinzhi/DataPipeline
+source datapipeline-env/bin/activate
+```
+
+然后从仓库根目录运行流水线：
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
@@ -30,20 +37,50 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --run-id test-run-001
 ```
 
-服务器或较大的本地运行可使用 workers：
+服务器或较大的本地运行可使用 workers，但不要占满机器 CPU。8 核服务器建议从 `--workers 3` 或 `--workers 4` 开始，并让 resource guard 在负载或可用内存不安全时暂停：
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
-  --roots /mnt/nas_homes/xinzhi/Test_Folder_For_DataPipeline \
-  --db-path outputs/server_test/qa.db \
-  --output-dir outputs/server_test \
-  --phases 1,2,3,4,5 \
-  --workers 8 \
-  --force-rerun \
-  --run-id server-test-001
+  --roots /mnt/nas/database/verified \
+  --date 20260611 \
+  --db-path outputs/qa_20260611/qa_pipeline.db \
+  --output-dir outputs/qa_20260611 \
+  --phases 1 \
+  --workers 4 \
+  --batch-size 5000 \
+  --min-free-mem-gb 4.0 \
+  --max-load-ratio 0.65 \
+  --resource-check-interval 15 \
+  --resource-max-wait-seconds 30 \
+  --force-rerun
 ```
 
-`--workers` 目前会加速第 4 阶段和第 5 阶段。第 1、2、3 阶段基本仍为顺序执行。
+`--workers` 会传给所有已注册阶段。第 1 到第 5 阶段有并行执行路径。第 6 阶段会接收该参数，但目前会逐个处理 UMI episode，因为每个 UMI episode 可能包含较重的视频和轨迹处理。默认启用 resource guard：它会把 worker 数限制在安全范围内，并在服务器负载或可用内存过低时暂停；默认最多等待 120 秒，除非命令行覆盖该值，仍未恢复则停止运行并提示降低并发。
+
+如果 resource guard 在某个阶段内部停止运行，runner 默认会重试该阶段。每个 episode 完成后都会立即把状态保存到 SQLite，因此重试该阶段时会从该阶段未完成的 episode 继续。
+
+```text
+--resource-error-retries          默认 3
+--resource-retry-delay-seconds    默认 30
+```
+
+`--batch-size` 会限制每次加载进内存的 episode 数量。比如 10000 个 episode 且 `--batch-size 1000` 时，会分 10 批处理，避免一次性把全部 state/metadata 放进服务器内存。每批结束后，流水线会释放该批的 state 列表并执行 Python 垃圾回收。batch 模式不会删除最终报告、SQLite 记录、dashboard 或第 6 阶段的 UMI 处理结果。内存紧张的服务器建议从 `--batch-size 500` 或 `1000` 开始，确认内存稳定后再增大。
+
+`--batch-mode` 控制如何组成 batch：
+
+```text
+auto         默认值；选择第 2 或第 3 阶段时自动使用 group-aware batch
+fixed        简单固定大小 batch
+group-aware  保证第 2/3 阶段的离群统计分组不会被切开
+```
+
+Group-aware batching 会避免第 2/3 阶段在不完整分组上计算离群统计。第 2 阶段按 task 分组，因此会把完整 task 放在同一个 batch。第 3 阶段按 task+robot 分组，因此在未选择第 2 阶段时会把完整 task+robot 放在同一个 batch。如果某个完整分组本身大于 `--batch-size`，它会作为一个超出 batch size 的完整 batch 运行，并打印 warning。这是有意行为：优先保证分组统计正确，而不是强行切开分组。
+
+使用 `--force-rerun` 时，会重新计算当前筛选到的 episode 的所选阶段。已有 episode 行会被更新，同一个 `episode_path + phase` 的旧 findings 会被删除并写入新 findings。如果复用同一个数据库且使用 `--date 20260611` 这类筛选条件，筛选范围外 episode 的旧记录仍会留在数据库中，也可能继续出现在 dashboard 中。
+
+如果要继续一个中断的运行，复用相同的 `--db-path` 和 `--output-dir`，并且不要传 `--force-rerun`。当前 resume 路径仍会先扫描输入 root，并加载匹配 episode 的状态，然后才能跳过已完成工作。因此在大型 NAS root 上，即使之前的阶段结果已经在 SQLite 中，重新发现 episode 仍可能需要等待。后续应增加真正的 DB-resume 模式来避免全量发现步骤。
+
+注意：第 2、3 阶段包含组级离群统计；batch 模式下这些组级统计会按批次计算。使用默认的 `--batch-mode auto` 或显式使用 `--batch-mode group-aware`，可以避免这些阶段的离群统计分组被切到不同 batch。第 1 阶段文件完整性检查不受这个影响。
 
 ## 输入
 
@@ -70,6 +107,7 @@ episode_0001/
 
 ```text
 quality_report.csv
+quality_report.xlsx
 quality_findings.jsonl
 quality_summary.md
 dashboard.html
@@ -87,39 +125,58 @@ outputs/<run>/runs/<run-id>/
   live_summary.md
   final/
     quality_report.csv
+    quality_report.xlsx
     quality_findings.jsonl
     quality_summary.md
     dashboard.html
 ```
 
-`quality_report.csv` 每个 episode 一行。`quality_findings.jsonl` 和 `episode_issues.csv` 每个具体问题一行。
+运行开始后也会立即生成并定期刷新：
+
+```text
+outputs/<run>/dashboard.html
+outputs/<run>/runs/<run-id>/dashboard.html
+```
+
+默认实时 dashboard 每 30 秒刷新一次，可用 `--live-dashboard-interval` 调整。使用 `--disable-live-monitor` 时不会生成实时 dashboard，只会在运行结束后生成最终 dashboard。通过 HTTP 访问 dashboard 时，页面也会每 30 秒检查生成的 HTML 是否更新；如果文件有新版本，页面会自动更新，不需要用户手动刷新。直接用 `file://` 打开时，浏览器安全限制会阻止自动更新；请使用 `python3 -m http.server` 服务输出目录。
+
+`quality_report.csv` 和 `quality_report.xlsx` 每个 episode 一行。`quality_findings.jsonl` 和 `episode_issues.csv` 每个具体问题一行。Excel 工作簿用于人工查看和对外分享，包含 summary、episode 状态、具体 findings、问题类型统计和 task 状态统计等 sheet。
 
 ## Dashboard
 
-运行结束后，打开：
+运行时或运行结束后，打开：
 
 ```text
 <output-dir>/dashboard.html
 ```
 
-或运行目录中的副本：
+实时运行目录中也有一份副本：
 
 ```text
-<output-dir>/runs/<run-id>/final/dashboard.html
+<output-dir>/runs/<run-id>/dashboard.html
 ```
+
+运行结束后，最终副本还会写入 `<output-dir>/runs/<run-id>/final/dashboard.html`。
 
 如需从服务器访问：
 
 ```bash
-cd outputs/server_test
-python3 -m http.server 8080
+python3 -m http.server 1234 --directory outputs/qa_20260611
 ```
 
 然后打开：
 
 ```text
-http://<server-ip>:8080/dashboard.html
+http://<server-ip>:1234/dashboard.html
 ```
+
+端口可以换成任意空闲端口。例如 8080 被占用时可使用 1234。如果本机无法直接访问该端口，可以在本机使用 SSH 端口转发：
+
+```bash
+ssh -L 1234:localhost:1234 xinzhi@192.168.50.209
+```
+
+然后打开 `http://localhost:1234/dashboard.html`。
 
 Dashboard 展示：
 
@@ -132,23 +189,57 @@ Dashboard 展示：
 
 ## 运行中的实时状态
 
-查看面向人工阅读的实时摘要：
+查看最新一次运行的实时摘要，不需要手动输入 run-id：
 
 ```bash
-watch -n 2 cat outputs/server_test/runs/server-test-001/live_summary.md
+python3 QA_Pipeline/scripts/qa_status.py --output-dir outputs/qa_20260611
 ```
 
-实时查看记录到的问题：
+持续刷新显示：
 
 ```bash
-tail -f outputs/server_test/runs/server-test-001/issue_events.jsonl
+python3 QA_Pipeline/scripts/qa_status.py --output-dir outputs/qa_20260611 --watch
 ```
 
-读取便于机器处理的运行状态：
+如果要查看某个指定 run：
 
 ```bash
-cat outputs/server_test/runs/server-test-001/run_status.json
+python3 QA_Pipeline/scripts/qa_status.py --output-dir outputs/qa_20260611 --run-id server-test-001
 ```
+
+主流水线会在输出目录写入 `latest_run.txt`，该脚本会自动读取它并找到最新运行目录。需要实时查看详细 issue 时，可先用 `cat outputs/qa_20260611/latest_run.txt` 找到目录，再查看其中的 `issue_events.jsonl`。
+
+HTML dashboard 也会在运行开始时存在，并随实时监控刷新：
+
+```bash
+ls outputs/qa_20260611/dashboard.html
+```
+
+## Excel 报告
+
+每次正常导出都会写入：
+
+```text
+<output-dir>/quality_report.xlsx
+```
+
+该工作簿比 CSV/JSONL 更适合给非技术人员查看，包含：
+
+- `Summary`：episode 总数、状态统计、finding 严重程度统计；
+- `Episodes`：每个 episode 一行；
+- `Findings`：每个非 pass finding 一行，包含 details；
+- `Issue Counts`：按 check name 统计；
+- `Task Status`：按 task 统计状态数量。
+
+如果已有 SQLite 结果数据库，不需要重新运行 QA，也可以手动生成 Excel：
+
+```bash
+python3 QA_Pipeline/scripts/export_excel_report.py \
+  --db-path outputs/qa_20260612_phase1_5/qa_pipeline.db \
+  --output outputs/qa_20260612_phase1_5/quality_report.xlsx
+```
+
+该功能需要 `datapipeline-env` 中安装 `openpyxl`。
 
 ## 状态判定方式
 
@@ -338,6 +429,30 @@ opencv-python-headless
 
 如果未安装 OpenCV，第 4 阶段会在写入 episode QA 结果前停止。这是环境/配置失败，不是 episode 质量 finding。
 
+性能说明：
+
+第 4 阶段通常是 NAS 上最慢的阶段。它会对每个图像 `video.mp4` 使用 OpenCV 打开 MP4，读取视频属性，然后随机 seek 并解码最多 8 个采样帧。在 NAS 上对压缩 MP4 做随机 seek 代价很高，并且会因为 I/O wait 抬高 Linux load average。如果第 4 阶段很慢或触发 resource guard，建议单独运行第 4/5 阶段，降低 workers，并放宽 load 阈值：
+
+```bash
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --date 20260612 \
+  --db-path outputs/qa_20260612_phase1_5/qa_pipeline.db \
+  --output-dir outputs/qa_20260612_phase1_5 \
+  --phases 4,5 \
+  --workers 2 \
+  --batch-size 500 \
+  --batch-mode fixed \
+  --min-free-mem-gb 4.0 \
+  --max-load-ratio 1.20 \
+  --resource-check-interval 60 \
+  --resource-max-wait-seconds 15 \
+  --resource-error-retries 5 \
+  --resource-retry-delay-seconds 20
+```
+
+继续中断运行时不要加 `--force-rerun`。
+
 通过条件：
 
 - 每个视频可以成功打开；
@@ -432,7 +547,7 @@ QA_Pipeline/scripts/plan_standstill_trim.py
 python3 QA_Pipeline/scripts/plan_standstill_trim.py \
   --roots Test_Data \
   --output-dir outputs/standstill_trim_test \
-  --workers 8 \
+  --workers 3 \
   --progress
 ```
 
@@ -483,12 +598,17 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
-  --roots /mnt/nas_homes/xinzhi/Test_Folder_For_DataPipeline \
+  --roots /mnt/nas/database/verified \
+  --date 20260611 \
   --db-path outputs/server_smoke/qa.db \
   --output-dir outputs/server_smoke \
-  --phases 1,2,3 \
-  --max-episodes 10 \
-  --workers 8 \
+  --phases 1 \
+  --max-episodes 1000 \
+  --workers 3 \
+  --batch-size 500 \
+  --batch-mode auto \
+  --min-free-mem-gb 4.0 \
+  --max-load-ratio 0.65 \
   --force-rerun \
   --run-id server-smoke-001
 ```
@@ -496,14 +616,13 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
 5. 打开 dashboard：
 
 ```bash
-cd outputs/server_smoke
-python3 -m http.server 8080
+python3 -m http.server 1234 --directory outputs/server_smoke
 ```
 
 然后浏览：
 
 ```text
-http://<server-ip>:8080/dashboard.html
+http://<server-ip>:1234/dashboard.html
 ```
 
 6. 在运行更大规模测试前，先复核 `fail` 和 `needs_review` episode。
@@ -530,15 +649,20 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --run-id test-001
 ```
 
-使用 8 个 workers 运行当前所有阶段：
+在服务器上使用保守并发运行当前所有阶段：
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
-  --roots Test_Data \
+  --roots /mnt/nas/database/verified \
+  --date 20260611 \
   --db-path outputs/full/qa.db \
   --output-dir outputs/full \
-  --phases 1,2,3,4,5 \
-  --workers 8 \
+  --phases 1,2,3,4,5,6 \
+  --workers 3 \
+  --batch-size 500 \
+  --batch-mode auto \
+  --min-free-mem-gb 4.0 \
+  --max-load-ratio 0.65 \
   --force-rerun \
   --run-id full-001
 ```
@@ -551,19 +675,33 @@ python3 QA_Pipeline/scripts/generate_dashboard.py \
   --output outputs/full/dashboard.html
 ```
 
+从已有数据库手动生成 Excel：
+
+```bash
+python3 QA_Pipeline/scripts/export_excel_report.py \
+  --db-path outputs/full/qa.db \
+  --output outputs/full/quality_report.xlsx
+```
+
 ## 安全规则
 
 - 先在复制出的样本或只读 NAS 挂载上运行。
 - smoke test 使用 `--max-episodes`。
-- 在任何清理或隔离步骤前，先复核 `dashboard.html`、`quality_report.csv` 和 `quality_findings.jsonl`。
+- 在任何清理或隔离步骤前，先复核 `dashboard.html`、`quality_report.xlsx`、`quality_report.csv` 和 `quality_findings.jsonl`。
 - 在本地验证并经过复核前，不要对 NAS 源数据执行裁剪或隔离操作。
 - 输出目录应与源 episode 文件夹分开。
-- 仅在明确想重新计算所选阶段时使用 `--force-rerun`。
+- 仅在明确想重新计算所选阶段时使用 `--force-rerun`。它会替换当前筛选到的 episode 和阶段的 findings，但不会删除当前筛选条件之外 episode 的历史记录。
+- 继续中断运行时，复用相同数据库和输出目录，并省略 `--force-rerun`。
+- 8 核 16GB 服务器不要使用全部核心；先使用 `--workers 2`，确认负载稳定后再谨慎提高。
+- NAS 大日期运行使用 `--batch-size 500` 或 `--batch-size 1000`，避免一次加载全部 episode state。
+- 第 2/3 阶段运行时保持默认 `--batch-mode auto`。它可以避免 task 或 task+robot 离群统计分组被切到不同 batch。
+- 默认 resource guard 会在负载或内存风险过高时暂停，默认最多等待 120 秒。NAS 视频阶段更适合较短等待加多次重试，例如 `--resource-max-wait-seconds 15` 和 `--resource-error-retries 5`。
 
 ## 当前限制
 
 - 主 QA Pipeline 只报告分类，不移动或删除数据。
 - 静止裁剪规划器只报告裁剪候选，目前还不会裁剪视频或 CSV。
 - 第 4 阶段需要 OpenCV；没有 OpenCV 时，流水线会在写入 episode QA 结果前退出。
-- `--workers` 当前会加速第 4 阶段、第 5 阶段，以及独立的静止裁剪规划器。更早阶段基本仍为顺序执行。
+- 当前 resume 仍会先从输入 root 发现 episode，然后才根据 SQLite 跳过已完成工作。在大型 NAS root 上这一步可能较慢。
+- `--workers` 会传给所有已注册阶段。第 1 到第 5 阶段可使用 multiprocessing；第 6 阶段目前会顺序处理 UMI episode。实际 worker 数可能被 resource guard 降低，以保护服务器。
 - 部分阈值基于当前样本数据校准，在 NAS 全量规模强制执行前应再次复核。

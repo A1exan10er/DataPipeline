@@ -1,0 +1,101 @@
+{
+  "rotation_sequence": [
+    {
+      "axis": "x",
+      "degrees": 54.0
+    },
+    {
+      "axis": "y",
+      "degrees": 90.0
+    },
+    {
+      "axis": "x",
+      "degrees": -90.0
+    }
+  ],
+  "position_offset_m": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+  },
+  "right_position_offset_m": {
+    "x": 0.0,
+    "y": 0.44,
+    "z": 0.0
+  },
+  "local_ee_projection": {
+    "ee_umi_local_position": {
+      "x": 0.14977,
+      "y": 0.16699
+    },
+    "tracker_umi_local_position": {
+      "x": 0.012,
+      "y": 0.242
+    },
+    "tracker_based_ee_local_position": {
+      "x": 0.0,
+      "y": 0.02029480946026922,
+      "z": 0.15554804308949488
+    },
+    "tracker_axes_in_eef_frame": {
+      "x": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "y": [
+        0.8090169943749475,
+        0.0,
+        0.5877852522924731
+      ],
+      "z": [
+        -0.5877852522924731,
+        0.0,
+        0.8090169943749475
+      ]
+    },
+    "angle_degrees": 54.0
+  },
+  "world_projection": {
+    "world_position_offset_m": {
+      "x": 0.0125,
+      "y": 0.0,
+      "z": 0.245
+    },
+    "world_axes_in_transformed_frame": {
+      "x": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "y": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "z": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    "zero_rpy_pose_in_transformed_frame": {
+      "rotation_sequence": [
+        {
+          "axis": "y",
+          "degrees": -90.0
+        }
+      ]
+    },
+    "zero_world_eef_pose": {
+      "rotation_sequence": [
+        {
+          "axis": "y",
+          "degrees": 90.0
+        }
+      ]
+    }
+  },
+  "rotation_format": "6d_first_two_rotation_matrix_columns",
+  "rotation_multiply": "post"
+}
