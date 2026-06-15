@@ -161,8 +161,16 @@ class RunMonitor:
         if not force and now_perf - self.last_dashboard_perf < self.dashboard_interval_seconds:
             return
         try:
-            generate_dashboard(self.db_path, self.output_root / "dashboard.html")
-            generate_dashboard(self.db_path, self.run_dir / "dashboard.html")
+            generate_dashboard(
+                self.db_path,
+                self.output_root / "dashboard.html",
+                self.dashboard_interval_seconds,
+            )
+            generate_dashboard(
+                self.db_path,
+                self.run_dir / "dashboard.html",
+                self.dashboard_interval_seconds,
+            )
         except sqlite3.Error:
             return
         self.last_dashboard_perf = now_perf

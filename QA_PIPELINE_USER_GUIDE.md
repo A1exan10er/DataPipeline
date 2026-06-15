@@ -1,6 +1,6 @@
 # QA Pipeline User Guide
 
-Last updated: 2026-06-12
+Last updated: 2026-06-15
 
 ## Purpose
 
@@ -53,6 +53,8 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --phases 1 \
   --workers 4 \
   --batch-size 5000 \
+  --batch-mode auto \
+  --live-dashboard-interval 5 \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 0.65 \
   --resource-check-interval 15 \
@@ -101,11 +103,23 @@ together when Phase 2 is not selected. If one complete group is larger than
 warning. This is intentional: correct group statistics are preferred over
 splitting the group.
 
+Before detailed phase checks, the runner applies the default quality-label
+filter. Only episodes whose `metadata.json` contains `quality.labels` with
+`完全正常` are processed. Episodes with other collector labels are skipped and
+summarized on the console. This filter applies to every phase because it runs
+before state loading and phase dispatch. Use:
+
+```text
+--quality-label <label>              process a different label
+--disable-quality-label-filter       process all labels for a full audit
+```
+
 With `--force-rerun`, the selected phases are recomputed for the selected
 episodes. Existing episode rows are updated, and findings for the same
-`episode_path + phase` are replaced. If the same database is reused with a
-filter such as `--date 20260611`, records for episodes outside the selected
-date remain in the database and may still appear in the dashboard.
+`episode_path + phase` are replaced. At the start of each run, the database is
+also pruned to the current selected episode set after `--roots`, `--date`,
+`--task`, quality-label filtering, and `--max-episodes`. This prevents stale
+rows from earlier filters from appearing in the current dashboard.
 
 To continue an interrupted run, reuse the same `--db-path` and `--output-dir`
 and do not pass `--force-rerun`. The current resume path still scans the input
@@ -141,6 +155,11 @@ episode_0001/
   observation.image.third_view/video.mp4
 ```
 
+Hidden directories found during discovery, such as NAS or sync-tool temporary
+folders named `.fr-*`, are skipped instead of being interpreted as episode
+content. They are still recorded as `hidden_directory_skipped` findings in live
+and final reports.
+
 ## Outputs
 
 The normal output directory contains:
@@ -151,6 +170,7 @@ quality_report.xlsx
 quality_findings.jsonl
 quality_summary.md
 dashboard.html
+dashboard_data.json
 qa.db
 ```
 
@@ -169,6 +189,7 @@ outputs/<run>/runs/<run-id>/
     quality_findings.jsonl
     quality_summary.md
     dashboard.html
+    dashboard_data.json
 ```
 
 The live dashboard is also created as soon as a run starts and is refreshed
@@ -176,16 +197,19 @@ periodically:
 
 ```text
 outputs/<run>/dashboard.html
+outputs/<run>/dashboard_data.json
 outputs/<run>/runs/<run-id>/dashboard.html
+outputs/<run>/runs/<run-id>/dashboard_data.json
 ```
 
-The default live dashboard refresh interval is 30 seconds. Change it with
+The default live dashboard refresh interval is 5 seconds. Change it with
 `--live-dashboard-interval`. If `--disable-live-monitor` is used, the live
 dashboard is disabled and only the final dashboard is written at the end.
-When served over HTTP, the dashboard page also checks for an updated generated
-HTML file every 30 seconds and reloads itself automatically when the file
-changes. When opened directly with `file://`, browser security prevents this
-auto-update; serve the output directory with `python3 -m http.server`.
+`dashboard.html` is a stable page shell; current data is written to
+`dashboard_data.json`. When served over HTTP, the browser polls that JSON and
+updates the page in place, so automatic refresh should not show a full blank
+page. When opened directly with `file://`, browser security prevents JSON fetch;
+serve the output directory with `python3 -m http.server`.
 
 `quality_report.csv` and `quality_report.xlsx` have one row per episode.
 `quality_findings.jsonl` and `episode_issues.csv` have one row per exact issue.
@@ -272,9 +296,13 @@ live monitoring is enabled:
 ls outputs/qa_20260611/dashboard.html
 ```
 
+The pipeline prints progress during discovery filtering, state loading, batch
+planning, and phase execution. Phase progress includes elapsed time, rough ETA,
+and processing rate so long NAS runs do not appear stuck after discovery.
+
 ## Excel Reports
 
-Every normal pipeline export writes:
+When `openpyxl` is installed, normal pipeline export writes:
 
 ```text
 <output-dir>/quality_report.xlsx
@@ -297,7 +325,10 @@ python3 QA_Pipeline/scripts/export_excel_report.py \
   --output outputs/qa_20260612_phase1_5/quality_report.xlsx
 ```
 
-This requires `openpyxl` in `datapipeline-env`.
+This requires `openpyxl` in `datapipeline-env`. If it is missing during a normal
+pipeline run, the runner prints a warning and still writes CSV, JSONL, Markdown,
+SQLite, and dashboard outputs. Manual Excel export still requires installing
+`openpyxl`.
 
 ## How Status Is Decided
 
@@ -338,7 +369,8 @@ Final episode status combines all completed phase statuses:
 
 Important: if an episode fails an earlier completed phase, later phases are
 skipped for that episode. This avoids wasting compute on episodes that are
-already clearly unusable.
+already clearly unusable. Use `--continue-after-fail` only when you explicitly
+want later phases to run even after an earlier phase has failed.
 
 ## Phase 1: Structure And Metadata
 
@@ -375,6 +407,12 @@ Main not-pass cases:
 | `parent_path_structure` | Path does not look like `<task>/<date>/<operator>/<episode>` | warning |
 | `checksum_manifest_missing` | `.checksum_manifest` missing | warning |
 | `quality_labels_missing` | `quality.labels` missing or empty | warning |
+| `action_modality_singular_name` | Modality/folder uses `action.*` instead of `actions.*`; fix item is reported | warning |
+| `unknown_modality_detected` | Unknown modality names are reported for review | pass/info by default |
+| `task_robot_mismatch` | Metadata/name/path robot source conflicts with robot token in task folder | fail in current Phase 1 |
+
+`observation.image.flow_*` modalities are intentionally ignored by Phase 1 file
+integrity checks. Their presence or absence does not affect pass/fail status.
 
 ## Phase 2: Duration And Count Consistency
 
@@ -651,7 +689,19 @@ is still required for actual synchronized cutting.
 ## Recommended Server/NAS Workflow
 
 1. Mount NAS read-only on the server.
-2. Deploy the current repository to the server from the local repository root:
+2. For long runs, use a persistent terminal session on the server:
+
+```bash
+tmux new -s qa_verified
+cd /home/xinzhi/DataPipeline
+source datapipeline-env/bin/activate
+```
+
+This keeps the pipeline running if VS Code SSH disconnects or the local PC
+freezes. Detach with `Ctrl-b d`, and later resume with
+`tmux attach -t qa_verified`.
+
+3. Deploy the current repository to the server from the local repository root:
 
 ```bash
 rsync -av \
@@ -662,7 +712,7 @@ rsync -av \
   xinzhi@192.168.50.209:~/DataPipeline/
 ```
 
-3. Run a dry discovery:
+4. Run a dry discovery:
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
@@ -670,7 +720,7 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --dry-run
 ```
 
-4. Run a small smoke test:
+5. Run a small smoke test:
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
@@ -683,13 +733,14 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --workers 3 \
   --batch-size 500 \
   --batch-mode auto \
+  --live-dashboard-interval 5 \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 0.65 \
   --force-rerun \
   --run-id server-smoke-001
 ```
 
-5. Open dashboard:
+6. Open dashboard:
 
 ```bash
 python3 -m http.server 1234 --directory outputs/server_smoke
@@ -701,8 +752,8 @@ Then browse:
 http://<server-ip>:1234/dashboard.html
 ```
 
-6. Review `fail` and `needs_review` episodes before running a larger test.
-7. Run larger batches only after the smoke test results are understood.
+7. Review `fail` and `needs_review` episodes before running a larger test.
+8. Run larger batches only after the smoke test results are understood.
 
 ## Practical Command Reference
 

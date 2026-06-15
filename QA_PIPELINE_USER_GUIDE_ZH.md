@@ -1,6 +1,6 @@
 # QA Pipeline 用户指南
 
-最后更新：2026-06-12
+最后更新：2026-06-15
 
 ## 目的
 
@@ -48,6 +48,8 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --phases 1 \
   --workers 4 \
   --batch-size 5000 \
+  --batch-mode auto \
+  --live-dashboard-interval 5 \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 0.65 \
   --resource-check-interval 15 \
@@ -76,7 +78,17 @@ group-aware  保证第 2/3 阶段的离群统计分组不会被切开
 
 Group-aware batching 会避免第 2/3 阶段在不完整分组上计算离群统计。第 2 阶段按 task 分组，因此会把完整 task 放在同一个 batch。第 3 阶段按 task+robot 分组，因此在未选择第 2 阶段时会把完整 task+robot 放在同一个 batch。如果某个完整分组本身大于 `--batch-size`，它会作为一个超出 batch size 的完整 batch 运行，并打印 warning。这是有意行为：优先保证分组统计正确，而不是强行切开分组。
 
-使用 `--force-rerun` 时，会重新计算当前筛选到的 episode 的所选阶段。已有 episode 行会被更新，同一个 `episode_path + phase` 的旧 findings 会被删除并写入新 findings。如果复用同一个数据库且使用 `--date 20260611` 这类筛选条件，筛选范围外 episode 的旧记录仍会留在数据库中，也可能继续出现在 dashboard 中。
+进入详细阶段检查前，runner 会先应用默认质量标签过滤。只有 `metadata.json`
+中 `quality.labels` 包含 `完全正常` 的 episode 会被处理。采集员标为其他质量
+标签的 episode 会被跳过，并在终端汇总跳过原因。该过滤在状态加载和阶段派发
+前执行，因此适用于所有阶段。可用以下参数调整：
+
+```text
+--quality-label <label>              处理指定质量标签
+--disable-quality-label-filter       完整审计时处理所有质量标签
+```
+
+使用 `--force-rerun` 时，会重新计算当前筛选到的 episode 的所选阶段。已有 episode 行会被更新，同一个 `episode_path + phase` 的旧 findings 会被删除并写入新 findings。每次运行开始时，数据库还会按当前 `--roots`、`--date`、`--task`、质量标签过滤和 `--max-episodes` 得到的 episode 集合进行清理，删除当前集合之外的旧 episode 记录，避免旧筛选条件的结果污染当前 dashboard。
 
 如果要继续一个中断的运行，复用相同的 `--db-path` 和 `--output-dir`，并且不要传 `--force-rerun`。当前 resume 路径仍会先扫描输入 root，并加载匹配 episode 的状态，然后才能跳过已完成工作。因此在大型 NAS root 上，即使之前的阶段结果已经在 SQLite 中，重新发现 episode 仍可能需要等待。后续应增加真正的 DB-resume 模式来避免全量发现步骤。
 
@@ -101,6 +113,10 @@ episode_0001/
   observation.image.third_view/video.mp4
 ```
 
+发现阶段会跳过隐藏目录，例如 NAS 或同步工具留下的 `.fr-*` 临时目录。这些目
+录不会被当作 episode 内容处理，但会作为 `hidden_directory_skipped` finding
+写入实时和最终报告。
+
 ## 输出
 
 常规输出目录包含：
@@ -111,6 +127,7 @@ quality_report.xlsx
 quality_findings.jsonl
 quality_summary.md
 dashboard.html
+dashboard_data.json
 qa.db
 ```
 
@@ -129,16 +146,19 @@ outputs/<run>/runs/<run-id>/
     quality_findings.jsonl
     quality_summary.md
     dashboard.html
+    dashboard_data.json
 ```
 
 运行开始后也会立即生成并定期刷新：
 
 ```text
 outputs/<run>/dashboard.html
+outputs/<run>/dashboard_data.json
 outputs/<run>/runs/<run-id>/dashboard.html
+outputs/<run>/runs/<run-id>/dashboard_data.json
 ```
 
-默认实时 dashboard 每 30 秒刷新一次，可用 `--live-dashboard-interval` 调整。使用 `--disable-live-monitor` 时不会生成实时 dashboard，只会在运行结束后生成最终 dashboard。通过 HTTP 访问 dashboard 时，页面也会每 30 秒检查生成的 HTML 是否更新；如果文件有新版本，页面会自动更新，不需要用户手动刷新。直接用 `file://` 打开时，浏览器安全限制会阻止自动更新；请使用 `python3 -m http.server` 服务输出目录。
+默认实时 dashboard 每 5 秒刷新一次，可用 `--live-dashboard-interval` 调整。使用 `--disable-live-monitor` 时不会生成实时 dashboard，只会在运行结束后生成最终 dashboard。`dashboard.html` 是稳定页面 shell，实时数据写在同目录的 `dashboard_data.json` 中。通过 HTTP 访问时，页面会轮询 JSON 并在原页面内更新，因此自动刷新时不应出现整页空白。直接用 `file://` 打开时，浏览器安全限制会阻止读取 JSON；请使用 `python3 -m http.server` 服务输出目录。
 
 `quality_report.csv` 和 `quality_report.xlsx` 每个 episode 一行。`quality_findings.jsonl` 和 `episode_issues.csv` 每个具体问题一行。Excel 工作簿用于人工查看和对外分享，包含 summary、episode 状态、具体 findings、问题类型统计和 task 状态统计等 sheet。
 
@@ -215,9 +235,13 @@ HTML dashboard 也会在运行开始时存在，并随实时监控刷新：
 ls outputs/qa_20260611/dashboard.html
 ```
 
+流水线会在质量过滤、状态加载、batch 规划和阶段执行时打印进度。阶段进度会包
+含已耗时、粗略 ETA 和处理速率，避免大型 NAS 运行在发现 episode 后看起来像
+没有反馈。
+
 ## Excel 报告
 
-每次正常导出都会写入：
+安装 `openpyxl` 后，每次正常导出都会写入：
 
 ```text
 <output-dir>/quality_report.xlsx
@@ -239,7 +263,9 @@ python3 QA_Pipeline/scripts/export_excel_report.py \
   --output outputs/qa_20260612_phase1_5/quality_report.xlsx
 ```
 
-该功能需要 `datapipeline-env` 中安装 `openpyxl`。
+该功能需要 `datapipeline-env` 中安装 `openpyxl`。如果正常流水线运行时缺少
+`openpyxl`，runner 会打印 warning，并继续生成 CSV、JSONL、Markdown、SQLite
+和 dashboard。手动导出 Excel 仍需要先安装 `openpyxl`。
 
 ## 状态判定方式
 
@@ -278,7 +304,7 @@ info
 3. 否则任意阶段为 `warning` -> 最终状态为 `warning`。
 4. 否则最终状态为 `pass`。
 
-重要：如果某个 episode 在较早的已完成阶段失败，后续阶段会跳过该 episode。这样可以避免在已经明显不可用的 episode 上浪费计算资源。
+重要：如果某个 episode 在较早的已完成阶段失败，后续阶段会跳过该 episode。这样可以避免在已经明显不可用的 episode 上浪费计算资源。只有在明确希望失败后仍继续运行后续阶段时，才使用 `--continue-after-fail`。
 
 ## 第 1 阶段：结构和元数据
 
@@ -314,6 +340,12 @@ QA_Pipeline/scripts/pipeline/phase1_metadata.py
 | `parent_path_structure` | 路径不像 `<task>/<date>/<operator>/<episode>` | warning |
 | `checksum_manifest_missing` | `.checksum_manifest` 缺失 | warning |
 | `quality_labels_missing` | `quality.labels` 缺失或为空 | warning |
+| `action_modality_singular_name` | 模态/文件夹使用 `action.*` 而不是 `actions.*`，会记录待修复项 | warning |
+| `unknown_modality_detected` | 检测到未知模态名称，会记录供复核 | 默认 pass/info |
+| `task_robot_mismatch` | metadata/name/path 中的机器人来源与 task 文件夹机器人 token 冲突 | 当前第 1 阶段为 fail |
+
+`observation.image.flow_*` 模态在第 1 阶段文件完整性检查中会被主动忽略。它
+是否存在不影响 pass/fail 状态。
 
 ## 第 2 阶段：时长和数量一致性
 
@@ -575,7 +607,18 @@ standstill_trim_summary.md
 ## 推荐的服务器/NAS 工作流
 
 1. 在服务器上以只读方式挂载 NAS。
-2. 从本地仓库根目录将当前仓库部署到服务器：
+2. 长时间任务建议先在服务器上开启持久终端会话：
+
+```bash
+tmux new -s qa_verified
+cd /home/xinzhi/DataPipeline
+source datapipeline-env/bin/activate
+```
+
+这样即使 VS Code SSH 断开或本地电脑冻结，流水线仍会继续运行。使用
+`Ctrl-b d` 退出会话，之后用 `tmux attach -t qa_verified` 恢复查看。
+
+3. 从本地仓库根目录将当前仓库部署到服务器：
 
 ```bash
 rsync -av \
@@ -586,7 +629,7 @@ rsync -av \
   xinzhi@192.168.50.209:~/DataPipeline/
 ```
 
-3. 执行一次 dry-run 发现：
+4. 执行一次 dry-run 发现：
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
@@ -594,7 +637,7 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --dry-run
 ```
 
-4. 运行小规模 smoke test：
+5. 运行小规模 smoke test：
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
@@ -607,13 +650,14 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --workers 3 \
   --batch-size 500 \
   --batch-mode auto \
+  --live-dashboard-interval 5 \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 0.65 \
   --force-rerun \
   --run-id server-smoke-001
 ```
 
-5. 打开 dashboard：
+6. 打开 dashboard：
 
 ```bash
 python3 -m http.server 1234 --directory outputs/server_smoke
@@ -625,8 +669,8 @@ python3 -m http.server 1234 --directory outputs/server_smoke
 http://<server-ip>:1234/dashboard.html
 ```
 
-6. 在运行更大规模测试前，先复核 `fail` 和 `needs_review` episode。
-7. 只有在理解 smoke test 结果后，再运行更大批次。
+7. 在运行更大规模测试前，先复核 `fail` 和 `needs_review` episode。
+8. 只有在理解 smoke test 结果后，再运行更大批次。
 
 ## 实用命令参考
 
@@ -690,7 +734,7 @@ python3 QA_Pipeline/scripts/export_excel_report.py \
 - 在任何清理或隔离步骤前，先复核 `dashboard.html`、`quality_report.xlsx`、`quality_report.csv` 和 `quality_findings.jsonl`。
 - 在本地验证并经过复核前，不要对 NAS 源数据执行裁剪或隔离操作。
 - 输出目录应与源 episode 文件夹分开。
-- 仅在明确想重新计算所选阶段时使用 `--force-rerun`。它会替换当前筛选到的 episode 和阶段的 findings，但不会删除当前筛选条件之外 episode 的历史记录。
+- 仅在明确想重新计算所选阶段时使用 `--force-rerun`。它会替换当前筛选到的 episode 和阶段的 findings；运行开始时也会清理当前 episode 集合之外的旧 episode 记录，避免旧筛选条件污染当前 dashboard。
 - 继续中断运行时，复用相同数据库和输出目录，并省略 `--force-rerun`。
 - 8 核 16GB 服务器不要使用全部核心；先使用 `--workers 2`，确认负载稳定后再谨慎提高。
 - NAS 大日期运行使用 `--batch-size 500` 或 `--batch-size 1000`，避免一次加载全部 episode state。

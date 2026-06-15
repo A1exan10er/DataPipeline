@@ -1,4 +1,4 @@
-"""Generate a static HTML dashboard from QA pipeline SQLite results."""
+"""Generate a live-updating HTML dashboard from QA pipeline SQLite results."""
 
 from __future__ import annotations
 
@@ -24,24 +24,50 @@ SEVERITY_ORDER = ("critical", "major", "minor", "info")
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    generate_dashboard(Path(args.db_path), Path(args.output))
+    generate_dashboard(Path(args.db_path), Path(args.output), args.refresh_interval)
     print(f"Wrote dashboard: {args.output}")
     return 0
 
 
-def generate_dashboard(db_path: Path, output_path: Path) -> None:
-    """Write one self-contained dashboard HTML file."""
+def generate_dashboard(
+    db_path: Path,
+    output_path: Path,
+    refresh_interval_seconds: float = 5.0,
+) -> None:
+    """Write a dashboard HTML shell plus atomically updated JSON data."""
     payload = _dashboard_payload(db_path)
+    payload["refresh_interval_seconds"] = max(1.0, float(refresh_interval_seconds))
     html = _render_html(payload)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html, encoding="utf-8")
+    _write_json_atomic(_dashboard_data_path(output_path), payload)
+    _write_text_atomic(output_path, html)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate a static QA dashboard HTML file.")
+    parser = argparse.ArgumentParser(description="Generate a live-updating QA dashboard HTML file.")
     parser.add_argument("--db-path", required=True, help="QA pipeline SQLite database path.")
     parser.add_argument("--output", required=True, help="Dashboard HTML output path.")
+    parser.add_argument(
+        "--refresh-interval",
+        type=float,
+        default=5.0,
+        help="Browser polling interval in seconds. Default: 5.",
+    )
     return parser.parse_args(argv)
+
+
+def _dashboard_data_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}_data.json")
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    _write_text_atomic(path, json.dumps(payload, ensure_ascii=False))
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _dashboard_payload(db_path: Path) -> dict[str, Any]:
@@ -56,7 +82,7 @@ def _dashboard_payload(db_path: Path) -> dict[str, Any]:
         episode["top_issues"] = _top_issue_names(episode_findings, 4)
 
     return {
-        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "generated_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
         "db_path": str(db_path),
         "episodes": episodes,
         "findings": findings,
@@ -412,10 +438,12 @@ def _render_html(payload: dict[str, Any]) -> str:
       </div>
     </section>
   </main>
+  <script id="dashboardData" type="application/json">{data}</script>
   <script>
-    const DATA = {data};
-    const GENERATED_AT = DATA.generated_at;
-    const AUTO_REFRESH_MS = 30000;
+    let DATA = JSON.parse(document.getElementById("dashboardData").textContent);
+    let GENERATED_AT = DATA.generated_at;
+    const AUTO_REFRESH_MS = Math.max(1000, Number(DATA.refresh_interval_seconds || 5) * 1000);
+    const DATA_URL = "dashboard_data.json";
     const STATUS = ["fail", "needs_review", "warning", "pass", "pending"];
     const STATUS_LABELS = {{fail: "Fail", needs_review: "Needs Review", warning: "Warning", pass: "Pass", pending: "Pending"}};
     const MAX_ROWS = 500;
@@ -458,30 +486,38 @@ def _render_html(payload: dict[str, Any]) -> str:
       const node = document.getElementById("refreshState");
       if (node) node.textContent = text;
     }}
+    function setSelectOptions(id, html) {{
+      const element = document.getElementById(id);
+      const previous = element.value;
+      element.innerHTML = html;
+      if ([...element.options].some(option => option.value === previous)) {{
+        element.value = previous;
+      }}
+    }}
     async function checkForDashboardUpdate() {{
       if (location.protocol === "file:") {{
-        setRefreshState("Auto-update is unavailable from file://. Serve this directory with python3 -m http.server.");
+        setRefreshState("Live update is unavailable from file://. Serve this directory with python3 -m http.server.");
         return;
       }}
       try {{
-        const response = await fetch(location.href, {{cache: "no-store"}});
+        const response = await fetch(DATA_URL, {{cache: "no-store"}});
         if (!response.ok) {{
-          setRefreshState(`Auto-update check failed: HTTP ${{response.status}}`);
+          setRefreshState(`Live update failed: HTTP ${{response.status}}`);
           return;
         }}
-        const html = await response.text();
-        const match = html.match(/"generated_at":\\s*"([^"]+)"/);
-        const latest = match ? match[1] : "";
+        const latestPayload = await response.json();
+        const latest = latestPayload ? latestPayload.generated_at : "";
         const checkedAt = new Date().toLocaleTimeString();
         if (latest && latest !== GENERATED_AT) {{
-          document.open();
-          document.write(html);
-          document.close();
+          DATA = latestPayload;
+          GENERATED_AT = latest;
+          renderAll(false);
+          setRefreshState(`Updated ${{checkedAt}} from dashboard_data.json. Live update on.`);
           return;
         }}
-        setRefreshState(`Auto-update on. Last checked ${{checkedAt}}.`);
+        setRefreshState(`Live update on. Last checked ${{checkedAt}}.`);
       }} catch (error) {{
-        setRefreshState(`Auto-update check failed: ${{error}}`);
+        setRefreshState(`Live update failed: ${{error}}`);
       }}
     }}
     function renderBars(target, entries, total) {{
@@ -499,16 +535,30 @@ def _render_html(payload: dict[str, Any]) -> str:
       renderBars("phaseIssues", Object.entries(DATA.summary.phase_counts), Math.max(1, DATA.summary.issue_count));
     }}
     function initFilters() {{
-      document.getElementById("statusFilter").innerHTML = `<option value="">All Statuses</option>` + STATUS.map(s => `<option value="${{s}}">${{STATUS_LABELS[s]}}</option>`).join("");
-      document.getElementById("taskFilter").innerHTML = optionList([...new Set(DATA.episodes.map(e => e.task))], "All Tasks");
-      document.getElementById("robotFilter").innerHTML = optionList([...new Set(DATA.episodes.map(e => e.robot))], "All Robots");
-      document.getElementById("operatorFilter").innerHTML = optionList([...new Set(DATA.episodes.map(e => e.operator))], "All Operators");
-      document.getElementById("issueStatusFilter").innerHTML = `<option value="">All Statuses</option>` + STATUS.map(s => `<option value="${{s}}">${{STATUS_LABELS[s]}}</option>`).join("");
-      document.getElementById("severityFilter").innerHTML = optionList([...new Set(DATA.findings.map(f => f.severity))], "All Severities");
-      document.getElementById("phaseFilter").innerHTML = optionList([...new Set(DATA.findings.map(f => String(f.phase)))], "All Phases");
-      document.getElementById("checkFilter").innerHTML = optionList([...new Set(DATA.findings.map(f => f.check_name))], "All Checks");
+      refreshFilterOptions(false);
       ["episodeSearch","statusFilter","taskFilter","robotFilter","operatorFilter"].forEach(id => document.getElementById(id).addEventListener("input", renderEpisodes));
       ["issueSearch","issueStatusFilter","severityFilter","phaseFilter","checkFilter"].forEach(id => document.getElementById(id).addEventListener("input", renderIssues));
+    }}
+    function refreshFilterOptions(reset) {{
+      const statusOptions = `<option value="">All Statuses</option>` + STATUS.map(s => `<option value="${{s}}">${{STATUS_LABELS[s]}}</option>`).join("");
+      const issueStatusOptions = statusOptions;
+      const optionUpdates = [
+        ["statusFilter", statusOptions],
+        ["taskFilter", optionList([...new Set(DATA.episodes.map(e => e.task))], "All Tasks")],
+        ["robotFilter", optionList([...new Set(DATA.episodes.map(e => e.robot))], "All Robots")],
+        ["operatorFilter", optionList([...new Set(DATA.episodes.map(e => e.operator))], "All Operators")],
+        ["issueStatusFilter", issueStatusOptions],
+        ["severityFilter", optionList([...new Set(DATA.findings.map(f => f.severity))], "All Severities")],
+        ["phaseFilter", optionList([...new Set(DATA.findings.map(f => String(f.phase)))], "All Phases")],
+        ["checkFilter", optionList([...new Set(DATA.findings.map(f => f.check_name))], "All Checks")],
+      ];
+      optionUpdates.forEach(([id, html]) => {{
+        if (reset) {{
+          document.getElementById(id).innerHTML = html;
+        }} else {{
+          setSelectOptions(id, html);
+        }}
+      }});
     }}
     function renderEpisodes() {{
       const q = document.getElementById("episodeSearch").value.toLowerCase();
@@ -570,13 +620,20 @@ def _render_html(payload: dict[str, Any]) -> str:
         document.getElementById("episodesPanel").classList.add("hidden");
       }});
     }}
+    function renderAll(resetFilters) {{
+      renderMetrics();
+      renderCharts();
+      refreshFilterOptions(resetFilters);
+      renderEpisodes();
+      renderIssues();
+    }}
     renderMetrics();
     renderCharts();
     initFilters();
     initTabs();
     renderEpisodes();
     renderIssues();
-    setRefreshState(`Auto-update on. Checking every ${{AUTO_REFRESH_MS / 1000}}s.`);
+    setRefreshState(`Live update on. Polling dashboard_data.json every ${{AUTO_REFRESH_MS / 1000}}s.`);
     setInterval(checkForDashboardUpdate, AUTO_REFRESH_MS);
   </script>
 </body>

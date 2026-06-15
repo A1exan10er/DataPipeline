@@ -81,7 +81,8 @@ Current important dependencies:
 
 - `opencv-python-headless` for Phase 4 video checks;
 - `scipy` for UMI processing;
-- `openpyxl` for Excel report export;
+- `openpyxl` for Excel report export; QA still completes without it, but
+  `.xlsx` export is skipped;
 - host `ffmpeg` and `ffprobe` for UMI video processing.
 
 Install Python dependencies into the repo virtual environment:
@@ -118,6 +119,16 @@ Phases:
 
 All phases are optional via `--phases`.
 
+By default, the runner reads each episode's `metadata.json` before phase work
+and only processes episodes whose `quality.labels` contains `完全正常`.
+Episodes marked by collectors with other quality labels are skipped to avoid
+wasted checks and server load. Use `--disable-quality-label-filter` for a full
+audit, or `--quality-label` to select another label.
+
+Episode discovery skips hidden directories such as `.fr-*`. They are not
+processed as episodes, but they are reported as `hidden_directory_skipped` in
+live and final reports so temporary NAS/sync folders remain visible.
+
 Run a small local test:
 
 ```bash
@@ -143,6 +154,7 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --workers 3 \
   --batch-size 5000 \
   --batch-mode auto \
+  --live-dashboard-interval 5 \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 1.20 \
   --resource-check-interval 60 \
@@ -167,9 +179,12 @@ group-aware batching so outlier statistics do not run on partial task or
 task+robot groups. If a complete group is larger than `--batch-size`, it runs as
 an oversized complete batch and prints a warning.
 
-Current resume behavior still scans the input root before loading saved states
-from SQLite. On very large NAS roots, rediscovery may take time even when the
-previous run already has records.
+Each run first selects the active episode set from `--roots`, `--date`,
+`--task`, the quality-label filter, and `--max-episodes`, then prunes old
+episode-scoped SQLite rows outside that selection. This prevents stale rows
+from earlier filters from polluting the current dashboard. Resume still scans
+the input root before loading saved states from SQLite, so rediscovery can take
+time on very large NAS roots even when previous records already exist.
 
 ## Resource Guard
 
@@ -224,6 +239,7 @@ quality_report.xlsx
 quality_findings.jsonl
 quality_summary.md
 dashboard.html
+dashboard_data.json
 qa_pipeline.db
 ```
 
@@ -236,6 +252,8 @@ Live monitoring also writes:
   issue_events.jsonl
   episode_issues.csv
   live_summary.md
+  dashboard.html
+  dashboard_data.json
 ```
 
 View live terminal status:
@@ -258,9 +276,12 @@ Then open:
 http://<server-ip>:1234/dashboard.html
 ```
 
-When served over HTTP, `dashboard.html` checks for an updated generated HTML
-file every 30 seconds and refreshes itself automatically. Direct `file://`
-opening cannot auto-update because of browser security limits.
+`dashboard.html` is now a live shell and the data lives beside it in
+`dashboard_data.json`. When served over HTTP, the browser polls that JSON every
+5 seconds by default and updates the page in place, avoiding a blank page during
+auto-refresh. Change the interval with `--live-dashboard-interval`. Direct
+`file://` opening cannot fetch the JSON because of browser security limits, so
+serve the output directory with `python3 -m http.server`.
 
 Generate Excel from an existing DB without rerunning QA:
 
@@ -271,7 +292,9 @@ python3 QA_Pipeline/scripts/export_excel_report.py \
 ```
 
 The Excel workbook contains sheets for summary counts, episodes, exact findings,
-issue counts, and task status counts.
+issue counts, and task status counts. It requires `openpyxl` in the virtual
+environment. If `openpyxl` is missing during a normal run, the pipeline prints a
+warning and still writes CSV, JSONL, Markdown, and dashboard outputs.
 
 ## UMI Processing
 
@@ -319,6 +342,15 @@ standstill_trim_summary.md
 
 When deploying to the server, exclude test samples and generated outputs. The
 server also needs `datapipeline-env` or equivalent dependencies.
+
+For long runs, start the command inside `tmux` or `screen` on the server so a
+VS Code SSH disconnect or local PC freeze does not interrupt the pipeline:
+
+```bash
+tmux new -s qa_verified
+cd /home/xinzhi/DataPipeline
+source datapipeline-env/bin/activate
+```
 
 Example:
 

@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
@@ -28,8 +29,9 @@ from scripts.pipeline import (
 from scripts.generate_dashboard import generate_dashboard
 from scripts.pipeline.qa_core import (
     EpisodeState,
+    Finding,
     PipelineConfigurationError,
-    discover_episodes,
+    discover_episodes_with_report,
     export_findings_jsonl,
     export_excel_report,
     export_quality_report,
@@ -38,6 +40,8 @@ from scripts.pipeline.qa_core import (
     init_db,
     load_episode_state,
     load_metadata,
+    prune_db_to_episode_paths,
+    replace_discovery_findings,
     save_episode_state,
 )
 from scripts.pipeline.resource_guard import ResourceGuard, ResourceGuardError
@@ -46,6 +50,8 @@ from scripts.pipeline.run_monitor import RunMonitor
 
 STATUS_ORDER = ("pass", "fail", "warning", "needs_review")
 FINAL_STATUS_ORDER = ("pass", "warning", "fail", "needs_review")
+PREFLIGHT_PROGRESS_INTERVAL_SECONDS = 5.0
+PREFLIGHT_PROGRESS_INTERVAL_ITEMS = 5000
 
 # To add a new phase:
 # 1. Create scripts/pipeline/phaseN_<name>.py with a run_phase(states, db_path) function.
@@ -71,6 +77,14 @@ PHASE_MODULES = {
 }
 
 
+@dataclass
+class QualityFilterSummary:
+    kept: int
+    skipped: int
+    unreadable_metadata: int
+    skipped_label_counts: Counter[str]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the QA pipeline from the command line."""
     args = _parse_args(argv)
@@ -94,21 +108,49 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_error(str(exc))
             return 1
 
-    episodes = discover_episodes(roots)
-    print(f"Episodes discovered: {len(episodes)}")
+    discovery = discover_episodes_with_report(roots)
+    episodes = discovery.episodes
+    print(f"Episodes discovered: {len(episodes)}", flush=True)
+    if discovery.skipped_hidden_dirs:
+        print(f"Hidden directories skipped: {len(discovery.skipped_hidden_dirs)}", flush=True)
+        for path in discovery.skipped_hidden_dirs[:5]:
+            print(f"  skipped hidden dir: {path}")
+        if len(discovery.skipped_hidden_dirs) > 5:
+            print(f"  ... {len(discovery.skipped_hidden_dirs) - 5} more")
     if args.date:
         episodes = [
             episode_path for episode_path in episodes
             if args.date in str(episode_path)
         ]
-        print(f"After --date filter ({args.date}): {len(episodes)} episodes")
+        print(f"After --date filter ({args.date}): {len(episodes)} episodes", flush=True)
     if args.task:
         task_lower = args.task.lower()
         episodes = [
             episode_path for episode_path in episodes
             if task_lower in str(episode_path).lower()
         ]
-        print(f"After --task filter ({args.task}): {len(episodes)} episodes")
+        print(f"After --task filter ({args.task}): {len(episodes)} episodes", flush=True)
+    quality_filter_summary: QualityFilterSummary | None = None
+    if not args.disable_quality_label_filter:
+        print(
+            f"Applying quality label filter ({args.quality_label}) to {len(episodes)} episodes...",
+            flush=True,
+        )
+        episodes, quality_filter_summary = _filter_by_quality_label(episodes, args.quality_label)
+        print(
+            f"After quality label filter ({args.quality_label}): {len(episodes)} episodes "
+            f"({quality_filter_summary.skipped} skipped)"
+        )
+        if quality_filter_summary.unreadable_metadata:
+            print(
+                "  skipped due to missing/unreadable metadata: "
+                f"{quality_filter_summary.unreadable_metadata}"
+            )
+        for label_summary, count in quality_filter_summary.skipped_label_counts.most_common(5):
+            print(f"  skipped label {label_summary}: {count}")
+        remaining_labels = len(quality_filter_summary.skipped_label_counts) - 5
+        if remaining_labels > 0:
+            print(f"  ... {remaining_labels} more skipped label group(s)")
     if args.max_episodes is not None:
         episodes = episodes[: args.max_episodes]
 
@@ -120,6 +162,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     db_path = Path(args.db_path)
     output_dir = Path(args.output_dir)
     init_db(db_path)
+    prune_db_to_episode_paths(db_path, episodes)
+    discovery_findings = _discovery_findings(discovery.skipped_hidden_dirs)
 
     if args.batch_size is not None:
         return _run_batched(
@@ -131,6 +175,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir,
             effective_workers,
             resource_guard,
+            discovery_findings,
         )
 
     states = _load_or_create_states(episodes, roots, db_path, args.force_rerun)
@@ -149,6 +194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         monitor.start(states)
         print(f"Live run monitor: {monitor.run_dir}")
+    _record_discovery_findings(db_path, discovery_findings, monitor)
     try:
         for phase_number in phases:
             _run_phase_with_retries(
@@ -226,6 +272,19 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "(case-insensitive). Filters after discovery.",
     )
     parser.add_argument(
+        "--quality-label",
+        default="完全正常",
+        help=(
+            "Only process episodes whose metadata quality.labels contains this label. "
+            "Default: 完全正常."
+        ),
+    )
+    parser.add_argument(
+        "--disable-quality-label-filter",
+        action="store_true",
+        help="Process episodes regardless of metadata quality.labels. Use for full audits only.",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -294,8 +353,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--live-dashboard-interval",
         type=float,
-        default=30.0,
-        help="Seconds between live dashboard HTML refreshes. Default: 30.",
+        default=5.0,
+        help="Seconds between live dashboard data refreshes. Default: 5.",
     )
     parser.add_argument(
         "--disable-live-monitor",
@@ -314,6 +373,7 @@ def _run_batched(
     output_dir: Path,
     workers: int,
     resource_guard: ResourceGuard,
+    discovery_findings: list[Finding],
 ) -> int:
     batch_size = max(1, int(args.batch_size))
     total = len(episodes)
@@ -347,6 +407,7 @@ def _run_batched(
         )
         monitor.start([])
         print(f"Live run monitor: {monitor.run_dir}")
+    _record_discovery_findings(db_path, discovery_findings, monitor)
 
     processed = 0
     try:
@@ -378,7 +439,7 @@ def _run_batched(
             processed_before += len(batch)
             if monitor is not None:
                 monitor.refresh(states, force=True)
-            generate_dashboard(db_path, output_dir / "dashboard.html")
+            generate_dashboard(db_path, output_dir / "dashboard.html", args.live_dashboard_interval)
             print(f"Batch {batch_index}/{batch_count} complete. Processed so far: {processed}/{total}")
             del states
             gc.collect()
@@ -440,9 +501,25 @@ def _make_group_aware_batch_plan(
 ) -> BatchPlan:
     if not episodes:
         return BatchPlan("group-aware", [], [])
+    print(
+        f"Planning group-aware batches for {len(episodes)} episodes...",
+        flush=True,
+    )
     grouped: dict[tuple[str, ...], list[Path]] = {}
-    for episode_path in episodes:
+    total = len(episodes)
+    started = time.perf_counter()
+    last_report = started
+    for index, episode_path in enumerate(episodes, start=1):
         grouped.setdefault(_group_key_for_path(roots, episode_path, phases), []).append(episode_path)
+        last_report = _print_prefilter_progress(
+            "group-aware batch planning",
+            index,
+            total,
+            started,
+            last_report,
+            len(grouped),
+            force=index == total,
+        )
 
     batches: list[list[Path]] = []
     current: list[Path] = []
@@ -501,6 +578,148 @@ def _make_resource_guard(args: argparse.Namespace) -> ResourceGuard:
     )
 
 
+def _filter_by_quality_label(
+    episodes: list[Path],
+    required_label: str,
+) -> tuple[list[Path], QualityFilterSummary]:
+    kept = []
+    skipped_label_counts: Counter[str] = Counter()
+    unreadable_metadata = 0
+    total = len(episodes)
+    started = time.perf_counter()
+    last_report = started
+    for index, episode_path in enumerate(episodes, start=1):
+        metadata, metadata_findings = load_metadata(episode_path)
+        if metadata_findings:
+            unreadable_metadata += 1
+            skipped_label_counts["(metadata_unreadable)"] += 1
+            last_report = _print_prefilter_progress(
+                "quality label filter",
+                index,
+                total,
+                started,
+                last_report,
+                len(kept),
+                force=index == total,
+            )
+            continue
+        labels = _quality_labels(metadata)
+        if required_label in labels:
+            kept.append(episode_path)
+        else:
+            skipped_label_counts[_label_summary(labels)] += 1
+        last_report = _print_prefilter_progress(
+            "quality label filter",
+            index,
+            total,
+            started,
+            last_report,
+            len(kept),
+            force=index == total,
+        )
+    return kept, QualityFilterSummary(
+        kept=len(kept),
+        skipped=len(episodes) - len(kept),
+        unreadable_metadata=unreadable_metadata,
+        skipped_label_counts=skipped_label_counts,
+    )
+
+
+def _quality_labels(metadata: dict) -> list[str]:
+    quality = metadata.get("quality")
+    if not isinstance(quality, dict):
+        return []
+    labels = quality.get("labels")
+    if not isinstance(labels, list):
+        return []
+    return [label for label in labels if isinstance(label, str)]
+
+
+def _label_summary(labels: list[str]) -> str:
+    if not labels:
+        return "(missing_or_empty_quality_labels)"
+    return "|".join(labels)
+
+
+def _print_prefilter_progress(
+    label: str,
+    current: int,
+    total: int,
+    started: float,
+    last_report: float,
+    kept: int | None = None,
+    force: bool = False,
+) -> float:
+    now = time.perf_counter()
+    if (
+        not force
+        and current % PREFLIGHT_PROGRESS_INTERVAL_ITEMS != 0
+        and now - last_report < PREFLIGHT_PROGRESS_INTERVAL_SECONDS
+    ):
+        return last_report
+    elapsed = max(0.001, now - started)
+    rate = current / elapsed
+    eta = _eta_seconds(current, total, elapsed)
+    percent = (current / total * 100.0) if total else 100.0
+    kept_text = f", kept={kept}" if kept is not None else ""
+    print(
+        f"  {label}: {current}/{total} "
+        f"({percent:.1f}%, {rate:.1f}/s, elapsed={_format_duration(elapsed)}, "
+        f"eta={_format_duration(eta)}{kept_text})",
+        flush=True,
+    )
+    return now
+
+
+def _eta_seconds(current: int, total: int, elapsed_seconds: float) -> float:
+    if current <= 0 or total <= 0 or current >= total:
+        return 0.0
+    rate = current / max(0.001, elapsed_seconds)
+    return max(0.0, (total - current) / rate)
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def _discovery_findings(skipped_hidden_dirs: list[Path]) -> list[Finding]:
+    findings = []
+    for hidden_dir in skipped_hidden_dirs:
+        findings.append(
+            Finding(
+                episode_path=str(hidden_dir),
+                phase=0,
+                check_name="hidden_directory_skipped",
+                severity="info",
+                status="warning",
+                message="Hidden directory skipped during episode discovery",
+                details={
+                    "path": str(hidden_dir),
+                    "reason": "Directory name starts with '.' and is not treated as source episode data.",
+                    "effect": "The directory and all nested episodes/files were excluded from QA processing.",
+                },
+            )
+        )
+    return findings
+
+
+def _record_discovery_findings(
+    db_path: Path,
+    findings: list[Finding],
+    monitor: RunMonitor | None,
+) -> None:
+    replace_discovery_findings(db_path, findings)
+    if monitor is not None:
+        monitor.refresh([], force=True)
+
+
 def _parse_phases(value: str | None) -> list[int] | None:
     if value is None:
         return sorted(PHASE_RUNNERS)
@@ -534,6 +753,7 @@ def _load_or_create_states(
     print("Loading episode states...")
     states = []
     total = len(episodes)
+    started = time.perf_counter()
     for index, episode_path in enumerate(episodes):
         state = load_episode_state(db_path, episode_path)
         if state is None:
@@ -542,7 +762,16 @@ def _load_or_create_states(
             state.phases_completed = []
         states.append(state)
         if (index + 1) % 500 == 0 or (index + 1) == total:
-            print(f"  {index + 1}/{total} states loaded")
+            current = index + 1
+            elapsed = max(0.001, time.perf_counter() - started)
+            rate = current / elapsed
+            eta = _eta_seconds(current, total, elapsed)
+            print(
+                f"  {current}/{total} states loaded "
+                f"({rate:.1f}/s, elapsed={_format_duration(elapsed)}, "
+                f"eta={_format_duration(eta)})",
+                flush=True,
+            )
     return states
 
 
@@ -670,11 +899,25 @@ def _filter_runnable_states(
     return runnable
 
 
-def _print_progress(current: int, total: int, width: int = 40) -> None:
+def _print_progress(
+    current: int,
+    total: int,
+    started: float | None = None,
+    width: int = 40,
+) -> None:
     """Print an in-place progress bar like: [####----] 10/263"""
     filled = int(width * current / total) if total > 0 else 0
     bar = "#" * filled + "-" * (width - filled)
-    print(f"\r  [{bar}] {current}/{total}", end="", flush=True)
+    timing = ""
+    if started is not None and current > 0:
+        elapsed = max(0.001, time.perf_counter() - started)
+        rate = current / elapsed
+        eta = _eta_seconds(current, total, elapsed)
+        timing = (
+            f" {rate:.1f}/s elapsed={_format_duration(elapsed)} "
+            f"eta={_format_duration(eta)}"
+        )
+    print(f"\r  [{bar}] {current}/{total}{timing}", end="", flush=True)
 
 
 def _make_progress_callback(
@@ -684,8 +927,10 @@ def _make_progress_callback(
     states: list[EpisodeState],
     resource_guard: ResourceGuard,
 ) -> Callable[[int, int], None]:
+    started = time.perf_counter()
+
     def callback(current: int, _total: int) -> None:
-        _print_progress(current, total)
+        _print_progress(current, total, started)
         if monitor is not None:
             monitor.progress(phase_number, current, total, states)
         resource_guard.wait_if_needed(f"Phase {phase_number} progress {current}/{total}")
@@ -730,8 +975,14 @@ def _export_reports(db_path: Path, output_dir: Path) -> list[Path]:
     export_findings_jsonl(db_path, findings_jsonl)
     export_summary_md(db_path, summary_md)
     generate_dashboard(db_path, dashboard_html)
-    export_excel_report(db_path, excel_report)
-    return [quality_report, findings_jsonl, summary_md, dashboard_html, excel_report]
+    report_paths = [quality_report, findings_jsonl, summary_md, dashboard_html]
+    try:
+        export_excel_report(db_path, excel_report)
+    except PipelineConfigurationError as exc:
+        print(f"Warning: skipped Excel report export: {exc}")
+    else:
+        report_paths.append(excel_report)
+    return report_paths
 
 
 def _print_final_summary(states: list[EpisodeState], output_dir: Path) -> None:

@@ -53,6 +53,14 @@ class EpisodeState:
     last_updated: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
+@dataclass
+class DiscoveryResult:
+    """Episode discovery output plus skipped paths that should be reported."""
+
+    episodes: list[Path]
+    skipped_hidden_dirs: list[Path] = field(default_factory=list)
+
+
 def init_db(db_path: Path) -> None:
     """Create the SQLite database and required tables if they do not exist."""
     db_path = Path(db_path)
@@ -230,13 +238,73 @@ def load_all_states(db_path: Path) -> list[EpisodeState]:
 
 
 def discover_episodes(roots: list[Path]) -> list[Path]:
-    """Discover episode directories below roots, skipping _quarantine trees."""
+    """Discover episode directories below roots, skipping ignored trees."""
+    return discover_episodes_with_report(roots).episodes
+
+
+def discover_episodes_with_report(roots: list[Path]) -> DiscoveryResult:
+    """Discover episode directories and report hidden directories that were skipped."""
     episodes: set[str] = set()
+    skipped_hidden_dirs: set[str] = set()
     for root in roots:
         root_path = Path(root)
         if root_path.is_dir():
-            _discover_under_root(root_path, episodes)
-    return [Path(path) for path in sorted(episodes)]
+            _discover_under_root(root_path, episodes, skipped_hidden_dirs)
+    return DiscoveryResult(
+        episodes=[Path(path) for path in sorted(episodes)],
+        skipped_hidden_dirs=[Path(path) for path in sorted(skipped_hidden_dirs)],
+    )
+
+
+def replace_discovery_findings(db_path: Path, findings: list[Finding]) -> None:
+    """Replace preflight/discovery findings that are not tied to real episodes."""
+    init_db(db_path)
+    insert_rows = [_finding_insert_row(finding) for finding in findings]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            DELETE FROM findings
+            WHERE phase = 0 AND check_name = ?
+            """,
+            ("hidden_directory_skipped",),
+        )
+        if insert_rows:
+            conn.executemany(
+                """
+                INSERT INTO findings (
+                    episode_path, phase, check_name, severity, status, message, details
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                insert_rows,
+            )
+
+
+def prune_db_to_episode_paths(db_path: Path, episode_paths: list[Path]) -> None:
+    """Remove episode-scoped rows for episodes outside the current run selection."""
+    init_db(db_path)
+    selected_paths = [(str(path),) for path in episode_paths]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TEMP TABLE selected_episode_paths (episode_path TEXT PRIMARY KEY)")
+        if selected_paths:
+            conn.executemany(
+                "INSERT INTO selected_episode_paths (episode_path) VALUES (?)",
+                selected_paths,
+            )
+        conn.execute(
+            """
+            DELETE FROM findings
+            WHERE phase != 0
+              AND episode_path NOT IN (SELECT episode_path FROM selected_episode_paths)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM episodes
+            WHERE episode_path NOT IN (SELECT episode_path FROM selected_episode_paths)
+            """
+        )
+        conn.execute("DROP TABLE selected_episode_paths")
 
 
 def load_metadata(episode_path: Path) -> tuple[dict, list[Finding]]:
@@ -533,7 +601,7 @@ def _finding_insert_row(finding: Finding) -> tuple:
     )
 
 
-def _discover_under_root(root: Path, episodes: set[str]) -> None:
+def _discover_under_root(root: Path, episodes: set[str], skipped_hidden_dirs: set[str]) -> None:
     stack = [root]
     while stack:
         current = stack.pop()
@@ -546,7 +614,13 @@ def _discover_under_root(root: Path, episodes: set[str]) -> None:
             children = [child for child in current.iterdir() if child.is_dir()]
         except OSError:
             continue
-        stack.extend(child for child in children if child.name != "_quarantine")
+        for child in children:
+            if child.name == "_quarantine":
+                continue
+            if child.name.startswith("."):
+                skipped_hidden_dirs.add(str(child))
+                continue
+            stack.append(child)
 
 
 def _metadata_finding(
