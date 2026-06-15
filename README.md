@@ -1,342 +1,332 @@
 # DataPipeline
 
-This folder collects robot data examples, NAS sample datasets, reference
-documents, and small Python utilities for checking and maintaining data
-collection episodes.
+<p align="right">
+  <a href="README.md"><kbd>中文</kbd></a>
+  <a href="README_EN.md"><kbd>English</kbd></a>
+</p>
 
-The data comes from real robots and UMI devices. UMI is a human-operated device
-that mimics robot movement while recording synchronized movement and image data.
-These datasets are intended for robot-learning workflows such as VTLA, VLA,
-world models, reinforcement learning, imitation learning, and related fields.
+DataPipeline 包含用于验证机器人和 UMI episode 数据集的 QA Pipeline 以及配套工具。当前主流程是“先报告、后处理”：流水线会对 episode 分类并生成结构化报告，但主 QA 运行过程中不会删除源数据、移动 episode，也不会裁剪视频。
 
-This is not a packaged application. The scripts are intended to be run directly
-against a data root such as this folder, a NAS-mounted dataset, or a single
-episode.
+更详细的阶段规则和命令示例见：
 
-## Top-Level Contents
+- `QA_PIPELINE_USER_GUIDE_ZH.md`
+- `QA_PIPELINE_USER_GUIDE.md`
+
+## 仓库结构
 
 ```text
 DataPipeline/
-  NAS_Sample_Data/       Sample task folders copied from NAS
-  Test_Data/             Smaller local test episodes
+  QA_Pipeline/            主多阶段 QA Pipeline
+  DataProcessUMI/         UMI 验证、预处理和 world-frame 导出
+  UMI_Data_Validation/    额外的 UMI 验证/原型代码
+  Documents/              参考文档和 PDF
+  Werkzeuge/              额外分析工具和文档
   Test_Folder_For_DataPipeline/
-                         Larger local performance-test episode data
-  QA_Pipeline/           Main multi-phase data quality checking pipeline
-  UMI_Data_Validation/   UMI EEF-pose inverse-kinematics validation code
-  Documents/             Data format reference PDFs
-  Werkzeuge/             Extra documentation and data quality tools
-  *.py                   Maintenance scripts
-  run_cleanup.sh         Cron-friendly cleanup wrapper
+                          本地测试样本；部署到服务器时应排除
+  datapipeline-env/       本地/服务器 Python 虚拟环境
 ```
 
-## Expected Data Layout
+运行生成的结果通常写入 `outputs/`，不应提交到 Git。
 
-The scripts assume data is organized in this shape:
+## Episode 目录结构
+
+扫描器会查找名称以 `episode_` 开头的文件夹。
+
+旧版路径：
 
 ```text
-<root>/
-  <task>/
-    <date>/
-      <operator>/
-        episode_0001/
-          metadata.json
-          meta/episode.json
-          observation.state.joint_position/data.csv
-          observation.state.joint_velocity/data.csv
-          observation.state.eef_pose/data.csv
-          observation.state.gripper/data.csv
-          observation.image.<camera>/video.mp4
-          observation.image.<camera>/timestamps.csv
-          actions.joint_position/data.csv
+<root>/<task>/<date>/<operator>/episode_...
 ```
 
-Episode folders have two observed naming styles:
+新版 robot/collector 路径：
 
 ```text
-episode_0029
-episode_0085_20260428-114939_wangyong_arx5_none
+<root>/<task>/<robot_type>/<collector_id>/<date>/<operator>/episode_...
 ```
 
-The extended form usually records episode index, collection timestamp, operator,
-robot type, and controller/source.
+典型 episode 内容：
 
-## NAS Sample Data
+```text
+episode_0001/
+  metadata.json
+  observation.state.joint_position/data.csv
+  actions.joint_position/data.csv
+  observation.image.<camera>/timestamps.csv
+  observation.image.<camera>/video.mp4
+```
 
-`NAS_Sample_Data/` contains task folders copied from NAS. These are collected
-demonstration datasets from real robots and UMI devices. Each task folder is
-organized by collection date, operator, and episode.
+机器人类型优先从 `metadata.json` 推断，其次从 episode 名称推断，必要时再从路径结构推断。UMI episode 可能只有类似 `episode_0094` 的简单名称，因此 metadata 和路径上下文都很重要。
 
-Current task folders include:
+## 环境设置
 
-- `Add_water_to_the_test_tube_with_a_dropper_then_put_it_back_on_the_rack_UMI`
-- `Bind_and_secure_the_socks_UMI`
-- `Folding_trousers_ARX`
-- `assemble_bactory_umi`
-- `assemble_the_battery`
-- `classify_the_battery_ARX`
-- `put_cups_in_line_flexiv`
-- `stack_3D_printed_waste_parts_UMI`
-
-The sample includes different robot and control sources, visible in folder names
-and metadata, such as UMI, ARX, Flexiv, UR, GELLO, Spacemouse, and direct robot
-control. Typical episode contents include:
-
-- `metadata.json` and `meta/episode.json`
-- action streams such as `actions.joint_position/data.csv` or
-  `actions.eef_pose/data.csv`
-- state streams such as `observation.state.joint_position/data.csv`,
-  `observation.state.eef_pose/data.csv`, `observation.state.gripper/data.csv`,
-  and tactile state CSVs
-- camera streams such as `observation.image.<camera>/video.mp4` and
-  `timestamps.csv`
-- optional raw files, checksum manifests, optical-flow videos, and timing logs
-
-More detailed NAS notes are maintained in
-`Werkzeuge/docs/NAS_SAMPLE_DATA_STRUCTURE.md`.
-
-## Main Scripts
-
-### `clean_invalid_episodes.py`
-
-Scans a data root and moves invalid episode folders into a quarantine directory.
-An invalid episode folder is any fourth-level folder that does not match the
-`episode_<digits>` naming pattern.
-
-Important: this rule does not currently accept extended NAS episode names such
-as `episode_0085_20260428-114939_wangyong_arx5_none`. Do not run this cleanup
-script against `NAS_Sample_Data/` unless the validation rule is updated or you
-intend to quarantine extended-format folders.
-
-Preview changes without moving anything:
+从仓库根目录激活虚拟环境：
 
 ```bash
-python3 clean_invalid_episodes.py --root ./Test_Data --quarantine ./quarantine_data --dry-run
+source datapipeline-env/bin/activate
 ```
 
-Run the cleanup:
+主要 Python 依赖列在：
+
+```text
+QA_Pipeline/requirements.txt
+```
+
+当前重要依赖：
+
+- `opencv-python-headless`：第 4 阶段视频检查；
+- `scipy`：UMI 处理；
+- `openpyxl`：Excel 报告导出；
+- 主机上的 `ffmpeg` 和 `ffprobe`：UMI 视频处理。
+
+将 Python 依赖安装到仓库虚拟环境：
 
 ```bash
-python3 clean_invalid_episodes.py --root ./Test_Data --quarantine ./quarantine_data --log cleanup.log
+python3 -m pip install -r QA_Pipeline/requirements.txt
 ```
 
-The script preserves the relative path below the root when moving invalid data
-to quarantine.
-
-### `run_cleanup.sh`
-
-Shell wrapper for `clean_invalid_episodes.py`, intended for cron scheduling. By
-default it scans this repository folder, writes Python logs to
-`cleanup_python.log`, and appends wrapper output to `cleanup_cron.log`.
-
-Run manually:
+如果需要运行第 6 阶段 UMI 处理，Ubuntu 服务器还需要安装 FFmpeg：
 
 ```bash
-./run_cleanup.sh
+sudo apt update
+sudo apt install -y ffmpeg
 ```
 
-For server or NAS deployment, edit the `--root` and `--quarantine` arguments in
-the script.
+## QA Pipeline
 
-### `annotate_standstill.py`
+入口脚本：
 
-Detects long robot standstill periods from joint-position CSV data and annotates
-all CSV files in each affected episode with an `is_standstill` column.
-
-Detection uses `observation.state.joint_position/data.csv` by default. Movement
-is detected by comparing numeric non-gripper columns between consecutive rows.
-Only standstill time beyond the built-in 4000 ms buffer is marked as
-`is_standstill=True`.
-
-Scan a data root:
-
-```bash
-python3 annotate_standstill.py ./Test_Data --threshold 0.05
+```text
+QA_Pipeline/scripts/run_pipeline.py
 ```
 
-Process one episode:
+阶段：
 
-```bash
-python3 annotate_standstill.py ./Test_Data/20260421/test_data/episode_0029 --threshold 0.05
+```text
+1  结构、metadata、必需文件、标签、机器人/task 不匹配检查
+2  时长、帧数、行数、task 级时长离群检查
+3  时间戳、FPS、丢帧、task+robot 级时间离群检查
+4  视频健康：可打开性、视频属性、黑/白/冻结采样帧
+5  机器人状态/action 合理性和静止检查
+6  UMI 专用验证、预处理和 world-frame 导出
 ```
 
-Inspect one CSV and print detailed stop ranges:
+所有阶段都可以通过 `--phases` 选择性运行。
 
-```bash
-python3 annotate_standstill.py ./Test_Data/20260421/test_data/episode_0029/observation.state.joint_position/data.csv --threshold 0.05 --show-stop-log
-```
-
-The script rewrites CSV files in place. Existing `is_standstill` columns are
-updated; missing columns are appended.
-
-### `QA_Pipeline/scripts/plan_standstill_trim.py`
-
-Creates a read-only trim plan for abnormal standstill at the beginning and end
-of episodes. It does not rewrite CSVs, cut videos, or move data. Reports are
-written as CSV, JSONL, and Markdown.
-
-Run a parallel sample scan:
-
-```bash
-python3 QA_Pipeline/scripts/plan_standstill_trim.py --roots NAS_Sample_Data --output-dir /tmp/standstill_trim_nas_sample --workers 8 --progress
-```
-
-The thresholds and source modality order are configured in
-`QA_Pipeline/configs/quality_rules.json` under `standstill_trim`.
-
-### `QA_Pipeline/scripts/run_pipeline.py`
-
-Runs the multi-phase QA pipeline. By default it now creates a live run directory
-under `<output-dir>/runs/<run-id>/` while processing.
+运行一个小规模本地测试：
 
 ```bash
 python3 QA_Pipeline/scripts/run_pipeline.py \
-  --roots Test_Data \
-  --db-path /tmp/qa_pipeline/qa.db \
-  --output-dir /tmp/qa_pipeline/out \
+  --roots Test_Folder_For_DataPipeline \
+  --db-path outputs/test_run/qa_pipeline.db \
+  --output-dir outputs/test_run \
   --phases 1,2,3 \
-  --workers 8 \
-  --run-id sample-run
+  --max-episodes 10 \
+  --workers 2 \
+  --force-rerun
 ```
 
-Useful live files:
-
-- `run_status.json`: current phase, progress, issue counts, latest issue.
-- `phase_status.jsonl`: phase start/end and progress snapshots.
-- `issue_events.jsonl`: append-only exact issue records.
-- `episode_issues.csv`: CSV issue ledger for the run.
-- `live_summary.md`: human-readable live summary.
-
-Final reports include `dashboard.html`, a static dashboard showing episode
-status counts, issue breakdowns, episode filters, and exact issue details. Open
-it directly in a browser from the output directory or the run-specific
-`final/` directory.
-
-To disable live monitoring, pass `--disable-live-monitor`.
-
-### `correct_teleop_folders.py`
-
-Finds folders named `actions.joint_position` whose `data.csv` actually contains
-TCP end-effector pose columns such as `tcp.x` through `tcp.r6`, then renames the
-folder to `actions.eef_pose`.
-
-Run from the repository root:
+运行保守的服务器日期扫描：
 
 ```bash
-python3 correct_teleop_folders.py
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --date 20260612 \
+  --db-path outputs/qa_20260612_phase1_5/qa_pipeline.db \
+  --output-dir outputs/qa_20260612_phase1_5 \
+  --phases 1,2,3,4,5 \
+  --workers 3 \
+  --batch-size 5000 \
+  --batch-mode auto \
+  --min-free-mem-gb 4.0 \
+  --max-load-ratio 1.20 \
+  --resource-check-interval 60 \
+  --resource-max-wait-seconds 15 \
+  --resource-error-retries 5 \
+  --resource-retry-delay-seconds 20 \
+  --force-rerun
 ```
 
-The script skips an episode if `actions.eef_pose` already exists to avoid
-overwriting data.
+如果要继续一个中断的运行，复用相同的 DB/output 路径，并省略 `--force-rerun`。Episode 状态会增量保存，因此加载到已有状态后，已完成阶段会被跳过。
 
-### `Werkzeuge/check_episode_durations.py`
+## Batch 和 Resume
 
-Scans episode `metadata.json` files and reports episode durations. It filters to
-episodes labeled `完全正常`, prints aggregate duration statistics, and writes an
-unusual-duration report by default.
+`--batch-size` 限制每次加载到内存中的 episode state 数量。每个 batch 结束后，流水线会释放该 batch 的 state 列表并执行 Python 垃圾回收。
 
-Run against the NAS sample:
+推荐使用 `--batch-mode auto`。当选择第 2 或第 3 阶段时，它会使用 group-aware batching，避免在不完整 task 或 task+robot 分组上计算离群统计。如果某个完整分组本身大于 `--batch-size`，该分组会作为一个超出 batch size 的完整 batch 运行，并打印 warning。
+
+当前 resume 逻辑仍会先扫描输入 root，然后再从 SQLite 加载已保存状态。在很大的 NAS root 上，即使之前已有记录，重新发现 episode 仍可能需要时间。
+
+## Resource Guard
+
+Resource guard 默认启用。它可以：
+
+- 将请求的 worker 数降低到安全值；
+- 在负载或内存不安全时暂停；
+- resource-guard stop 后重试当前阶段。
+
+常用选项：
+
+```text
+--min-free-mem-gb
+--max-load-ratio
+--resource-check-interval
+--resource-max-wait-seconds
+--resource-error-retries
+--resource-retry-delay-seconds
+```
+
+第 4 阶段通常是 NAS 上最慢的阶段，因为它会打开很多 MP4 文件并进行随机 seek。如果第 4 阶段导致高负载，可以单独运行并减少 worker：
 
 ```bash
-python3 Werkzeuge/check_episode_durations.py ./NAS_Sample_Data --summary-only
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --date 20260612 \
+  --db-path outputs/qa_20260612_phase1_5/qa_pipeline.db \
+  --output-dir outputs/qa_20260612_phase1_5 \
+  --phases 4,5 \
+  --workers 2 \
+  --batch-size 500 \
+  --batch-mode fixed \
+  --min-free-mem-gb 4.0 \
+  --max-load-ratio 1.20 \
+  --resource-check-interval 60 \
+  --resource-max-wait-seconds 15 \
+  --resource-error-retries 5 \
+  --resource-retry-delay-seconds 20
 ```
 
-Write a full CSV duration report:
+从中断处继续运行时不要添加 `--force-rerun`。
+
+## 报告和 Dashboard
+
+常规输出：
+
+```text
+quality_report.csv
+quality_report.xlsx
+quality_findings.jsonl
+quality_summary.md
+dashboard.html
+qa_pipeline.db
+```
+
+实时监控还会写入：
+
+```text
+<output-dir>/runs/<run-id>/
+  run_status.json
+  phase_status.jsonl
+  issue_events.jsonl
+  episode_issues.csv
+  live_summary.md
+```
+
+查看终端实时状态：
 
 ```bash
-python3 Werkzeuge/check_episode_durations.py ./NAS_Sample_Data --csv duration_report.csv
+python3 QA_Pipeline/scripts/qa_status.py \
+  --output-dir outputs/qa_20260612_phase1_5 \
+  --watch
 ```
 
-Override unusual-duration thresholds:
+启动 dashboard 服务：
 
 ```bash
-python3 Werkzeuge/check_episode_durations.py ./NAS_Sample_Data --min-seconds 5 --max-seconds 300
+python3 -m http.server 1234 --directory outputs/qa_20260612_phase1_5
 ```
 
-By default, unusual duration reports are written under the scanned root as:
+然后打开：
 
-- `unusual_episode_durations.csv`
-- `unusual_episode_durations.txt`
-- `unusual_episode_durations_operator_stats.csv`
+```text
+http://<server-ip>:1234/dashboard.html
+```
 
-### `Werkzeuge/analyze_motion_abnormalities.py`
+通过 HTTP 访问时，`dashboard.html` 会每 30 秒检查是否有新生成的 HTML 文件，并自动刷新自身。直接用 `file://` 打开时，浏览器安全限制会阻止自动更新。
 
-Read-only prototype checker for abnormal robot and UMI motion values. It scans
-motion CSVs and reports candidate issues such as EEF pose jumps, derived EEF
-velocity spikes, reported joint velocity spikes, timestamp problems, and
-non-numeric values.
-
-Run a bounded sample analysis:
+从已有 DB 生成 Excel，不需要重新运行 QA：
 
 ```bash
-python3 Werkzeuge/analyze_motion_abnormalities.py ./NAS_Sample_Data \
-  --output /tmp/motion_abnormality_report \
-  --max-episodes-per-task 8
+python3 QA_Pipeline/scripts/export_excel_report.py \
+  --db-path outputs/qa_20260612_phase1_5/qa_pipeline.db \
+  --output outputs/qa_20260612_phase1_5/quality_report.xlsx
 ```
 
-The current prototype is for analysis and threshold calibration only. Its
-`fail_candidate` output should not be used to move data until thresholds are
-reviewed and approved.
+Excel 工作簿包含 summary、episodes、exact findings、issue counts 和 task status counts 等 sheet。
 
-## Included Data And Documents
+## UMI 处理
 
-`Test_Data/` contains example robot episodes from `20260421/test_data`, including
-CSV state/action streams, video files, timestamps, metadata, and checksum
-manifests.
+第 6 阶段将 `DataProcessUMI` 集成进 QA Pipeline。选择方式：
 
-`Documents/` contains reference PDFs:
+```bash
+--phases 6
+```
 
-- `Data.pdf`
-- `数据格式.pdf`
+UMI 检测会使用 metadata 中的 robot 值、episode 名称中的 robot token，以及路径上下文。非 UMI episode 会被跳过，并产生 pass/info finding。
 
-`Werkzeuge/docs/` contains supporting documentation:
+第 6 阶段不运行 IK。它执行 UMI raw-data assessment、trajectory preprocessing 和 world-frame export。UMI 处理可能较慢，因为它可能需要打开视频、复制/转换 episode 文件夹，并使用 FFmpeg。
 
-- `NAS_SAMPLE_DATA_STRUCTURE.md`
-- `DATA_QUALITY_AUTOMATION_PLAN.md`
-- `DATA_QUALITY_AUTOMATION_PLAN_ZH.md`
-- `MOTION_ABNORMALITY_CHECKS.md`
+第 6 阶段默认输出目录：
 
-`IMPLEMENTATION_PLAN.md` tracks the planned safety-first NAS data quality
-pipeline, including phases, safety gates, abnormal-value checks, quarantine
-design, and current progress.
+```text
+outputs/umi_processed/
+```
 
-`QA_PIPELINE_USER_GUIDE.md` explains how to run the QA pipeline, how phase and
-final statuses are decided, how each phase separates pass and not-pass cases,
-and how to read the reports and dashboard.
+## 静止裁剪规划器
 
-`PIPELINE_INTEGRATION_PLAN.md` explains how the new `Test_Folder_For_DataPipeline`,
-`QA_Pipeline`, and `UMI_Data_Validation` folders should be used together to build
-the full NAS-scale QA and quarantine workflow.
+静止裁剪规划器与主 phase runner 分离。它只生成报告，不裁剪视频，也不重写 CSV。
 
-`DATA_QUALITY_STEPS_2_3_GAP_ANALYSIS.md` compares the current scripts against
-`Documents/数据质检.pdf` Step 2 and Step 3 requirements and lists the required
-fixes.
+```bash
+python3 QA_Pipeline/scripts/plan_standstill_trim.py \
+  --roots Test_Folder_For_DataPipeline \
+  --output-dir outputs/standstill_trim_test \
+  --workers 3 \
+  --progress
+```
 
-`QA_Pipeline/configs/quality_rules.json` is the central QA threshold config. For
-example, Step 2 video/action length mismatch defaults to `3` frames or timestamp
-rows, meaning an episode is marked unusable in the reports when an image
-timestamp stream differs from the primary action stream by more than three rows.
-The same config controls abnormal-FPS loss (`10%` by default) and hard
-frame-drop thresholds: normal image videos default to `15%`, tactile videos
-default to `20%`, and any image stream with `25` consecutive dropped frames is
-marked unusable.
+输出：
 
-## Dependencies
+```text
+standstill_trim_plan.csv
+standstill_trim_plan.jsonl
+standstill_trim_summary.md
+```
 
-The active scripts use only Python standard-library modules. Python 3.10 or
-newer is recommended because the folder contains a Python 3.10 virtual
-environment (`datapipeline-env/`).
+## 服务器部署说明
 
-No `requirements.txt` or packaging metadata is currently present.
+部署到服务器时，应排除测试样本和生成输出。服务器也需要 `datapipeline-env` 或等价依赖环境。
 
-## Operational Notes
+示例：
 
-- Run cleanup in `--dry-run` mode first when targeting production or NAS data.
-- Do not run `clean_invalid_episodes.py` on NAS data with extended episode names
-  until its episode-name regex is updated.
-- `annotate_standstill.py` modifies CSV files in place, so use it on copied data
-  first if the annotations need validation.
-- The scripts temporarily relax file or directory permissions where needed, then
-  attempt to restore the original modes. This is intended to support read-only
-  or NAS-style dataset folders.
-- Log files such as `cleanup.log`, `cleanup_python.log`, and
-  `cleanup_cron.log` are generated by cleanup runs.
+```bash
+rsync -azv \
+  --exclude '.git/' \
+  --exclude '.vscode/' \
+  --exclude 'Test_Data/' \
+  --exclude 'NAS_Sample_Data/' \
+  --exclude 'Test_Folder_For_DataPipeline/' \
+  --exclude 'outputs/' \
+  --exclude 'qa_feature_test/' \
+  --exclude 'qa_umi_test/' \
+  ./ \
+  xinzhi@192.168.50.209:~/DataPipeline/
+```
+
+## 旧版工具
+
+仓库中仍保留一些独立旧工具：
+
+- `clean_invalid_episodes.py`
+- `run_cleanup.sh`
+- `annotate_standstill.py`
+- `correct_teleop_folders.py`
+- `Werkzeuge/` 下的工具
+
+这些工具应视为独立工具。部分工具会原地修改文件或移动文件夹，因此在生产数据上运行前，应先使用 dry-run 或复制数据后验证。
+
+## 安全规则
+
+- QA Pipeline 本身是 report-first，不修改源 episode。
+- 仅在明确想重新计算所选阶段时使用 `--force-rerun`。
+- 输出目录应与源 episode 文件夹分离。
+- 在任何 cleanup、quarantine 或删除步骤前，先复核 `dashboard.html`、`quality_report.xlsx`、`quality_report.csv` 和 `quality_findings.jsonl`。
+- 共享服务器上不要占满所有 CPU 核心；先保守设置 worker，再根据负载和内存情况调整。
