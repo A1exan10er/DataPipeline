@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""One-click data pipeline: assessment -> preprocess -> transform.
+"""One-click data pipeline: assessment -> preprocess -> transform [-> executability].
 
-Each discovered episode is streamed through all three stages end to end before
-the next episode is started -- the first episode reaches ``transform`` without
-waiting for the rest of the input to be assessed (every stage now runs
-in-process per episode, so there is no batch barrier between stages). This
-produces a single, clean output tree:
+Each discovered episode is streamed through all enabled stages end to end before
+the next episode is started -- the first episode reaches ``transform`` (and the
+optional executability stage) without waiting for the rest of the input to be
+assessed. Stages run in-process per episode, so there is no batch barrier
+between stages. This produces a single, clean output tree:
 
     <output-root>/
       data/                                # final usable data only
@@ -14,6 +14,7 @@ produces a single, clean output tree:
       report/                              # one report per episode + a global one
         <class>/
           episode_XXXX.json                # combined: assessment + smoothing + transform
+          episode_XXXX/executability/      # optional IK/executability outputs
         pipeline_report.json               # global run summary
       .work/                               # intermediates (removed unless --keep-intermediate)
 
@@ -30,15 +31,21 @@ Stages
 3. **transform** (``transform/transform_episode_w_world_base.py``) -- maps the
    cleaned episode into the world-base EEF frame and flips the wrist videos.
    Output class directories get a ``_w_world_base`` suffix (configurable).
+4. **executability** (optional, ``executability/solve_executability.py``) --
+   runs episode-level IK/executability solving on the transformed episode,
+   writes per-arm/per-robot joints/reports, and folds the summary into the
+   combined episode report.
 
 Each episode's combined report records its step-2 classification, the smoothing
-operations performed, and the step-3 transform record. The global report
-summarises how many episodes were processed, how many produced usable output,
-and -- for every episode -- whether it passed, what was done, and (if it did
-not pass) why.
+operations performed, the step-3 transform record, and the optional
+executability summary. The global report summarises how many episodes were
+processed, how many produced usable output, and -- for every episode -- whether
+it passed, what was done, and (if it did not pass) why.
 """
 
 import argparse
+import json
+import shlex
 import shutil
 import sys
 import traceback
@@ -49,6 +56,7 @@ _DATA_DIR = _PIPE_DIR.parent
 _ASSESS_DIR = _DATA_DIR / "assessment"
 _PRE_DIR = _DATA_DIR / "preprocess"
 _TF_DIR = _DATA_DIR / "transform"
+_EXEC_DIR = _DATA_DIR / "executability"
 for _p in (_ASSESS_DIR, _PRE_DIR, _TF_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
@@ -59,7 +67,7 @@ import preprocess_trajectory as pp  # noqa: E402
 import transform_episode_w_world_base as tf  # noqa: E402
 
 DEFAULT_SUFFIX = "_w_world_base"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +103,28 @@ def parse_args(argv=None):
     parser.add_argument("--assessment-args", default="",
                         help="Extra space-separated args forwarded to validate_raw_data.py "
                              "(e.g. \"--skip-focus --skip-motion\").")
+    parser.add_argument("--run-executability", action="store_true",
+                        help="After transform, run episode-level IK/executability solving "
+                             "and attach its summary to the reports.")
+    parser.add_argument("--ik-robots", nargs="*", default=None,
+                        help="Robot subset for --run-executability (default: all registered robots).")
+    parser.add_argument("--ik-arm", default="both", choices=["left", "right", "both"],
+                        help="Arm(s) to solve for --run-executability (default: both).")
+    parser.add_argument("--ik-source", default="action", choices=["action", "state"],
+                        help="Use actions.eef_pose or observation.state.eef_pose for IK "
+                             "(default: action).")
+    parser.add_argument("--ik-max-points", type=int, default=200,
+                        help="Downsample executability validation to at most N points "
+                             "(0 disables downsampling; default: 200).")
+    parser.add_argument("--ik-min-segment", type=int, default=5,
+                        help="Minimum continuous executable segment length, in sampled points "
+                             "(default: 5).")
+    parser.add_argument("--ik-jobs", type=int, default=1,
+                        help="Parallel workers passed to executability solving.")
+    parser.add_argument("--ik-samples", type=int, default=80000,
+                        help="Workspace samples per robot for executability solving.")
+    parser.add_argument("--ik-extra-args", default="",
+                        help="Extra args forwarded to executability/solve_executability.py.")
     return parser.parse_args(argv)
 
 
@@ -231,8 +261,25 @@ def smoothing_section(record):
     }
 
 
+def executability_section(record):
+    if record is None:
+        return None
+    return {
+        "ran": True,
+        "return_code": record.get("return_code"),
+        "executable": record.get("executable"),
+        "summary_path": record.get("summary_path"),
+        "outdir": record.get("outdir"),
+        "source": record.get("source"),
+        "arm": record.get("arm"),
+        "robots": record.get("robots"),
+        "summary": record.get("summary"),
+    }
+
+
 def combined_report_payload(class_name, episode_name, status, reason, failed_stage,
-                            assess, gate, pre_record, tf_record, data_path, generated_at):
+                            assess, gate, pre_record, tf_record, exec_record,
+                            data_path, generated_at):
     return {
         "schema_version": SCHEMA_VERSION,
         "type": "pipeline_episode_report",
@@ -251,6 +298,68 @@ def combined_report_payload(class_name, episode_name, status, reason, failed_sta
         },
         "smoothing": smoothing_section(pre_record) if pre_record else None,
         "transform": tf_record,
+        "executability": executability_section(exec_record),
+    }
+
+
+def _summary_has_executable(summary):
+    for arm_result in (summary.get("results") or {}).values():
+        for robot_result in (arm_result.get("robots") or {}).values():
+            if robot_result.get("executable"):
+                return True
+    return False
+
+
+def run_executability(args, episode_dir, outdir):
+    """Run the optional episode-level IK/executability stage.
+
+    The episode has already been transformed into the world-base EEF frame by
+    stage 3, so the executability reader is called with ``--no-transform`` to
+    avoid applying the tracker->world transform twice.
+    """
+    if str(_EXEC_DIR) not in sys.path:
+        sys.path.insert(0, str(_EXEC_DIR))
+    try:
+        import solve_executability as se  # noqa: E402
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "executability dependencies are unavailable; install pin/scipy and "
+            "make sure executability/ and solve/ are present"
+        ) from exc
+
+    argv = [
+        "--episode", str(episode_dir),
+        "--outdir", str(outdir),
+        "--arm", args.ik_arm,
+        "--source", args.ik_source,
+        "--no-transform",
+        "--max-points", str(args.ik_max_points),
+        "--min-segment", str(args.ik_min_segment),
+        "--jobs", str(args.ik_jobs),
+        "--samples", str(args.ik_samples),
+    ]
+    if args.ik_robots:
+        argv += ["--robots"] + list(args.ik_robots)
+    if args.ik_extra_args:
+        argv += shlex.split(args.ik_extra_args)
+
+    rc = se.main(argv)
+    summary_path = outdir / "summary.json"
+    summary = None
+    if summary_path.exists():
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+    if rc not in (0, 1):
+        raise RuntimeError(f"executability solver returned {rc}")
+    return {
+        "return_code": int(rc),
+        "executable": _summary_has_executable(summary or {}),
+        "summary_path": str(summary_path),
+        "outdir": str(outdir),
+        "source": args.ik_source,
+        "arm": args.ik_arm,
+        "robots": args.ik_robots,
+        "summary": summary,
     }
 
 
@@ -299,7 +408,10 @@ def main(argv=None):
     else:
         print("[1/3] assessment: skipped")
 
-    print(f"[pipeline] assessment -> preprocess -> transform, per episode: "
+    stage_names = ["assessment", "preprocess", "transform"]
+    if args.run_executability:
+        stage_names.append("executability")
+    print(f"[pipeline] {' -> '.join(stage_names)}, per episode: "
           f"{len(episode_dirs)} episode(s)")
     episodes_summary = []
     by_category = {}
@@ -321,7 +433,7 @@ def main(argv=None):
                     / f"{ep_name}{vrd.EPISODE_REPORT_SUFFIX}", assess)
         gate = assessment_gate(assess)
         status, reason, data_path, failed_stage = "error", None, None, None
-        pre_record, tf_record = None, None
+        pre_record, tf_record, exec_record = None, None, None
 
         if gate[0]:
             # Stage-1 gate: a non-tolerable assessment problem (anything beyond a
@@ -361,11 +473,17 @@ def main(argv=None):
                     out_class = f"{rel_subdir.name}{args.suffix}"
                     dest_ep = data_root / rel_subdir.parent / out_class / ep_name
                     tf_record = tf.transform_episode(cleaned_ep, dest_ep, tf_config)
+                    if args.run_executability:
+                        exec_out = report_root / rel_subdir / ep_name / "executability"
+                        exec_record = run_executability(args, dest_ep, exec_out)
                     status, reason = "passed", None
                     data_path = str(dest_ep)
             except Exception as exc:  # noqa: BLE001 - one bad episode must not abort the run
                 status = "error"
-                failed_stage = "transform" if pre_record and pre_record.get("ok") else "preprocess"
+                if exec_record is None and tf_record is not None and args.run_executability:
+                    failed_stage = "executability"
+                else:
+                    failed_stage = "transform" if pre_record and pre_record.get("ok") else "preprocess"
                 reason = f"{type(exc).__name__}: {exc}"
                 traceback.print_exc()
 
@@ -373,7 +491,7 @@ def main(argv=None):
         report_path = report_root / rel_subdir / f"{ep_name}.json"
         vrd.write_json_report(report_path, combined_report_payload(
             class_name, ep_name, status, reason, failed_stage, assess, gate,
-            pre_record, tf_record, data_path, generated_at))
+            pre_record, tf_record, exec_record, data_path, generated_at))
 
         episodes_summary.append({
             "episode": ep_name,
@@ -385,6 +503,11 @@ def main(argv=None):
             "label": pre_record.get("label") if pre_record else None,
             "category": pre_record.get("category") if pre_record else None,
             "operations": pre_record.get("operations") if pre_record else None,
+            "executability": {
+                "ran": bool(exec_record),
+                "executable": exec_record.get("executable") if exec_record else None,
+                "summary": exec_record.get("summary_path") if exec_record else None,
+            },
             "data_path": data_path,
             "report": str(report_path),
         })
@@ -410,8 +533,9 @@ def main(argv=None):
         "output_root": str(output_root),
         "data_root": str(data_root),
         "suffix": args.suffix,
-        "stages": ["assessment", "preprocess", "transform"],
+        "stages": stage_names,
         "assessment_run": assess_args is not None,
+        "executability_run": bool(args.run_executability),
         "totals": {
             "processed": processed,
             "passed": passed,        # produced usable transformed data

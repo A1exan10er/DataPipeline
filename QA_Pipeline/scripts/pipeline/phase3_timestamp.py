@@ -53,8 +53,7 @@ def run_phase(
         progress_callback(len(pending), len(pending))
     print()
     print("  Running group checks...", end="", flush=True)
-    group_findings = _check_frequency_group_outlier(pending)
-    group_findings += _check_consecutive_drops_outlier(pending)
+    group_findings = _check_consecutive_drops_outlier(pending)
     _apply_group_findings(group_findings, findings_by_episode, db_path)
     print(" done.")
     return states
@@ -142,8 +141,7 @@ def _run_phase_parallel(
 
     print()
     print("  Running group checks...", end="", flush=True)
-    group_findings = _check_frequency_group_outlier(pending)
-    group_findings += _check_consecutive_drops_outlier(pending)
+    group_findings = _check_consecutive_drops_outlier(pending)
     _apply_group_findings(group_findings, findings_by_episode, db_path)
     print(" done.")
 
@@ -211,7 +209,7 @@ def _finish_state(state: EpisodeState, db_path: Path, new_findings: list[Finding
     state.findings.extend(new_findings)
     state.last_updated = datetime.now().isoformat()
     save_episode_state(db_path, state)
-    save_findings(db_path, new_findings)
+    save_findings(db_path, new_findings, phase=PHASE_NUMBER, episode_path=str(state.episode_path))
 
 
 def _apply_group_findings(
@@ -224,7 +222,7 @@ def _apply_group_findings(
         state.phase_status[PHASE_NUMBER] = decide_status(findings_by_episode[key])
         state.last_updated = datetime.now().isoformat()
         save_episode_state(db_path, state)
-        save_findings(db_path, findings_by_episode[key])
+        save_findings(db_path, findings_by_episode[key], phase=PHASE_NUMBER, episode_path=str(state.episode_path))
 
 
 def _check_monotonic_increasing(
@@ -321,6 +319,9 @@ def _check_large_gaps(state: EpisodeState, modality: str, timestamps: list[float
 def _check_frame_drops(state: EpisodeState, modality: str) -> list[Finding]:
     """Check frame drop ratio from metadata frame_integrity field.
 
+    Uses metadata first for speed, then falls back to timestamps.csv is_new
+    values when frame_integrity is unavailable.
+
     Uses hard configured thresholds:
     - normal image streams: drop ratio threshold;
     - tactile image streams: tactile-specific drop ratio threshold;
@@ -328,6 +329,8 @@ def _check_frame_drops(state: EpisodeState, modality: str) -> list[Finding]:
     """
     frame_integrity = state.metadata.get("frame_integrity", {})
     info = frame_integrity.get(modality)
+    if not isinstance(info, dict):
+        info = _frame_drop_info_from_timestamps(state.episode_path / modality / "timestamps.csv")
     if not isinstance(info, dict):
         return []
 
@@ -377,7 +380,7 @@ def _check_frame_drops(state: EpisodeState, modality: str) -> list[Finding]:
 def _drop_thresholds(modality: str) -> dict:
     """Return frame drop thresholds for the given image modality.
 
-    drop_ratio_fail: total_drops / frame_count at or above this -> major/fail
+    drop_ratio_fail: total_drops / frame_count above this -> major/fail
     max_consecutive_fail: max_consecutive_drops at or above this -> major/fail
     max_consecutive_warn: max_consecutive_drops at or above this -> minor/warning
         (used only as a fallback when group size is too small for statistics)
@@ -387,7 +390,7 @@ def _drop_thresholds(modality: str) -> dict:
         if _is_tactile_modality(modality)
         else "normal_video_drop_ratio_fail"
     )
-    ratio_default = 0.20 if _is_tactile_modality(modality) else 0.15
+    ratio_default = 0.15 if _is_tactile_modality(modality) else 0.10
     return {
         "drop_ratio_fail": float(
             config_value(["phase3_timestamp", "frame_drops", ratio_key], ratio_default)
@@ -476,45 +479,6 @@ def _check_modality_alignment(state: EpisodeState, readings: dict[str, dict[str,
     if end_finding is not None:
         findings.append(end_finding)
     return findings
-
-
-def _check_frequency_group_outlier(states: list[EpisodeState]) -> list[tuple[EpisodeState, Finding]]:
-    results = []
-    grouped_values = _group_frequency_values(states)
-    for group_key, modalities in grouped_values.items():
-        for modality, values in modalities.items():
-            if len(values) < 5:
-                continue
-            results.extend(_frequency_outliers_for_values(group_key, modality, values))
-    return results
-
-
-def _group_frequency_values(
-    states: list[EpisodeState],
-) -> dict[str, dict[str, list[tuple[EpisodeState, float]]]]:
-    grouped: dict[str, dict[str, list[tuple[EpisodeState, float]]]] = defaultdict(lambda: defaultdict(list))
-    for state in states:
-        group_key = str(first_present(state.task, state.metadata.get("task_key"))) + "_" + str(state.robot)
-        for modality in _timestamp_modalities(state):
-            value = state.metrics.get(f"p3_{_modality_key(modality)}_actual_fps")
-            if _is_finite_number(value):
-                grouped[group_key][modality].append((state, float(value)))
-    return grouped
-
-
-def _frequency_outliers_for_values(
-    group_key: str, modality: str, values: list[tuple[EpisodeState, float]]
-) -> list[tuple[EpisodeState, Finding]]:
-    fps_values = sorted(value for _, value in values)
-    median = _median(fps_values)
-    iqr = _iqr(fps_values)
-    if iqr <= 0:
-        return []
-    return [
-        (state, _frequency_group_outlier_finding(state, modality, actual_fps, median, iqr, group_key))
-        for state, actual_fps in values
-        if abs(actual_fps - median) / iqr > 3.0
-    ]
 
 
 def _check_consecutive_drops_outlier(
@@ -683,6 +647,41 @@ def _rows_from_reader(reader: csv.DictReader) -> list[tuple[float, str | None]]:
     return rows
 
 
+def _frame_drop_info_from_timestamps(path: Path) -> dict[str, int] | None:
+    """Compute frame drop stats from timestamp rows when metadata lacks them."""
+    rows = _read_timestamp_rows(path)
+    if rows is None or not rows:
+        return None
+    is_new_values = [_normalized_is_new(is_new) for _, is_new in rows]
+    if all(value is None for value in is_new_values):
+        return None
+    total_drops = sum(1 for value in is_new_values if value == "0")
+    max_consecutive = 0
+    current = 0
+    for value in is_new_values:
+        if value == "0":
+            current += 1
+            max_consecutive = max(max_consecutive, current)
+        else:
+            current = 0
+    return {
+        "frame_count": len(rows),
+        "total_drops": total_drops,
+        "max_consecutive_drops": max_consecutive,
+    }
+
+
+def _normalized_is_new(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes"}:
+        return "1"
+    if normalized in {"0", "false", "no"}:
+        return "0"
+    return normalized
+
+
 def _record_metrics(state: EpisodeState, readings: dict[str, dict[str, Any]]) -> None:
     for modality, reading in readings.items():
         timestamps = reading["timestamps"] or []
@@ -698,17 +697,29 @@ def _record_metrics(state: EpisodeState, readings: dict[str, dict[str, Any]]) ->
             }
         )
     frame_integrity = state.metadata.get("frame_integrity", {})
+    recorded_drop_modalities = set()
     for modality, info in frame_integrity.items():
         if not isinstance(info, dict):
             continue
-        key = _modality_key(modality)
-        frame_count = info.get("frame_count", 0)
-        total_drops = info.get("total_drops", 0)
-        state.metrics[f"p3_{key}_total_drops"] = total_drops
-        state.metrics[f"p3_{key}_max_consecutive_drops"] = info.get("max_consecutive_drops", 0)
-        state.metrics[f"p3_{key}_drop_ratio"] = (
-            total_drops / frame_count if frame_count > 0 else 0.0
-        )
+        _record_frame_drop_metrics(state, modality, info)
+        recorded_drop_modalities.add(modality)
+    for modality in readings:
+        if modality in recorded_drop_modalities:
+            continue
+        info = _frame_drop_info_from_timestamps(state.episode_path / modality / "timestamps.csv")
+        if isinstance(info, dict):
+            _record_frame_drop_metrics(state, modality, info)
+
+
+def _record_frame_drop_metrics(state: EpisodeState, modality: str, info: dict[str, Any]) -> None:
+    key = _modality_key(modality)
+    frame_count = info.get("frame_count", 0)
+    total_drops = info.get("total_drops", 0)
+    state.metrics[f"p3_{key}_total_drops"] = total_drops
+    state.metrics[f"p3_{key}_max_consecutive_drops"] = info.get("max_consecutive_drops", 0)
+    state.metrics[f"p3_{key}_drop_ratio"] = (
+        total_drops / frame_count if frame_count > 0 else 0.0
+    )
 
 
 def _readable_spans(readings: dict[str, dict[str, Any]]) -> list[tuple[str, float, float]]:
@@ -793,13 +804,6 @@ def _float_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
-
-
-def _is_finite_number(value: Any) -> bool:
-    try:
-        return math.isfinite(float(value))
-    except (TypeError, ValueError):
-        return False
 
 
 def _median(values: list[float]) -> float:
@@ -981,26 +985,6 @@ def _alignment_spread_finding(
             "earliest_modality": earliest_modality,
             "latest_modality": latest_modality,
             "threshold_ms": 500,
-        },
-    )
-
-
-def _frequency_group_outlier_finding(
-    state: EpisodeState, modality: str, actual_fps: float, median: float, iqr: float, group: str
-) -> Finding:
-    return _finding(
-        state,
-        "frequency_group_outlier",
-        "minor",
-        "needs_review",
-        "Actual frequency is an outlier within task and robot group.",
-        {
-            "modality": modality,
-            "actual_fps": actual_fps,
-            "median_fps": median,
-            "iqr": iqr,
-            "iqr_distance": abs(actual_fps - median) / iqr,
-            "group": group,
         },
     )
 

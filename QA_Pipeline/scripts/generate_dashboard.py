@@ -24,7 +24,13 @@ SEVERITY_ORDER = ("critical", "major", "minor", "info")
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    generate_dashboard(Path(args.db_path), Path(args.output), args.refresh_interval)
+    generate_dashboard(
+        Path(args.db_path),
+        Path(args.output),
+        args.refresh_interval,
+        max_episodes=_none_if_non_positive(args.max_episodes),
+        max_findings=_none_if_non_positive(args.max_findings),
+    )
     print(f"Wrote dashboard: {args.output}")
     return 0
 
@@ -33,9 +39,11 @@ def generate_dashboard(
     db_path: Path,
     output_path: Path,
     refresh_interval_seconds: float = 5.0,
+    max_episodes: int | None = None,
+    max_findings: int | None = None,
 ) -> None:
     """Write a dashboard HTML shell plus atomically updated JSON data."""
-    payload = _dashboard_payload(db_path)
+    payload = _dashboard_payload(db_path, max_episodes=max_episodes, max_findings=max_findings)
     payload["refresh_interval_seconds"] = max(1.0, float(refresh_interval_seconds))
     html = _render_html(payload)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +61,23 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=5.0,
         help="Browser polling interval in seconds. Default: 5.",
     )
+    parser.add_argument(
+        "--max-episodes",
+        type=int,
+        default=0,
+        help="Maximum episode detail rows to embed. 0 means unlimited. Default: 0.",
+    )
+    parser.add_argument(
+        "--max-findings",
+        type=int,
+        default=0,
+        help="Maximum finding detail rows to embed. 0 means unlimited. Default: 0.",
+    )
     return parser.parse_args(argv)
+
+
+def _none_if_non_positive(value: int) -> int | None:
+    return value if value and value > 0 else None
 
 
 def _dashboard_data_path(output_path: Path) -> Path:
@@ -70,15 +94,21 @@ def _write_text_atomic(path: Path, content: str) -> None:
     tmp_path.replace(path)
 
 
-def _dashboard_payload(db_path: Path) -> dict[str, Any]:
-    episodes = _episode_rows(db_path)
-    findings = _finding_rows(db_path)
+def _dashboard_payload(
+    db_path: Path,
+    max_episodes: int | None = None,
+    max_findings: int | None = None,
+) -> dict[str, Any]:
+    episodes = _episode_rows(db_path, max_episodes)
+    findings = _finding_rows(db_path, max_findings)
+    summary = _summary_from_db(db_path)
     findings_by_episode: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for finding in findings:
         findings_by_episode[finding["episode_path"]].append(finding)
+    issue_counts_by_episode = _issue_counts_by_episode(db_path, [episode["episode_path"] for episode in episodes])
     for episode in episodes:
         episode_findings = findings_by_episode.get(episode["episode_path"], [])
-        episode["issue_count"] = len(episode_findings)
+        episode["issue_count"] = issue_counts_by_episode.get(episode["episode_path"], len(episode_findings))
         episode["top_issues"] = _top_issue_names(episode_findings, 4)
 
     return {
@@ -86,20 +116,40 @@ def _dashboard_payload(db_path: Path) -> dict[str, Any]:
         "db_path": str(db_path),
         "episodes": episodes,
         "findings": findings,
-        "summary": _summary(episodes, findings),
+        "summary": summary,
+        "detail_limits": {
+            "max_episodes": max_episodes,
+            "max_findings": max_findings,
+            "episode_rows": len(episodes),
+            "finding_rows": len(findings),
+        },
     }
 
 
-def _episode_rows(db_path: Path) -> list[dict[str, Any]]:
+def _episode_rows(db_path: Path, limit: int | None = None) -> list[dict[str, Any]]:
+    limit_sql = "LIMIT ?" if limit is not None else ""
+    params: tuple[Any, ...] = (limit,) if limit is not None else ()
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            """
+            f"""
             SELECT episode_path, task, date, operator, robot, controller,
                    phases_completed, phase_status, final_status, last_updated
             FROM episodes
-            ORDER BY episode_path
-            """
+            ORDER BY
+                CASE final_status
+                    WHEN 'fail' THEN 0
+                    WHEN 'needs_review' THEN 1
+                    WHEN 'warning' THEN 2
+                    WHEN 'pending' THEN 3
+                    WHEN 'pass' THEN 4
+                    ELSE 5
+                END,
+                last_updated DESC,
+                episode_path
+            {limit_sql}
+            """,
+            params,
         ).fetchall()
     return [
         {
@@ -119,21 +169,25 @@ def _episode_rows(db_path: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _finding_rows(db_path: Path) -> list[dict[str, Any]]:
+def _finding_rows(db_path: Path, limit: int | None = None) -> list[dict[str, Any]]:
+    limit_sql = "LIMIT ?" if limit is not None else ""
+    params: tuple[Any, ...] = ("pass",) + ((limit,) if limit is not None else ())
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            """
+            f"""
             SELECT f.id, f.episode_path, f.phase, f.check_name, f.severity,
                    f.status, f.message, f.details,
                    e.task, e.date, e.operator, e.robot, e.controller
             FROM findings f
             LEFT JOIN episodes e ON e.episode_path = f.episode_path
             WHERE f.status != ?
-            ORDER BY f.id
+            ORDER BY f.id DESC
+            {limit_sql}
             """,
-            ("pass",),
+            params,
         ).fetchall()
+    rows = list(reversed(rows)) if limit is not None else rows
     return [
         {
             "id": row["id"],
@@ -155,26 +209,96 @@ def _finding_rows(db_path: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _summary(episodes: list[dict[str, Any]], findings: list[dict[str, Any]]) -> dict[str, Any]:
-    status_counts = Counter(episode["final_status"] for episode in episodes)
-    severity_counts = Counter(finding["severity"] for finding in findings)
-    check_counts = Counter(finding["check_name"] for finding in findings)
-    phase_counts = Counter(str(finding["phase"]) for finding in findings)
+def _summary_from_db(db_path: Path) -> dict[str, Any]:
+    with sqlite3.connect(db_path) as conn:
+        episode_count = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+        issue_count = conn.execute("SELECT COUNT(*) FROM findings WHERE status != ?", ("pass",)).fetchone()[0]
+        status_counts = Counter(
+            {
+                (status or "pending"): count
+                for status, count in conn.execute(
+                    "SELECT final_status, COUNT(*) FROM episodes GROUP BY final_status"
+                )
+            }
+        )
+        severity_counts = Counter(
+            {
+                severity: count
+                for severity, count in conn.execute(
+                    "SELECT severity, COUNT(*) FROM findings WHERE status != ? GROUP BY severity",
+                    ("pass",),
+                )
+            }
+        )
+        check_counts = conn.execute(
+            """
+            SELECT check_name, COUNT(*) AS count
+            FROM findings
+            WHERE status != ?
+            GROUP BY check_name
+            ORDER BY count DESC
+            LIMIT 20
+            """,
+            ("pass",),
+        ).fetchall()
+        phase_counts = {
+            str(phase): count
+            for phase, count in conn.execute(
+                """
+                SELECT phase, COUNT(*)
+                FROM findings
+                WHERE status != ?
+                GROUP BY phase
+                ORDER BY phase
+                """,
+                ("pass",),
+            )
+        }
+        task_rows = conn.execute(
+            """
+            SELECT task, final_status, COUNT(*)
+            FROM episodes
+            GROUP BY task, final_status
+            ORDER BY task
+            """
+        ).fetchall()
     task_status: dict[str, Counter[str]] = defaultdict(Counter)
-    for episode in episodes:
-        task_status[episode["task"] or "(unknown)"][episode["final_status"]] += 1
+    for task, status, count in task_rows:
+        task_status[task or "(unknown)"][status or "pending"] += count
     return {
-        "episode_count": len(episodes),
-        "issue_count": len(findings),
+        "episode_count": episode_count,
+        "issue_count": issue_count,
         "status_counts": {status: status_counts.get(status, 0) for status in STATUS_ORDER},
         "severity_counts": {severity: severity_counts.get(severity, 0) for severity in SEVERITY_ORDER},
-        "check_counts": check_counts.most_common(20),
-        "phase_counts": dict(sorted(phase_counts.items(), key=lambda item: int(item[0]))),
+        "check_counts": [(name, count) for name, count in check_counts],
+        "phase_counts": phase_counts,
         "task_status": {
             task: {status: counts.get(status, 0) for status in STATUS_ORDER}
             for task, counts in sorted(task_status.items())
         },
     }
+
+
+def _issue_counts_by_episode(db_path: Path, episode_paths: list[str]) -> dict[str, int]:
+    if not episode_paths:
+        return {}
+    counts: dict[str, int] = {}
+    chunk_size = 500
+    with sqlite3.connect(db_path) as conn:
+        for start in range(0, len(episode_paths), chunk_size):
+            chunk = episode_paths[start : start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT episode_path, COUNT(*)
+                FROM findings
+                WHERE status != ? AND episode_path IN ({placeholders})
+                GROUP BY episode_path
+                """,
+                ("pass", *chunk),
+            ).fetchall()
+            counts.update({path: count for path, count in rows})
+    return counts
 
 
 def _top_issue_names(findings: list[dict[str, Any]], limit: int) -> str:
@@ -325,7 +449,7 @@ def _render_html(payload: dict[str, Any]) -> str:
     }}
     th {{
       position: sticky;
-      top: 68px;
+      top: 0;
       z-index: 3;
       background: #fbfcfd;
       color: var(--muted);
@@ -377,7 +501,6 @@ def _render_html(payload: dict[str, Any]) -> str:
     @media (max-width: 640px) {{
       header, main {{ padding-left: 12px; padding-right: 12px; }}
       .metrics, .toolbar {{ grid-template-columns: 1fr; }}
-      th {{ top: 86px; }}
     }}
   </style>
 </head>

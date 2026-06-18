@@ -186,7 +186,6 @@ Checks performed:
   exist; difference > 2 produces a finding;
 - start and end alignment across readable image modalities must be within
   500 ms;
-- task+robot group frequency outliers are detected with IQR;
 - max consecutive frame drops are checked with group IQR, or fallback threshold
   for small groups.
 
@@ -194,8 +193,8 @@ Configured thresholds from `quality_rules.json`:
 
 - FPS loss fail ratio: `0.10`;
 - FPS gain warning ratio: `0.10`;
-- normal video drop-ratio fail: `0.15`;
-- tactile video drop-ratio fail: `0.20`;
+- normal video drop-ratio fail: `0.10`;
+- tactile video drop-ratio fail: `0.15`;
 - max consecutive drops fail: `25`;
 - max consecutive drops warning fallback: `10`.
 

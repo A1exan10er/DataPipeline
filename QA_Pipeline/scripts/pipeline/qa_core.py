@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 import csv
 import json
+import os
 import sqlite3
 
 from scripts.pipeline.qa_config import config_value
@@ -14,6 +15,7 @@ from scripts.pipeline.qa_config import config_value
 DEFAULT_DB_PATH = Path("outputs/qa_pipeline.db")
 STATUS_VALUES = ("pass", "warning", "fail", "needs_review")
 SEVERITY_VALUES = ("info", "minor", "major", "critical")
+DEFAULT_EXCEL_MAX_EPISODES = 100_000
 
 
 class PipelineConfigurationError(RuntimeError):
@@ -402,7 +404,6 @@ def export_quality_report(db_path: Path, output_path: Path) -> None:
     """Export one CSV report row per episode."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    rows = _quality_report_rows(db_path)
     fieldnames = [
         "episode_path",
         "task",
@@ -418,7 +419,7 @@ def export_quality_report(db_path: Path, output_path: Path) -> None:
     with output_path.open("w", encoding="utf-8", newline="") as file_obj:
         writer = csv.DictWriter(file_obj, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(_iter_quality_report_rows(db_path))
 
 
 def export_excel_report(db_path: Path, output_path: Path) -> None:
@@ -435,6 +436,15 @@ def export_excel_report(db_path: Path, output_path: Path) -> None:
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    episode_count = _episode_count(db_path)
+    max_episodes = _excel_max_episodes()
+    if max_episodes > 0 and episode_count > max_episodes:
+        raise PipelineConfigurationError(
+            "Excel export skipped because this run has "
+            f"{episode_count} episodes, above QA_EXCEL_MAX_EPISODES={max_episodes}. "
+            "Use CSV/JSONL/dashboard for large full-folder runs, or set "
+            "QA_EXCEL_MAX_EPISODES=0 to force Excel export."
+        )
     episode_rows = _quality_report_rows(db_path)
     finding_rows = _excel_finding_rows(db_path)
     summary_rows = _excel_summary_rows(episode_rows, finding_rows)
@@ -761,6 +771,70 @@ def _quality_report_rows(db_path: Path) -> list[dict]:
             }
         )
     return rows
+
+
+def _iter_quality_report_rows(db_path: Path):
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        episode_rows = conn.execute(
+            """
+            SELECT episode_path, task, date, operator, robot, controller,
+                   final_status, last_updated
+            FROM episodes
+            ORDER BY episode_path
+            """
+        )
+        finding_rows = conn.execute(
+            """
+            SELECT episode_path, check_name, severity, status
+            FROM findings
+            WHERE status != ?
+            ORDER BY episode_path
+            """,
+            ("pass",),
+        )
+        current_finding = _next_row(finding_rows)
+        for episode in episode_rows:
+            episode_path = episode["episode_path"]
+            checks: set[str] = set()
+            highest_severity = "info"
+            while current_finding is not None and current_finding["episode_path"] < episode_path:
+                current_finding = _next_row(finding_rows)
+            while current_finding is not None and current_finding["episode_path"] == episode_path:
+                checks.add(current_finding["check_name"])
+                if severity_rank(current_finding["severity"]) > severity_rank(highest_severity):
+                    highest_severity = current_finding["severity"]
+                current_finding = _next_row(finding_rows)
+            yield {
+                "episode_path": episode_path,
+                "task": episode["task"] or "",
+                "date": episode["date"] or "",
+                "operator": episode["operator"] or "",
+                "robot": episode["robot"] or "",
+                "controller": episode["controller"] or "",
+                "status": episode["final_status"] or "",
+                "severity": highest_severity,
+                "reasons": ";".join(sorted(checks)),
+                "checked_at": episode["last_updated"] or "",
+            }
+
+
+def _next_row(cursor: sqlite3.Cursor) -> sqlite3.Row | None:
+    return next(cursor, None)
+
+
+def _episode_count(db_path: Path) -> int:
+    init_db(db_path)
+    return int(_scalar_query(db_path, "SELECT COUNT(*) FROM episodes", ()))
+
+
+def _excel_max_episodes() -> int:
+    raw_value = os.environ.get("QA_EXCEL_MAX_EPISODES", str(DEFAULT_EXCEL_MAX_EPISODES))
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return DEFAULT_EXCEL_MAX_EPISODES
 
 
 def _excel_finding_rows(db_path: Path) -> list[dict]:

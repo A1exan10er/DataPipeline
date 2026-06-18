@@ -1,0 +1,33 @@
+{
+  "phase6_umi_processing": {
+    "enabled": true,
+    "output_root": "qa_umi_test/umi_processed_strict",
+    "suffix": "_w_world_base",
+    "overwrite": true,
+    "keep_intermediate": false,
+    "skip_assessment": false,
+    "assessment_args": "",
+    "fps": null,
+    "status_for_repaired": "warning",
+    "trajectory_first_gate": true,
+    "trajectory_pass_labels": ["smooth"],
+    "trajectory_nonpass_status": "fail",
+    "run_executability": false,
+    "max_concurrent_episodes": 2,
+    "ik": {
+      "robots": ["flexiv_rizon4"],
+      "arm": "both",
+      "source": "action",
+      "max_points": 50,
+      "min_segment": 5,
+      "jobs": 1,
+      "samples": 10000,
+      "extra_args": ""
+    },
+    "umi_tokens": ["umi"],
+    "required_modalities": [],
+    "preprocess_config": null,
+    "smooth_config": null,
+    "transform_config": null
+  }
+}

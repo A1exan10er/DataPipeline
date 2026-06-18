@@ -2,6 +2,13 @@ Test_Data/
 Test_Folder_For_DataPipeline/
 NAS_Sample_Data/
 datapipeline-env/
+outputs/
+qa_feature_test/
+qa_umi_test/
+.vscode/
+=2.1
+*.log
+DataProcessUMI/resources/.ament/
 motion_abnormality_report*/
 __pycache__/
 *.pyc

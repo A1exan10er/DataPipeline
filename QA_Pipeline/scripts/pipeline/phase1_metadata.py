@@ -680,7 +680,7 @@ def _finish_state(state: EpisodeState, db_path: Path, new_findings: list[Finding
     state.findings.extend(new_findings)
     state.last_updated = datetime.now().isoformat()
     save_episode_state(db_path, state)
-    save_findings(db_path, new_findings)
+    save_findings(db_path, new_findings, phase=PHASE_NUMBER, episode_path=str(state.episode_path))
 
 
 def _record_metrics(state: EpisodeState) -> None:

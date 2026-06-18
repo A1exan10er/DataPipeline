@@ -1,0 +1,93 @@
+{
+  "robot": "aloha_piper",
+  "urdf": "piper_ros/src/piper_description/urdf/piper_description.urdf",
+  "tcp_frame": "gripper_base",
+  "frame": "robot_base (URDF root / universe)",
+  "units": "meters",
+  "method": {
+    "type": "forward_kinematics_monte_carlo",
+    "samples": 500000,
+    "seed": 0,
+    "percentile": 0.1,
+    "note": "workspace 取采样点云的绝对极值（外包络）：保证『目标越出此盒 -> 一定不可达』。workspace_inner 为 pct/(100-pct) 分位数收紧的内盒，可作『落在盒内多半可达』的参考。注意：AABB 是必要非充分条件——盒内角点（如 xmax,ymax 同时取到）未必可达。"
+  },
+  "joint_limits_used": {
+    "joint1": [
+      -2.618,
+      2.618
+    ],
+    "joint2": [
+      0.0,
+      3.14
+    ],
+    "joint3": [
+      -2.967,
+      0.0
+    ],
+    "joint4": [
+      -1.745,
+      1.745
+    ],
+    "joint5": [
+      -1.22,
+      1.22
+    ],
+    "joint6": [
+      -2.0944,
+      2.0944
+    ]
+  },
+  "workspace": {
+    "x": {
+      "min": -0.6229,
+      "max": 0.6267
+    },
+    "y": {
+      "min": -0.6269,
+      "max": 0.6269
+    },
+    "z": {
+      "min": -0.2564,
+      "max": 0.7506
+    }
+  },
+  "workspace_inner": {
+    "x": {
+      "min": -0.5618,
+      "max": 0.601
+    },
+    "y": {
+      "min": -0.6034,
+      "max": 0.6018
+    },
+    "z": {
+      "min": -0.2387,
+      "max": 0.7473
+    }
+  },
+  "out_of_workspace_rule": "若目标 TCP 位置的 x/y/z 任一分量 < workspace.<axis>.min 或 > workspace.<axis>.max，则判定越界：该位姿超出可达工作空间，机器人无法做出对应动作。",
+  "generated": "2026-06-08",
+  "mounting_assumption": {
+    "base_frame": "URDF root，原点在安装法兰/台面处",
+    "forward_axis": "+x（任务在身前，末端够不到身后）",
+    "x_floor": 0.0,
+    "z_floor": 0.0,
+    "note": "约束：x>=x_floor（不向后）、z>=z_floor（不穿台面）。x_max/y/z_max 仍由几何外包络给出，不受影响。",
+    "reachable_fraction": 0.4579
+  },
+  "workspace_mounted": {
+    "x": {
+      "min": 0.0,
+      "max": 0.6267
+    },
+    "y": {
+      "min": -0.626,
+      "max": 0.6257
+    },
+    "z": {
+      "min": 0.0,
+      "max": 0.7505
+    }
+  },
+  "mounted_out_of_workspace_rule": "固定安装场景下，应以 workspace_mounted 为准：x/y/z 任一越出其 [min,max] 即判定该位姿不可做（含够不到身后 / 穿台面 的物理约束）。"
+}

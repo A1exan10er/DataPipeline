@@ -294,6 +294,8 @@ def _check_modality_frame_alignment(state: EpisodeState) -> list[Finding]:
 
     counts = {}
     for name in modalities:
+        if _is_tactile_state_modality(name):
+            continue
         count = _get_modality_count(state.metadata, name)
         if count is not None:
             counts[name] = count
@@ -339,9 +341,6 @@ def _check_modality_frame_alignment(state: EpisodeState) -> list[Finding]:
 def _get_modality_count(metadata: dict, modality: str) -> int | None:
     """Get frame or row count for a modality from metadata.
 
-    For state tactile modalities with rows=0, falls back to
-    frame_count from frame_integrity of the corresponding image modality.
-
     Returns None if count cannot be determined.
     """
     modalities = metadata.get("modalities", {})
@@ -350,21 +349,6 @@ def _get_modality_count(metadata: dict, modality: str) -> int | None:
         return None
 
     count = info.get("frames") or info.get("rows")
-
-    # Fallback: tactile state rows=0 is common, use frame_integrity instead.
-    if (
-        count == 0
-        and modality.startswith("observation.state.")
-        and "tactile" in modality
-    ):
-        image_modality = modality.replace(
-            "observation.state.", "observation.image."
-        )
-        frame_integrity = metadata.get("frame_integrity", {})
-        fi = frame_integrity.get(image_modality)
-        if isinstance(fi, dict) and fi.get("frame_count", 0) > 0:
-            return fi["frame_count"]
-        return None
 
     if isinstance(count, (int, float)) and count > 0:
         return int(count)
@@ -492,7 +476,12 @@ def _finish_state(state: EpisodeState, db_path: Path, new_findings: list[Finding
     state.findings.extend(new_findings)
     state.last_updated = datetime.now().isoformat()
     save_episode_state(db_path, state)
-    save_findings(db_path, new_findings)
+    save_findings(
+        db_path,
+        new_findings,
+        phase=PHASE_NUMBER,
+        episode_path=str(state.episode_path),
+    )
 
 
 def _record_metrics(state: EpisodeState, findings: list[Finding], iqr_distance: float) -> None:
@@ -507,6 +496,7 @@ def _record_metrics(state: EpisodeState, findings: list[Finding], iqr_distance: 
             "p2_expected_frames": expected_frames,
             "p2_frame_count_error_ratio": _error_ratio(total_frames, expected_frames),
             "p2_timestamps_checked": len(_image_modality_paths(state)),
+            "p2_tactile_state_row_count_skipped": len(_tactile_state_modality_paths(state)),
             "p2_timestamps_mismatch_count": _timestamps_mismatch_count(findings),
             "p2_duration_iqr_distance": iqr_distance,
         }
@@ -554,7 +544,19 @@ def _state_modality_paths(state: EpisodeState) -> list[tuple[str, Path]]:
     return [
         (modality, state.episode_path / modality)
         for modality in _modalities(state.metadata)
-        if modality.startswith("observation.state.") and (state.episode_path / modality).is_dir()
+        if (
+            modality.startswith("observation.state.")
+            and not _is_tactile_state_modality(modality)
+            and (state.episode_path / modality).is_dir()
+        )
+    ]
+
+
+def _tactile_state_modality_paths(state: EpisodeState) -> list[tuple[str, Path]]:
+    return [
+        (modality, state.episode_path / modality)
+        for modality in _modalities(state.metadata)
+        if _is_tactile_state_modality(modality) and (state.episode_path / modality).is_dir()
     ]
 
 
@@ -565,6 +567,10 @@ def _modalities(metadata: dict) -> dict:
 
 def _is_image_modality(modality: str) -> bool:
     return modality.startswith("observation.image.") and not modality.startswith("observation.image.flow_")
+
+
+def _is_tactile_state_modality(modality: str) -> bool:
+    return modality.startswith("observation.state.") and "tactile" in modality.lower()
 
 
 def _error_ratio(actual: float, expected: float) -> float:

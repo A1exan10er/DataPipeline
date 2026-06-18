@@ -1,3 +1,6 @@
 opencv-python-headless>=4.13
 scipy>=1.15
 openpyxl>=3.1
+tqdm>=4.66
+pin>=3.4
+xacro>=2.1

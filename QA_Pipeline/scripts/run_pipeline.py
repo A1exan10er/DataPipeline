@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import sqlite3
 import sys
 import time
@@ -30,10 +31,8 @@ from scripts.generate_dashboard import generate_dashboard
 from scripts.pipeline.qa_core import (
     EpisodeState,
     Finding,
-    PipelineConfigurationError,
     discover_episodes_with_report,
     export_findings_jsonl,
-    export_excel_report,
     export_quality_report,
     export_summary_md,
     infer_context,
@@ -76,6 +75,11 @@ PHASE_MODULES = {
     6: phase6_umi_processing,
 }
 
+EPISODE_SELECTION_CACHE = "selected_episodes.jsonl"
+EPISODE_SELECTION_META = "selected_episodes_meta.json"
+STREAMING_PROGRESS_INTERVAL_SECONDS = 10.0
+STREAMING_PROGRESS_INTERVAL_SCANNED = 5000
+
 
 @dataclass
 class QualityFilterSummary:
@@ -108,62 +112,89 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_error(str(exc))
             return 1
 
-    discovery = discover_episodes_with_report(roots)
-    episodes = discovery.episodes
-    print(f"Episodes discovered: {len(episodes)}", flush=True)
-    if discovery.skipped_hidden_dirs:
-        print(f"Hidden directories skipped: {len(discovery.skipped_hidden_dirs)}", flush=True)
-        for path in discovery.skipped_hidden_dirs[:5]:
-            print(f"  skipped hidden dir: {path}")
-        if len(discovery.skipped_hidden_dirs) > 5:
-            print(f"  ... {len(discovery.skipped_hidden_dirs) - 5} more")
-    if args.date:
-        episodes = [
-            episode_path for episode_path in episodes
-            if args.date in str(episode_path)
-        ]
-        print(f"After --date filter ({args.date}): {len(episodes)} episodes", flush=True)
-    if args.task:
-        task_lower = args.task.lower()
-        episodes = [
-            episode_path for episode_path in episodes
-            if task_lower in str(episode_path).lower()
-        ]
-        print(f"After --task filter ({args.task}): {len(episodes)} episodes", flush=True)
-    quality_filter_summary: QualityFilterSummary | None = None
-    if not args.disable_quality_label_filter:
-        print(
-            f"Applying quality label filter ({args.quality_label}) to {len(episodes)} episodes...",
-            flush=True,
+    db_path = Path(args.db_path)
+    output_dir = Path(args.output_dir)
+    if args.streaming_discovery:
+        if args.batch_size is None:
+            _print_error("--streaming-discovery requires --batch-size.")
+            return 1
+        init_db(db_path)
+        return _run_streaming_discovery(
+            roots=roots,
+            phases=phases,
+            args=args,
+            db_path=db_path,
+            output_dir=output_dir,
+            workers=effective_workers,
+            resource_guard=resource_guard,
         )
-        episodes, quality_filter_summary = _filter_by_quality_label(episodes, args.quality_label)
-        print(
-            f"After quality label filter ({args.quality_label}): {len(episodes)} episodes "
-            f"({quality_filter_summary.skipped} skipped)"
-        )
-        if quality_filter_summary.unreadable_metadata:
+
+    cache_meta = _episode_selection_cache_meta(args, roots)
+    episodes, discovery_findings, group_key_cache = (
+        ([], [], {})
+        if args.disable_episode_selection_cache
+        else _load_episode_selection_cache(output_dir, cache_meta)
+    )
+    if episodes:
+        print(f"Loaded episode selection cache: {len(episodes)} episodes", flush=True)
+    else:
+        discovery = discover_episodes_with_report(roots)
+        episodes = discovery.episodes
+        print(f"Episodes discovered: {len(episodes)}", flush=True)
+        if discovery.skipped_hidden_dirs:
+            print(f"Hidden directories skipped: {len(discovery.skipped_hidden_dirs)}", flush=True)
+            for path in discovery.skipped_hidden_dirs[:5]:
+                print(f"  skipped hidden dir: {path}")
+            if len(discovery.skipped_hidden_dirs) > 5:
+                print(f"  ... {len(discovery.skipped_hidden_dirs) - 5} more")
+        if args.date:
+            episodes = [
+                episode_path for episode_path in episodes
+                if args.date in str(episode_path)
+            ]
+            print(f"After --date filter ({args.date}): {len(episodes)} episodes", flush=True)
+        if args.task:
+            task_lower = args.task.lower()
+            episodes = [
+                episode_path for episode_path in episodes
+                if task_lower in str(episode_path).lower()
+            ]
+            print(f"After --task filter ({args.task}): {len(episodes)} episodes", flush=True)
+        quality_filter_summary: QualityFilterSummary | None = None
+        if not args.disable_quality_label_filter:
             print(
-                "  skipped due to missing/unreadable metadata: "
-                f"{quality_filter_summary.unreadable_metadata}"
+                f"Applying quality label filter ({args.quality_label}) to {len(episodes)} episodes...",
+                flush=True,
             )
-        for label_summary, count in quality_filter_summary.skipped_label_counts.most_common(5):
-            print(f"  skipped label {label_summary}: {count}")
-        remaining_labels = len(quality_filter_summary.skipped_label_counts) - 5
-        if remaining_labels > 0:
-            print(f"  ... {remaining_labels} more skipped label group(s)")
-    if args.max_episodes is not None:
-        episodes = episodes[: args.max_episodes]
+            episodes, quality_filter_summary = _filter_by_quality_label(episodes, args.quality_label)
+            print(
+                f"After quality label filter ({args.quality_label}): {len(episodes)} episodes "
+                f"({quality_filter_summary.skipped} skipped)"
+            )
+            if quality_filter_summary.unreadable_metadata:
+                print(
+                    "  skipped due to missing/unreadable metadata: "
+                    f"{quality_filter_summary.unreadable_metadata}"
+                )
+            for label_summary, count in quality_filter_summary.skipped_label_counts.most_common(5):
+                print(f"  skipped label {label_summary}: {count}")
+            remaining_labels = len(quality_filter_summary.skipped_label_counts) - 5
+            if remaining_labels > 0:
+                print(f"  ... {remaining_labels} more skipped label group(s)")
+        if args.max_episodes is not None:
+            episodes = episodes[: args.max_episodes]
+        discovery_findings = _discovery_findings(discovery.skipped_hidden_dirs)
+        if not args.dry_run and not args.disable_episode_selection_cache:
+            group_key_cache = _build_group_key_cache(episodes, roots)
+            _write_episode_selection_cache(output_dir, episodes, cache_meta, group_key_cache)
 
     if args.dry_run:
         print("Dry run: no phases executed and no reports written.")
         print("Phases selected: " + ",".join(str(phase) for phase in phases))
         return 0
 
-    db_path = Path(args.db_path)
-    output_dir = Path(args.output_dir)
     init_db(db_path)
     prune_db_to_episode_paths(db_path, episodes)
-    discovery_findings = _discovery_findings(discovery.skipped_hidden_dirs)
 
     if args.batch_size is not None:
         return _run_batched(
@@ -176,6 +207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             effective_workers,
             resource_guard,
             discovery_findings,
+            group_key_cache,
         )
 
     states = _load_or_create_states(episodes, roots, db_path, args.force_rerun)
@@ -190,10 +222,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             phases=phases,
             workers=effective_workers,
             refresh_interval_seconds=args.live_report_interval,
-            dashboard_interval_seconds=args.live_dashboard_interval,
         )
         monitor.start(states)
         print(f"Live run monitor: {monitor.run_dir}")
+        _print_live_dashboard_command(args, db_path, output_dir)
     _record_discovery_findings(db_path, discovery_findings, monitor)
     try:
         for phase_number in phases:
@@ -248,6 +280,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "is selected, otherwise fixed-size batches. Default: auto."
         ),
     )
+    parser.add_argument(
+        "--streaming-discovery",
+        action="store_true",
+        help=(
+            "Discover and process episodes incrementally in --batch-size chunks. "
+            "This avoids building a full selected-episode cache for very large roots. "
+            "Resume is based on existing DB phase completion."
+        ),
+    )
     parser.add_argument("--force-rerun", action="store_true", help="Run selected phases even if completed.")
     parser.add_argument("--dry-run", action="store_true", help="Discover episodes without running phases.")
     parser.add_argument(
@@ -285,6 +326,14 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Process episodes regardless of metadata quality.labels. Use for full audits only.",
     )
     parser.add_argument(
+        "--disable-episode-selection-cache",
+        action="store_true",
+        help=(
+            "Do not reuse or write the selected episode list cache under output-dir. "
+            "Use this when the NAS folder contents changed and you need fresh discovery."
+        ),
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -316,8 +365,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--resource-max-wait-seconds",
         type=float,
-        default=120.0,
-        help="Maximum seconds to wait for load/memory recovery before stopping. Default: 120.",
+        default=0.0,
+        help=(
+            "Maximum seconds to wait for load/memory recovery before stopping. "
+            "0 means wait indefinitely. Default: 0."
+        ),
     )
     parser.add_argument(
         "--resource-error-retries",
@@ -354,7 +406,29 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--live-dashboard-interval",
         type=float,
         default=5.0,
-        help="Seconds between live dashboard data refreshes. Default: 5.",
+        help=(
+            "Compatibility option only: sets the --interval value in the "
+            "independent live_dashboard.py command printed at run start. "
+            "It does not refresh the dashboard inside the pipeline. Default: 5."
+        ),
+    )
+    parser.add_argument(
+        "--live-dashboard-max-episodes",
+        type=int,
+        default=5000,
+        help=(
+            "Compatibility option only: sets --max-episodes in the printed "
+            "live_dashboard.py command. 0 means unlimited. Default: 5000."
+        ),
+    )
+    parser.add_argument(
+        "--live-dashboard-max-findings",
+        type=int,
+        default=10000,
+        help=(
+            "Compatibility option only: sets --max-findings in the printed "
+            "live_dashboard.py command. 0 means unlimited. Default: 10000."
+        ),
     )
     parser.add_argument(
         "--disable-live-monitor",
@@ -374,10 +448,11 @@ def _run_batched(
     workers: int,
     resource_guard: ResourceGuard,
     discovery_findings: list[Finding],
+    group_key_cache: dict[str, tuple[str, str]],
 ) -> int:
     batch_size = max(1, int(args.batch_size))
     total = len(episodes)
-    batch_plan = _make_batch_plan(episodes, roots, phases, batch_size, args.batch_mode)
+    batch_plan = _make_batch_plan(episodes, roots, phases, batch_size, args.batch_mode, group_key_cache)
     batch_count = len(batch_plan.batches)
     print(
         "Batch mode enabled: "
@@ -403,10 +478,10 @@ def _run_batched(
             phases=phases,
             workers=workers,
             refresh_interval_seconds=args.live_report_interval,
-            dashboard_interval_seconds=args.live_dashboard_interval,
         )
         monitor.start([])
         print(f"Live run monitor: {monitor.run_dir}")
+        _print_live_dashboard_command(args, db_path, output_dir)
     _record_discovery_findings(db_path, discovery_findings, monitor)
 
     processed = 0
@@ -439,7 +514,6 @@ def _run_batched(
             processed_before += len(batch)
             if monitor is not None:
                 monitor.refresh(states, force=True)
-            generate_dashboard(db_path, output_dir / "dashboard.html", args.live_dashboard_interval)
             print(f"Batch {batch_index}/{batch_count} complete. Processed so far: {processed}/{total}")
             del states
             gc.collect()
@@ -460,6 +534,349 @@ def _run_batched(
     return 0
 
 
+def _run_streaming_discovery(
+    roots: list[Path],
+    phases: list[int],
+    args: argparse.Namespace,
+    db_path: Path,
+    output_dir: Path,
+    workers: int,
+    resource_guard: ResourceGuard,
+) -> int:
+    batch_size = max(1, int(args.batch_size))
+    streaming_mode = _streaming_batch_mode(args.batch_mode, phases)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if args.disable_episode_selection_cache:
+        print("Streaming discovery: episode selection cache is not used in streaming mode.")
+    print(
+        "Streaming discovery enabled: "
+        f"mode={streaming_mode}, batch_size={batch_size}, roots={len(roots)}, "
+        f"phases={','.join(str(p) for p in phases)}"
+    )
+    if streaming_mode == "group-aware":
+        if 2 in phases:
+            print("Streaming group-aware mode: Phase 2 task groups are kept together.")
+        elif 3 in phases:
+            print("Streaming group-aware mode: Phase 3 task+robot groups are kept together.")
+    elif any(phase in phases for phase in (2, 3)):
+        print(
+            "Warning: streaming discovery computes Phase 2/3 group outlier checks within "
+            "each fixed-size streamed batch. Use --batch-mode group-aware or auto to avoid "
+            "splitting groups."
+        )
+    if args.max_episodes is not None:
+        print(f"Streaming discovery max selected episodes: {args.max_episodes}")
+
+    monitor = None
+    if not args.disable_live_monitor:
+        run_id = args.run_id or datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+        monitor = RunMonitor(
+            db_path=db_path,
+            output_root=output_dir,
+            run_id=run_id,
+            roots=roots,
+            phases=phases,
+            workers=workers,
+            refresh_interval_seconds=args.live_report_interval,
+        )
+        monitor.start([])
+        print(f"Live run monitor: {monitor.run_dir}")
+        _print_live_dashboard_command(args, db_path, output_dir)
+
+    skipped_hidden_dirs: list[Path] = []
+    batch: list[Path] = []
+    current_group_key: tuple[str, ...] | None = None
+    current_group: list[Path] = []
+    scanned = 0
+    selected = 0
+    processed = 0
+    completed_groups = 0
+    oversized_groups = 0
+    skipped_completed = 0
+    skipped_quality = 0
+    skipped_unreadable = 0
+    batch_index = 0
+    started = time.perf_counter()
+    last_report = started
+    max_selected = args.max_episodes
+
+    def flush_batch(force: bool = False) -> bool:
+        nonlocal batch, processed, batch_index
+        if not batch:
+            return True
+        if not force and len(batch) < batch_size:
+            return True
+        batch_index += 1
+        print()
+        print(
+            f"=== Streaming batch {batch_index}: episodes={len(batch)}, "
+            f"processed_so_far={processed}, scanned={scanned} ==="
+        )
+        resource_guard.wait_if_needed(f"before streaming batch {batch_index}", force=True)
+        states = _load_or_create_states(batch, roots, db_path, args.force_rerun)
+        try:
+            for phase_number in phases:
+                _run_phase_with_retries(
+                    phase_number,
+                    states,
+                    db_path,
+                    workers,
+                    args.continue_after_fail,
+                    monitor,
+                    resource_guard,
+                    args.resource_error_retries,
+                    args.resource_retry_delay_seconds,
+                )
+            _write_final_verdicts(states, db_path)
+            processed += len(states)
+            if monitor is not None:
+                monitor.refresh(states, force=True)
+            print(
+                f"Streaming batch {batch_index} complete. "
+                f"Processed so far: {processed}; scanned={scanned}; selected={selected}; "
+                f"skipped_completed={skipped_completed}; skipped_quality={skipped_quality}; "
+                f"skipped_unreadable={skipped_unreadable}"
+            )
+        finally:
+            batch = []
+            del states
+            gc.collect()
+        return True
+
+    def add_group_to_batch(group_key: tuple[str, ...], group: list[Path]) -> None:
+        nonlocal batch, completed_groups, oversized_groups
+        if not group:
+            return
+        completed_groups += 1
+        if len(group) > batch_size:
+            oversized_groups += 1
+            if batch:
+                flush_batch(force=True)
+            batch.extend(group)
+            print(
+                "Streaming group-aware oversized group: "
+                f"{'/'.join(group_key)} has {len(group)} episodes; "
+                "running as a complete batch."
+            )
+            flush_batch(force=True)
+            return
+        if batch and len(batch) + len(group) > batch_size:
+            flush_batch(force=True)
+        batch.extend(group)
+        if len(batch) >= batch_size:
+            flush_batch(force=True)
+
+    try:
+        for episode_path, hidden_dirs in _iter_episode_paths_streaming(roots):
+            if hidden_dirs:
+                skipped_hidden_dirs.extend(hidden_dirs)
+                continue
+            scanned += 1
+            if args.date and args.date not in str(episode_path):
+                last_report = _print_streaming_progress(
+                    scanned,
+                    selected,
+                    processed,
+                    skipped_completed,
+                    skipped_quality,
+                    skipped_unreadable,
+                    started,
+                    last_report,
+                )
+                continue
+            if args.task and args.task.lower() not in str(episode_path).lower():
+                last_report = _print_streaming_progress(
+                    scanned,
+                    selected,
+                    processed,
+                    skipped_completed,
+                    skipped_quality,
+                    skipped_unreadable,
+                    started,
+                    last_report,
+                )
+                continue
+            keep, unreadable = _streaming_quality_filter(episode_path, args)
+            if not keep:
+                if unreadable:
+                    skipped_unreadable += 1
+                else:
+                    skipped_quality += 1
+                last_report = _print_streaming_progress(
+                    scanned,
+                    selected,
+                    processed,
+                    skipped_completed,
+                    skipped_quality,
+                    skipped_unreadable,
+                    started,
+                    last_report,
+                )
+                continue
+            if _streaming_episode_completed(db_path, episode_path, phases, args.force_rerun):
+                skipped_completed += 1
+                last_report = _print_streaming_progress(
+                    scanned,
+                    selected,
+                    processed,
+                    skipped_completed,
+                    skipped_quality,
+                    skipped_unreadable,
+                    started,
+                    last_report,
+                )
+                continue
+
+            selected += 1
+            if streaming_mode == "group-aware":
+                group_key = _group_key_for_path(roots, episode_path, phases)
+                if current_group_key is None:
+                    current_group_key = group_key
+                elif group_key != current_group_key:
+                    add_group_to_batch(current_group_key, current_group)
+                    current_group = []
+                    current_group_key = group_key
+                current_group.append(episode_path)
+            else:
+                batch.append(episode_path)
+            if max_selected is not None and selected >= max_selected:
+                if streaming_mode == "group-aware" and current_group_key is not None:
+                    add_group_to_batch(current_group_key, current_group)
+                    current_group = []
+                    current_group_key = None
+                flush_batch(force=True)
+                break
+            if streaming_mode == "fixed" and len(batch) >= batch_size:
+                flush_batch(force=True)
+            last_report = _print_streaming_progress(
+                scanned,
+                selected,
+                processed,
+                skipped_completed,
+                skipped_quality,
+                skipped_unreadable,
+                started,
+                last_report,
+            )
+
+        if streaming_mode == "group-aware" and current_group_key is not None:
+            add_group_to_batch(current_group_key, current_group)
+            current_group = []
+            current_group_key = None
+        flush_batch(force=True)
+    except ResourceGuardError as exc:
+        _print_error(str(exc))
+        if monitor is not None:
+            monitor.finish_run([])
+        return 2
+
+    _record_discovery_findings(db_path, _discovery_findings(skipped_hidden_dirs), monitor)
+    if monitor is not None:
+        monitor.finish_run([])
+    report_paths = _export_reports(db_path, output_dir)
+    if monitor is not None:
+        report_paths.extend(_export_reports(db_path, monitor.run_dir / "final"))
+    for report_path in report_paths:
+        print(f"Wrote report: {report_path}")
+    print(
+        "Streaming discovery complete: "
+        f"scanned={scanned}, selected={selected}, processed={processed}, "
+        f"groups={completed_groups}, oversized_groups={oversized_groups}, "
+        f"skipped_completed={skipped_completed}, skipped_quality={skipped_quality}, "
+        f"skipped_unreadable={skipped_unreadable}, hidden_dirs={len(skipped_hidden_dirs)}"
+    )
+    _print_db_final_summary(db_path, output_dir)
+    return 0
+
+
+def _iter_episode_paths_streaming(roots: list[Path]):
+    for root in roots:
+        stack = [Path(root)]
+        while stack:
+            current = stack.pop()
+            if current.name == "_quarantine":
+                continue
+            if current.name.startswith("episode_"):
+                yield current, []
+                continue
+            try:
+                children = sorted(
+                    (child for child in current.iterdir() if child.is_dir()),
+                    key=lambda item: item.name,
+                    reverse=True,
+                )
+            except OSError:
+                continue
+            for child in children:
+                if child.name == "_quarantine":
+                    continue
+                if child.name.startswith("."):
+                    yield current, [child]
+                    continue
+                stack.append(child)
+
+
+def _streaming_batch_mode(requested_mode: str, phases: list[int]) -> str:
+    if requested_mode == "auto":
+        return "group-aware" if any(phase in phases for phase in (2, 3)) else "fixed"
+    return requested_mode
+
+
+def _streaming_quality_filter(episode_path: Path, args: argparse.Namespace) -> tuple[bool, bool]:
+    if args.disable_quality_label_filter:
+        return True, False
+    metadata, findings = load_metadata(episode_path)
+    if findings:
+        return False, True
+    return args.quality_label in _quality_labels(metadata), False
+
+
+def _streaming_episode_completed(
+    db_path: Path,
+    episode_path: Path,
+    phases: list[int],
+    force_rerun: bool,
+) -> bool:
+    if force_rerun:
+        return False
+    state = load_episode_state(db_path, episode_path)
+    if state is None:
+        return False
+    completed = {int(phase) for phase in state.phases_completed}
+    return all(phase in completed for phase in phases)
+
+
+def _print_streaming_progress(
+    scanned: int,
+    selected: int,
+    processed: int,
+    skipped_completed: int,
+    skipped_quality: int,
+    skipped_unreadable: int,
+    started: float,
+    last_report: float,
+    force: bool = False,
+) -> float:
+    now = time.perf_counter()
+    if (
+        not force
+        and scanned % STREAMING_PROGRESS_INTERVAL_SCANNED != 0
+        and now - last_report < STREAMING_PROGRESS_INTERVAL_SECONDS
+    ):
+        return last_report
+    elapsed = max(0.001, now - started)
+    rate = scanned / elapsed if scanned else 0.0
+    print(
+        "  streaming discovery: "
+        f"scanned={scanned}, selected={selected}, processed={processed}, "
+        f"skipped_completed={skipped_completed}, skipped_quality={skipped_quality}, "
+        f"skipped_unreadable={skipped_unreadable}, "
+        f"scan_rate={rate:.1f}/s, elapsed={_format_duration(elapsed)}",
+        flush=True,
+    )
+    return now
+
+
 class BatchPlan:
     def __init__(self, mode: str, batches: list[list[Path]], warnings: list[str]) -> None:
         self.mode = mode
@@ -473,13 +890,14 @@ def _make_batch_plan(
     phases: list[int],
     batch_size: int,
     requested_mode: str,
+    group_key_cache: dict[str, tuple[str, str]] | None = None,
 ) -> BatchPlan:
     if requested_mode == "auto":
         mode = "group-aware" if any(phase in phases for phase in (2, 3)) else "fixed"
     else:
         mode = requested_mode
     if mode == "group-aware":
-        return _make_group_aware_batch_plan(episodes, roots, phases, batch_size)
+        return _make_group_aware_batch_plan(episodes, roots, phases, batch_size, group_key_cache or {})
     warnings = []
     if any(phase in phases for phase in (2, 3)):
         warnings.append(
@@ -498,6 +916,7 @@ def _make_group_aware_batch_plan(
     roots: list[Path],
     phases: list[int],
     batch_size: int,
+    group_key_cache: dict[str, tuple[str, str]],
 ) -> BatchPlan:
     if not episodes:
         return BatchPlan("group-aware", [], [])
@@ -510,7 +929,7 @@ def _make_group_aware_batch_plan(
     started = time.perf_counter()
     last_report = started
     for index, episode_path in enumerate(episodes, start=1):
-        grouped.setdefault(_group_key_for_path(roots, episode_path, phases), []).append(episode_path)
+        grouped.setdefault(_group_key_for_path(roots, episode_path, phases, group_key_cache), []).append(episode_path)
         last_report = _print_prefilter_progress(
             "group-aware batch planning",
             index,
@@ -552,7 +971,21 @@ def _make_group_aware_batch_plan(
     return BatchPlan("group-aware", batches, warnings)
 
 
-def _group_key_for_path(roots: list[Path], episode_path: Path, phases: list[int]) -> tuple[str, ...]:
+def _group_key_for_path(
+    roots: list[Path],
+    episode_path: Path,
+    phases: list[int],
+    group_key_cache: dict[str, tuple[str, str]] | None = None,
+) -> tuple[str, ...]:
+    if group_key_cache:
+        cached = group_key_cache.get(str(episode_path))
+        if cached:
+            task, robot = cached
+            if 2 in phases:
+                return (task,)
+            if 3 in phases:
+                return (task, robot)
+            return (task,)
     metadata, findings = load_metadata(episode_path)
     if findings:
         metadata = {}
@@ -575,6 +1008,19 @@ def _make_resource_guard(args: argparse.Namespace) -> ResourceGuard:
         max_wait_seconds=args.resource_max_wait_seconds,
         overload_action=args.overload_action,
         max_workers_safe=args.max_workers_safe,
+    )
+
+
+def _print_live_dashboard_command(args: argparse.Namespace, db_path: Path, output_dir: Path) -> None:
+    print("Live dashboard runs independently. Start it in another terminal with:")
+    print(
+        "  python3 QA_Pipeline/scripts/live_dashboard.py "
+        f"--db-path {db_path} "
+        f"--output-dir {output_dir} "
+        f"--interval {args.live_dashboard_interval:g} "
+        f"--max-episodes {args.live_dashboard_max_episodes} "
+        f"--max-findings {args.live_dashboard_max_findings} "
+        "--port 1234"
     )
 
 
@@ -623,6 +1069,101 @@ def _filter_by_quality_label(
         unreadable_metadata=unreadable_metadata,
         skipped_label_counts=skipped_label_counts,
     )
+
+
+def _episode_selection_cache_meta(args: argparse.Namespace, roots: list[Path]) -> dict:
+    return {
+        "version": 1,
+        "roots": [str(root) for root in roots],
+        "date": args.date or "",
+        "task": args.task or "",
+        "quality_label_filter_enabled": not args.disable_quality_label_filter,
+        "quality_label": args.quality_label if not args.disable_quality_label_filter else "",
+        "max_episodes": args.max_episodes,
+    }
+
+
+def _load_episode_selection_cache(
+    output_dir: Path,
+    expected_meta: dict,
+) -> tuple[list[Path], list[Finding], dict[str, tuple[str, str]]]:
+    meta_path = output_dir / EPISODE_SELECTION_META
+    paths_path = output_dir / EPISODE_SELECTION_CACHE
+    if not meta_path.exists() or not paths_path.exists():
+        return [], [], {}
+    try:
+        actual_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [], [], {}
+    if actual_meta != expected_meta:
+        return [], [], {}
+    episodes = []
+    group_key_cache: dict[str, tuple[str, str]] = {}
+    try:
+        for line in paths_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            path = str(record["episode_path"])
+            episodes.append(Path(path))
+            group_key_cache[path] = (
+                str(record.get("task") or "(unknown_task)"),
+                str(record.get("robot") or "(unknown_robot)"),
+            )
+    except (OSError, KeyError, json.JSONDecodeError):
+        return [], [], {}
+    return episodes, [], group_key_cache
+
+
+def _write_episode_selection_cache(
+    output_dir: Path,
+    episodes: list[Path],
+    meta: dict,
+    group_key_cache: dict[str, tuple[str, str]],
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = output_dir / EPISODE_SELECTION_META
+    paths_path = output_dir / EPISODE_SELECTION_CACHE
+    _write_text_atomic(meta_path, json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
+    lines = []
+    for episode in episodes:
+        task, robot = group_key_cache.get(str(episode), ("(unknown_task)", "(unknown_robot)"))
+        lines.append(
+            json.dumps(
+                {
+                    "episode_path": str(episode),
+                    "task": task,
+                    "robot": robot,
+                },
+                ensure_ascii=False,
+            )
+        )
+    _write_text_atomic(paths_path, "\n".join(lines) + ("\n" if lines else ""))
+
+
+def _build_group_key_cache(episodes: list[Path], roots: list[Path]) -> dict[str, tuple[str, str]]:
+    cache: dict[str, tuple[str, str]] = {}
+    total = len(episodes)
+    started = time.perf_counter()
+    last_report = started
+    for index, episode_path in enumerate(episodes, start=1):
+        metadata, findings = load_metadata(episode_path)
+        if findings:
+            metadata = {}
+        context = infer_context(roots, episode_path, metadata)
+        task = str(context.get("task") or metadata.get("task_key") or "(unknown_task)")
+        robot = str(context.get("robot") or metadata.get("robot") or "(unknown_robot)")
+        cache[str(episode_path)] = (task, robot)
+        last_report = _print_prefilter_progress(
+            "episode selection cache",
+            index,
+            total,
+            started,
+            last_report,
+            len(cache),
+            force=index == total,
+        )
+    return cache
 
 
 def _quality_labels(metadata: dict) -> list[str]:
@@ -970,19 +1511,11 @@ def _export_reports(db_path: Path, output_dir: Path) -> list[Path]:
     findings_jsonl = output_dir / "quality_findings.jsonl"
     summary_md = output_dir / "quality_summary.md"
     dashboard_html = output_dir / "dashboard.html"
-    excel_report = output_dir / "quality_report.xlsx"
     export_quality_report(db_path, quality_report)
     export_findings_jsonl(db_path, findings_jsonl)
     export_summary_md(db_path, summary_md)
     generate_dashboard(db_path, dashboard_html)
-    report_paths = [quality_report, findings_jsonl, summary_md, dashboard_html]
-    try:
-        export_excel_report(db_path, excel_report)
-    except PipelineConfigurationError as exc:
-        print(f"Warning: skipped Excel report export: {exc}")
-    else:
-        report_paths.append(excel_report)
-    return report_paths
+    return [quality_report, findings_jsonl, summary_md, dashboard_html]
 
 
 def _print_final_summary(states: list[EpisodeState], output_dir: Path) -> None:
@@ -1019,6 +1552,16 @@ def _print_db_final_summary(db_path: Path, output_dir: Path) -> None:
 
 def _print_error(message: str) -> None:
     print(f"Error: {message}", file=sys.stderr)
+
+
+def _none_if_non_positive(value: int | None) -> int | None:
+    return value if value is not None and value > 0 else None
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(path)
 
 
 if __name__ == "__main__":

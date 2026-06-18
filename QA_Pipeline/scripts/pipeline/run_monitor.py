@@ -11,7 +11,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from scripts.generate_dashboard import generate_dashboard
 from scripts.pipeline.qa_core import EpisodeState
 
 
@@ -46,7 +45,6 @@ class RunMonitor:
         phases: list[int],
         workers: int,
         refresh_interval_seconds: float,
-        dashboard_interval_seconds: float,
     ) -> None:
         self.db_path = Path(db_path)
         self.output_root = Path(output_root)
@@ -56,7 +54,6 @@ class RunMonitor:
         self.phases = phases
         self.workers = workers
         self.refresh_interval_seconds = max(0.1, refresh_interval_seconds)
-        self.dashboard_interval_seconds = max(1.0, dashboard_interval_seconds)
         self.started_at = _now()
         self.started_perf = time.perf_counter()
         self.current_phase: int | None = None
@@ -64,7 +61,6 @@ class RunMonitor:
         self.current_phase_total = 0
         self.current_phase_processed = 0
         self.last_refresh_perf = 0.0
-        self.last_dashboard_perf = 0.0
         self.last_finding_id = 0
         self.issue_counts: Counter[str] = Counter()
         self.severity_counts: Counter[str] = Counter()
@@ -78,7 +74,6 @@ class RunMonitor:
         self._write_latest_run_pointer()
         self._write_run_status(states, "running")
         self._write_live_summary(states)
-        self._write_live_dashboard(force=True)
 
     def start_phase(self, phase_number: int, total: int, skipped: int, states: list[EpisodeState]) -> None:
         self.current_phase = phase_number
@@ -143,7 +138,6 @@ class RunMonitor:
         )
         self._write_run_status(states, "running")
         self._write_live_summary(states)
-        self._write_live_dashboard(force=force)
         self.last_refresh_perf = now_perf
 
     def _initialize_files(self) -> None:
@@ -155,25 +149,6 @@ class RunMonitor:
 
     def _write_latest_run_pointer(self) -> None:
         _write_text_atomic(self.output_root / "latest_run.txt", str(self.run_dir) + "\n")
-
-    def _write_live_dashboard(self, force: bool = False) -> None:
-        now_perf = time.perf_counter()
-        if not force and now_perf - self.last_dashboard_perf < self.dashboard_interval_seconds:
-            return
-        try:
-            generate_dashboard(
-                self.db_path,
-                self.output_root / "dashboard.html",
-                self.dashboard_interval_seconds,
-            )
-            generate_dashboard(
-                self.db_path,
-                self.run_dir / "dashboard.html",
-                self.dashboard_interval_seconds,
-            )
-        except sqlite3.Error:
-            return
-        self.last_dashboard_perf = now_perf
 
     def _poll_issue_events(self) -> list[dict[str, Any]]:
         rows = self._new_finding_rows()
@@ -257,7 +232,7 @@ class RunMonitor:
             "current_phase_processed": self.current_phase_processed,
             "current_phase_total": self.current_phase_total,
             "current_phase_elapsed_seconds": self._phase_elapsed_seconds(),
-            "final_status_counts": _final_counts(states),
+            "final_status_counts": _final_counts(states, self.db_path),
             "issue_counts": dict(self.issue_counts),
             "severity_counts": dict(self.severity_counts),
             "finding_status_counts": dict(self.status_counts),
@@ -279,7 +254,7 @@ class RunMonitor:
             "## Final Status Counts",
             "",
         ]
-        for status, count in sorted(_final_counts(states).items()):
+        for status, count in sorted(_final_counts(states, self.db_path).items()):
             lines.append(f"- `{status}`: {count}")
         lines.extend(["", "## Issue Counts", ""])
         if self.issue_counts:
@@ -343,7 +318,17 @@ def _phase_counts(states: list[EpisodeState], phase_number: int | None) -> dict[
     return dict(counts)
 
 
-def _final_counts(states: list[EpisodeState]) -> dict[str, int]:
+def _final_counts(states: list[EpisodeState], db_path: Path | None = None) -> dict[str, int]:
+    if not states and db_path is not None and db_path.exists():
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(NULLIF(final_status, ''), 'pending') AS status, COUNT(*)
+                FROM episodes
+                GROUP BY status
+                """
+            ).fetchall()
+        return {str(status): int(count) for status, count in rows}
     counts: Counter[str] = Counter()
     for state in states:
         status = state.final_status or "pending"

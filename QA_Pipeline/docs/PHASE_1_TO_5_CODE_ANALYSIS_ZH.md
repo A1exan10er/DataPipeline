@@ -209,7 +209,7 @@ Phase 2 主要判断 episode 的时长、总帧数、FPS、时间戳行数、状
    如果图像模态 `timestamps.csv` 无法读取，则 `major/fail`。
 
 7. `state_csv_row_count_mismatch`
-   对每个 `observation.state.*` 模态，统计 `data.csv` 行数。如果与 `duration_seconds * fps` 的误差比例大于 15%，则 `minor/warning`。
+   对每个非触觉 `observation.state.*` 模态，统计 `data.csv` 行数。如果与 `duration_seconds * fps` 的误差比例大于 15%，则 `minor/warning`。
 
 8. `modality_frame_count_misaligned`
    从 `metadata.modalities` 读取每个模态的 `frames` 或 `rows` 计数，比较最大值和最小值：
@@ -217,7 +217,7 @@ Phase 2 主要判断 episode 的时长、总帧数、FPS、时间戳行数、状
    - 4 <= spread <= 10：`minor/warning`。
    - spread > 10：`major/needs_review`。
 
-对触觉 state 模态有特殊 fallback：如果 `observation.state.*tactile*` 的 rows 为 0，会尝试用对应 `observation.image.*tactile*` 在 `metadata.frame_integrity` 中的 `frame_count`。
+触觉 state 模态不参与 Phase 2 行数一致性和模态 frame count 对齐检查。`observation.state.*tactile*` 是由触觉图像后处理得到的派生数据，当前模型训练不使用该数据，因此缺失或行数不匹配不应影响 QA 结果。原始触觉质量由 Phase 3 的 `observation.image.*tactile*` 检查负责。
 
 ### 4.4 组级检查
 
@@ -273,7 +273,7 @@ Phase 2 会写入：
 
 ### 5.1 目的
 
-Phase 3 检查普通图像模态的时间戳质量，包括时间戳是否递增、是否重复、是否存在丢帧、实际 FPS 是否偏离预期、多相机起止时间是否同步，以及同任务同机器人组内的频率/连续丢帧离群。
+Phase 3 检查普通图像模态的时间戳质量，包括时间戳是否递增、是否重复、是否存在丢帧、实际 FPS 是否偏离预期、多相机起止时间是否同步，以及同任务同机器人组内的连续丢帧离群。
 
 注意：当前 Phase 3 只检查 `observation.image.*` 且排除 `observation.image.flow_*`。源码注释明确说 state/action 时间戳由 Phase 5 检查。文件中存在 `_check_large_gaps()` 等数据模态逻辑，但当前 `_timestamp_modalities()` 不会返回 state/action 模态，因此这部分对当前执行路径基本不可达。
 
@@ -317,8 +317,8 @@ Phase 3 检查普通图像模态的时间戳质量，包括时间戳是否递增
 4. `frame_drop_ratio_high`
    从 `metadata.frame_integrity[modality]` 读取 `frame_count` 和 `total_drops`，计算 `drop_ratio = total_drops / frame_count`。
    阈值来自配置：
-   - 普通图像：默认 `0.15`
-   - 触觉图像：默认 `0.20`
+   - 普通图像：默认 `0.10`
+   - 触觉图像：默认 `0.15`
    超过阈值为 `major/fail`。
 
 5. `consecutive_frame_drops_high`
@@ -340,10 +340,7 @@ Phase 3 检查普通图像模态的时间戳质量，包括时间戳是否递增
 
 ### 5.5 组级检查
 
-1. `actual_fps_group_outlier`
-   按 `task + "_" + robot` 分组，并在每个模态内计算 actual FPS 的 median/IQR。每组每模态至少 5 个值才启用。若某 episode 的距离超过 `3 IQR`，则 `minor/needs_review`。
-
-2. `consecutive_drops_outlier`
+1. `consecutive_drops_outlier`
    同样按 task+robot 和模态分组。
    - 组大小至少 5：使用 `median + 3 * IQR`，超过则 `major/needs_review`。
    - 组大小小于 5：使用 fallback 阈值，默认 `max_consecutive_warn = 10`，达到或超过则 `minor/warning`。

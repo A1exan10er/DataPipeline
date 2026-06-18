@@ -173,11 +173,13 @@ statistics instead of scanning `timestamps.csv`.
 ### Frame drop thresholds
 
 **Decision:**
-- `total_drops / frame_count >= 0.10` → `major/fail`
-- No warning tier for drop ratio; below 10% is pass.
+- RGB-like video `total_drops / frame_count > 0.10` → `major/fail`
+- tactile video `total_drops / frame_count > 0.15` → `major/fail`
+- No warning tier for drop ratio; values within threshold pass.
 
-**Reason (from team requirement 2026-06-04):** Threshold of 10% is a hard
-requirement. Above this the data is considered unusable for training.
+**Reason (updated 2026-06-16):** RGB-like videos allow up to 10% frame drops,
+and tactile videos allow up to 15%. Above this the episode is considered
+unusable for training.
 
 ### Consecutive drop threshold: statistical (IQR)
 

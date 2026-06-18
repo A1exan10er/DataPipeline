@@ -75,7 +75,7 @@ QA_Pipeline/requirements.txt
 
 - `opencv-python-headless`：第 4 阶段视频检查；
 - `scipy`：UMI 处理；
-- `openpyxl`：Excel 报告导出；未安装时 QA 仍会完成，但会跳过 `.xlsx`；
+- `openpyxl`：仅手动 Excel 导出需要，正常 QA 运行不需要；
 - 主机上的 `ffmpeg` 和 `ffprobe`：UMI 视频处理。
 
 将 Python 依赖安装到仓库虚拟环境：
@@ -104,13 +104,15 @@ QA_Pipeline/scripts/run_pipeline.py
 ```text
 1  结构、metadata、必需文件、标签、机器人/task 不匹配检查
 2  时长、帧数、行数、task 级时长离群检查
-3  时间戳、FPS、丢帧、task+robot 级时间离群检查
+3  时间戳、FPS、丢帧和多图像模态起止同步检查
 4  视频健康：可打开性、视频属性、黑/白/冻结采样帧
 5  机器人状态/action 合理性和静止检查
 6  UMI 专用验证、预处理和 world-frame 导出
 ```
 
 所有阶段都可以通过 `--phases` 选择性运行。
+
+每个阶段的详细判定规则见 `QA_PHASE_DECISION_RULES.md`。
 
 默认情况下，流水线会在进入各阶段前读取 `metadata.json`，只处理
 `quality.labels` 中包含 `完全正常` 的 episode。采集员已经标为其他质量标签
@@ -146,11 +148,10 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --workers 3 \
   --batch-size 5000 \
   --batch-mode auto \
-  --live-dashboard-interval 5 \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 1.20 \
   --resource-check-interval 60 \
-  --resource-max-wait-seconds 15 \
+  --resource-max-wait-seconds 0 \
   --resource-error-retries 5 \
   --resource-retry-delay-seconds 20 \
   --force-rerun
@@ -175,7 +176,7 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
 Resource guard 默认启用。它可以：
 
 - 将请求的 worker 数降低到安全值；
-- 在负载或内存不安全时暂停；
+- 在负载或内存不安全时暂停，默认一直等待到恢复；
 - resource-guard stop 后重试当前阶段。
 
 常用选项：
@@ -204,7 +205,7 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 1.20 \
   --resource-check-interval 60 \
-  --resource-max-wait-seconds 15 \
+  --resource-max-wait-seconds 0 \
   --resource-error-retries 5 \
   --resource-retry-delay-seconds 20
 ```
@@ -217,7 +218,6 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
 
 ```text
 quality_report.csv
-quality_report.xlsx
 quality_findings.jsonl
 quality_summary.md
 dashboard.html
@@ -246,10 +246,16 @@ python3 QA_Pipeline/scripts/qa_status.py \
   --watch
 ```
 
-启动 dashboard 服务：
+启动独立 dashboard 进程：
 
 ```bash
-python3 -m http.server 1234 --directory outputs/qa_20260612_phase1_5
+python3 QA_Pipeline/scripts/live_dashboard.py \
+  --db-path outputs/qa_20260612_phase1_5/qa_pipeline.db \
+  --output-dir outputs/qa_20260612_phase1_5 \
+  --interval 5 \
+  --max-episodes 5000 \
+  --max-findings 10000 \
+  --port 1234
 ```
 
 然后打开：
@@ -260,11 +266,13 @@ http://<server-ip>:1234/dashboard.html
 
 `dashboard.html` 是实时 shell，数据在旁边的 `dashboard_data.json` 中。通过
 HTTP 访问时，页面默认每 5 秒读取一次 JSON 并局部更新内容，不再整页刷新，
-因此自动刷新时不应出现空白页。间隔可用 `--live-dashboard-interval` 调整。
-直接用 `file://` 打开时，浏览器安全限制会阻止读取 JSON；请使用
-`python3 -m http.server` 服务输出目录。
+因此自动刷新时不应出现空白页。`live_dashboard.py --interval` 控制独立进程
+的生成间隔；主流水线的 `--live-dashboard-interval` 只控制运行开始时打印的
+建议命令。`--port 0` 只写 dashboard 文件，不启动 HTTP 服务；`--once` 只生成
+一次并退出。直接用 `file://` 打开时，浏览器安全限制会阻止读取 JSON；请使用
+`live_dashboard.py --port <port>` 或其他 HTTP 服务访问输出目录。
 
-从已有 DB 生成 Excel，不需要重新运行 QA：
+Excel 不属于正常流水线输出。如需从已有 DB 生成 Excel，不需要重新运行 QA：
 
 ```bash
 python3 QA_Pipeline/scripts/export_excel_report.py \
@@ -272,7 +280,7 @@ python3 QA_Pipeline/scripts/export_excel_report.py \
   --output outputs/qa_20260612_phase1_5/quality_report.xlsx
 ```
 
-Excel 工作簿包含 summary、episodes、exact findings、issue counts 和 task status counts 等 sheet。该功能需要虚拟环境中安装 `openpyxl`；如果缺失，主流水线会打印 warning 并继续生成 CSV、JSONL、Markdown 和 dashboard。
+Excel 工作簿包含 summary、episodes、exact findings、issue counts 和 task status counts 等 sheet。该功能需要虚拟环境中安装 `openpyxl`，并且应作为单独命令按需运行。
 
 ## UMI 处理
 
@@ -358,5 +366,5 @@ rsync -azv \
 - QA Pipeline 本身是 report-first，不修改源 episode。
 - 仅在明确想重新计算所选阶段时使用 `--force-rerun`。
 - 输出目录应与源 episode 文件夹分离。
-- 在任何 cleanup、quarantine 或删除步骤前，先复核 `dashboard.html`、`quality_report.xlsx`、`quality_report.csv` 和 `quality_findings.jsonl`。
+- 在任何 cleanup、quarantine 或删除步骤前，先复核 `dashboard.html`、`quality_report.csv` 和 `quality_findings.jsonl`。如需 Excel，可用单独导出命令生成。
 - 共享服务器上不要占满所有 CPU 核心；先保守设置 worker，再根据负载和内存情况调整。

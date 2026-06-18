@@ -29,7 +29,6 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --max-workers-safe 4 \
   --batch-size 10000 \
   --batch-mode group-aware \
-  --live-dashboard-interval 5 \
   --run-id verified-p1-p2 \
   --force-rerun
 ```
@@ -43,10 +42,12 @@ Current default behavior:
   `hidden_directory_skipped`;
 - batch mode limits the number of loaded episode states, and `group-aware`
   batching keeps Phase 2/3 outlier groups complete;
-- the live dashboard writes `dashboard.html` plus `dashboard_data.json`; serve
-  the output directory over HTTP and open `dashboard.html`;
-- Excel export needs `openpyxl`; if it is missing, the main run continues and
-  still writes CSV, JSONL, Markdown, SQLite, and dashboard outputs.
+- the dashboard can run as a separate process with
+  `QA_Pipeline/scripts/live_dashboard.py`; it updates `dashboard.html` plus
+  `dashboard_data.json` from the SQLite DB and can serve the output directory
+  over HTTP;
+- Excel export is manual-only via `QA_Pipeline/scripts/export_excel_report.py`;
+  normal runs write CSV, JSONL, Markdown, SQLite, and dashboard outputs.
 
 Detailed documentation:
 

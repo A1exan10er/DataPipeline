@@ -81,8 +81,7 @@ Current important dependencies:
 
 - `opencv-python-headless` for Phase 4 video checks;
 - `scipy` for UMI processing;
-- `openpyxl` for Excel report export; QA still completes without it, but
-  `.xlsx` export is skipped;
+- `openpyxl` only for manual Excel export; normal QA runs do not need it;
 - host `ffmpeg` and `ffprobe` for UMI video processing.
 
 Install Python dependencies into the repo virtual environment:
@@ -111,13 +110,15 @@ Phases:
 ```text
 1  Structure, metadata, required files, labels, robot/task mismatch
 2  Duration, frame counts, row counts, task-level duration outliers
-3  Timestamp, FPS, frame drops, task+robot timing outliers
+3  Timestamp, FPS, frame drops, and image-modality start/end alignment
 4  Video health: openability, metadata, sampled black/white/frozen frames
 5  Robot state/action reasonableness and standstill checks
 6  UMI-specific validation, preprocessing, and world-frame export
 ```
 
 All phases are optional via `--phases`.
+
+See `QA_PHASE_DECISION_RULES.md` for detailed decision rules for every phase.
 
 By default, the runner reads each episode's `metadata.json` before phase work
 and only processes episodes whose `quality.labels` contains `完全正常`.
@@ -154,11 +155,10 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --workers 3 \
   --batch-size 5000 \
   --batch-mode auto \
-  --live-dashboard-interval 5 \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 1.20 \
   --resource-check-interval 60 \
-  --resource-max-wait-seconds 15 \
+  --resource-max-wait-seconds 0 \
   --resource-error-retries 5 \
   --resource-retry-delay-seconds 20 \
   --force-rerun
@@ -191,7 +191,7 @@ time on very large NAS roots even when previous records already exist.
 The resource guard is enabled by default. It can:
 
 - lower requested worker count to a safe value;
-- pause when load or memory is unsafe;
+- pause when load or memory is unsafe and wait until recovery by default;
 - retry a phase after a resource-guard stop.
 
 Useful options:
@@ -222,7 +222,7 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 1.20 \
   --resource-check-interval 60 \
-  --resource-max-wait-seconds 15 \
+  --resource-max-wait-seconds 0 \
   --resource-error-retries 5 \
   --resource-retry-delay-seconds 20
 ```
@@ -235,7 +235,6 @@ Normal outputs:
 
 ```text
 quality_report.csv
-quality_report.xlsx
 quality_findings.jsonl
 quality_summary.md
 dashboard.html
@@ -264,10 +263,16 @@ python3 QA_Pipeline/scripts/qa_status.py \
   --watch
 ```
 
-Serve the dashboard:
+Start the independent dashboard process:
 
 ```bash
-python3 -m http.server 1234 --directory outputs/qa_20260612_phase1_5
+python3 QA_Pipeline/scripts/live_dashboard.py \
+  --db-path outputs/qa_20260612_phase1_5/qa_pipeline.db \
+  --output-dir outputs/qa_20260612_phase1_5 \
+  --interval 5 \
+  --max-episodes 5000 \
+  --max-findings 10000 \
+  --port 1234
 ```
 
 Then open:
@@ -279,11 +284,16 @@ http://<server-ip>:1234/dashboard.html
 `dashboard.html` is now a live shell and the data lives beside it in
 `dashboard_data.json`. When served over HTTP, the browser polls that JSON every
 5 seconds by default and updates the page in place, avoiding a blank page during
-auto-refresh. Change the interval with `--live-dashboard-interval`. Direct
-`file://` opening cannot fetch the JSON because of browser security limits, so
-serve the output directory with `python3 -m http.server`.
+auto-refresh. `live_dashboard.py --interval` controls the independent updater;
+the main pipeline's `--live-dashboard-interval` only controls the suggested
+command printed at run start. Use `--port 0` to write dashboard files without
+serving HTTP, or `--once` to generate once and exit. Direct `file://` opening
+cannot fetch the JSON because of browser security limits, so use
+`live_dashboard.py --port <port>` or another HTTP server for the output
+directory.
 
-Generate Excel from an existing DB without rerunning QA:
+Excel is not part of normal pipeline output. Generate it manually from an
+existing DB when needed, without rerunning QA:
 
 ```bash
 python3 QA_Pipeline/scripts/export_excel_report.py \
@@ -293,8 +303,7 @@ python3 QA_Pipeline/scripts/export_excel_report.py \
 
 The Excel workbook contains sheets for summary counts, episodes, exact findings,
 issue counts, and task status counts. It requires `openpyxl` in the virtual
-environment. If `openpyxl` is missing during a normal run, the pipeline prints a
-warning and still writes CSV, JSONL, Markdown, and dashboard outputs.
+environment and should be run as a separate command on demand.
 
 ## UMI Processing
 
@@ -387,7 +396,8 @@ so use dry-run/copy-first workflows before running them on production data.
 - Use `--force-rerun` only when you intentionally want to recompute selected
   phases.
 - Keep output directories separate from source episode folders.
-- Review `dashboard.html`, `quality_report.xlsx`, `quality_report.csv`, and
-  `quality_findings.jsonl` before any cleanup, quarantine, or deletion step.
+- Review `dashboard.html`, `quality_report.csv`, and `quality_findings.jsonl`
+  before any cleanup, quarantine, or deletion step. Generate Excel separately
+  only when needed.
 - Do not run all CPU cores on shared servers; start conservatively and adjust
   workers after checking load and memory.

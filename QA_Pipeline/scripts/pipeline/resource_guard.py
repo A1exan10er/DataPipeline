@@ -51,7 +51,7 @@ class ResourceGuard:
         max_load_ratio: float = 0.75,
         min_free_mem_gb: float = 3.0,
         check_interval_seconds: float = 30.0,
-        max_wait_seconds: float = 120.0,
+        max_wait_seconds: float = 0.0,
         overload_action: str = "pause",
         max_workers_safe: int | None = None,
     ) -> None:
@@ -60,7 +60,7 @@ class ResourceGuard:
         self.max_load_ratio = max_load_ratio
         self.min_free_mem_gb = min_free_mem_gb
         self.check_interval_seconds = check_interval_seconds
-        self.max_wait_seconds = max_wait_seconds
+        self.max_wait_seconds = max(0.0, float(max_wait_seconds))
         self.overload_action = overload_action
         self.max_workers_safe = max_workers_safe or max(1, self.cpu_count // 2)
         self._last_check_time = 0.0
@@ -92,6 +92,10 @@ class ResourceGuard:
             raise ResourceGuardError(message)
         print()
         print(message)
+        if self.max_wait_seconds <= 0:
+            print("Resource guard: pausing until resources recover...")
+            self._wait_until_recovered(label)
+            return
         print(f"Resource guard: pausing for up to {self.max_wait_seconds:.0f}s...")
         start = time.monotonic()
         while time.monotonic() - start < self.max_wait_seconds:
@@ -105,6 +109,20 @@ class ResourceGuard:
             "Resource guard: host remained overloaded for "
             f"{self.max_wait_seconds:.0f}s during {label}: {snapshot.reason()}"
         )
+
+    def _wait_until_recovered(self, label: str) -> None:
+        next_report = time.monotonic() + 60.0
+        while True:
+            time.sleep(10.0)
+            snapshot = self.snapshot()
+            if not snapshot.overloaded:
+                print("Resource guard: resources recovered; resuming.")
+                self._last_check_time = time.monotonic()
+                return
+            now = time.monotonic()
+            if now >= next_report:
+                print(f"Resource guard: still waiting during {label}: {snapshot.reason()}")
+                next_report = now + 60.0
 
     def snapshot(self) -> ResourceSnapshot:
         try:

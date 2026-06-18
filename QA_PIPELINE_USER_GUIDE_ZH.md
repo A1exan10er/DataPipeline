@@ -49,15 +49,13 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --workers 4 \
   --batch-size 5000 \
   --batch-mode auto \
-  --live-dashboard-interval 5 \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 0.65 \
   --resource-check-interval 15 \
-  --resource-max-wait-seconds 30 \
   --force-rerun
 ```
 
-`--workers` 会传给所有已注册阶段。第 1 到第 5 阶段有并行执行路径。第 6 阶段会接收该参数，但目前会逐个处理 UMI episode，因为每个 UMI episode 可能包含较重的视频和轨迹处理。默认启用 resource guard：它会把 worker 数限制在安全范围内，并在服务器负载或可用内存过低时暂停；默认最多等待 120 秒，除非命令行覆盖该值，仍未恢复则停止运行并提示降低并发。
+`--workers` 会传给所有已注册阶段。第 1 到第 5 阶段有并行执行路径。第 6 阶段会接收该参数，但目前会逐个处理 UMI episode，因为每个 UMI episode 可能包含较重的视频和轨迹处理。默认启用 resource guard：它会把 worker 数限制在安全范围内，并在服务器负载或可用内存过低时暂停，并一直等到服务器恢复。只有在明确希望超时停止时，才把 `--resource-max-wait-seconds` 设置为正数；长时间服务器运行应保持默认值 `0`。
 
 如果 resource guard 在某个阶段内部停止运行，runner 默认会重试该阶段。每个 episode 完成后都会立即把状态保存到 SQLite，因此重试该阶段时会从该阶段未完成的 episode 继续。
 
@@ -123,7 +121,6 @@ episode_0001/
 
 ```text
 quality_report.csv
-quality_report.xlsx
 quality_findings.jsonl
 quality_summary.md
 dashboard.html
@@ -142,25 +139,42 @@ outputs/<run>/runs/<run-id>/
   live_summary.md
   final/
     quality_report.csv
-    quality_report.xlsx
     quality_findings.jsonl
     quality_summary.md
     dashboard.html
     dashboard_data.json
 ```
 
-运行开始后也会立即生成并定期刷新：
+实时 dashboard 现在作为独立进程运行。流水线运行时，在另一个 terminal 或
+tmux pane 中使用同一个 DB 和输出目录启动：
+
+```bash
+python3 QA_Pipeline/scripts/live_dashboard.py \
+  --db-path outputs/<run>/qa_pipeline.db \
+  --output-dir outputs/<run> \
+  --interval 5 \
+  --max-episodes 5000 \
+  --max-findings 10000 \
+  --port 1234
+```
+
+该进程会写入并刷新：
 
 ```text
 outputs/<run>/dashboard.html
 outputs/<run>/dashboard_data.json
-outputs/<run>/runs/<run-id>/dashboard.html
-outputs/<run>/runs/<run-id>/dashboard_data.json
 ```
 
-默认实时 dashboard 每 5 秒刷新一次，可用 `--live-dashboard-interval` 调整。使用 `--disable-live-monitor` 时不会生成实时 dashboard，只会在运行结束后生成最终 dashboard。`dashboard.html` 是稳定页面 shell，实时数据写在同目录的 `dashboard_data.json` 中。通过 HTTP 访问时，页面会轮询 JSON 并在原页面内更新，因此自动刷新时不应出现整页空白。直接用 `file://` 打开时，浏览器安全限制会阻止读取 JSON；请使用 `python3 -m http.server` 服务输出目录。
+`dashboard.html` 是稳定页面 shell，实时数据写在同目录的
+`dashboard_data.json` 中。通过 HTTP 访问时，页面会轮询 JSON 并在原页面内
+更新，因此自动刷新时不应出现整页空白。`live_dashboard.py --interval` 控制
+独立 dashboard 进程的生成间隔；主流水线的 `--live-dashboard-interval` 只控
+制运行开始时打印的建议命令。`--port 0` 只更新文件，不启动 HTTP 服务；
+`--once` 只生成一次并退出。直接用 `file://` 打开时，浏览器安全限制会阻止
+读取 JSON；请使用 `live_dashboard.py --port <port>` 或其他 HTTP 服务访问
+输出目录。
 
-`quality_report.csv` 和 `quality_report.xlsx` 每个 episode 一行。`quality_findings.jsonl` 和 `episode_issues.csv` 每个具体问题一行。Excel 工作簿用于人工查看和对外分享，包含 summary、episode 状态、具体 findings、问题类型统计和 task 状态统计等 sheet。
+`quality_report.csv` 每个 episode 一行。`quality_findings.jsonl` 和 `episode_issues.csv` 每个具体问题一行。正常流水线不生成 Excel；只有需要人工分享时再单独手动生成。
 
 ## Dashboard
 
@@ -170,18 +184,18 @@ outputs/<run>/runs/<run-id>/dashboard_data.json
 <output-dir>/dashboard.html
 ```
 
-实时运行目录中也有一份副本：
-
-```text
-<output-dir>/runs/<run-id>/dashboard.html
-```
-
 运行结束后，最终副本还会写入 `<output-dir>/runs/<run-id>/final/dashboard.html`。
 
-如需从服务器访问：
+如需从服务器更新并访问，请在单独 terminal 或 tmux pane 中运行：
 
 ```bash
-python3 -m http.server 1234 --directory outputs/qa_20260611
+python3 QA_Pipeline/scripts/live_dashboard.py \
+  --db-path outputs/qa_20260611/qa_pipeline.db \
+  --output-dir outputs/qa_20260611 \
+  --interval 5 \
+  --max-episodes 5000 \
+  --max-findings 10000 \
+  --port 1234
 ```
 
 然后打开：
@@ -229,7 +243,7 @@ python3 QA_Pipeline/scripts/qa_status.py --output-dir outputs/qa_20260611 --run-
 
 主流水线会在输出目录写入 `latest_run.txt`，该脚本会自动读取它并找到最新运行目录。需要实时查看详细 issue 时，可先用 `cat outputs/qa_20260611/latest_run.txt` 找到目录，再查看其中的 `issue_events.jsonl`。
 
-HTML dashboard 也会在运行开始时存在，并随实时监控刷新：
+HTML dashboard 会在独立 dashboard 进程启动后存在，并随该进程刷新：
 
 ```bash
 ls outputs/qa_20260611/dashboard.html
@@ -241,13 +255,7 @@ ls outputs/qa_20260611/dashboard.html
 
 ## Excel 报告
 
-安装 `openpyxl` 后，每次正常导出都会写入：
-
-```text
-<output-dir>/quality_report.xlsx
-```
-
-该工作簿比 CSV/JSONL 更适合给非技术人员查看，包含：
+Excel 是可选的手动导出，不属于正常流水线输出。这样大规模运行不需要为可能用不到的 workbook 消耗内存和 CPU。手动生成的工作簿比 CSV/JSONL 更适合给非技术人员查看，包含：
 
 - `Summary`：episode 总数、状态统计、finding 严重程度统计；
 - `Episodes`：每个 episode 一行；
@@ -263,9 +271,7 @@ python3 QA_Pipeline/scripts/export_excel_report.py \
   --output outputs/qa_20260612_phase1_5/quality_report.xlsx
 ```
 
-该功能需要 `datapipeline-env` 中安装 `openpyxl`。如果正常流水线运行时缺少
-`openpyxl`，runner 会打印 warning，并继续生成 CSV、JSONL、Markdown、SQLite
-和 dashboard。手动导出 Excel 仍需要先安装 `openpyxl`。
+该功能需要 `datapipeline-env` 中安装 `openpyxl`。手动导出默认有大数据安全限制：超过 100,000 个 episode 的数据库会跳过 Excel，除非明确设置 `QA_EXCEL_MAX_EPISODES=0` 强制导出。
 
 ## 状态判定方式
 
@@ -378,7 +384,7 @@ QA_Pipeline/scripts/pipeline/phase2_duration.py
 | `duration_frames_fps_inconsistent` | `total_frames` 与 `duration_seconds * fps` 的差异超过 10% | fail |
 | `timestamps_unreadable` | 图像 `timestamps.csv` 无法读取 | fail |
 | `timestamps_row_count_mismatch` | 图像时间戳行数与 `total_frames` 的差异超过 10% | fail |
-| `state_csv_row_count_mismatch` | 状态 CSV 行数与预期行数的差异超过 15% | warning |
+| `state_csv_row_count_mismatch` | 非触觉状态 CSV 行数与预期行数的差异超过 15% | warning |
 | `video_action_length_mismatch` | 图像时间戳行数和主动作行数的差值超过配置阈值，默认 3 | fail |
 | `duration_task_outlier` | 同任务组内时长 IQR 距离大于 3 | needs_review |
 | `duration_absolute_too_short` | 时长小于任务中位数的 20% | fail |
@@ -427,7 +433,6 @@ QA_Pipeline/scripts/pipeline/phase3_timestamp.py
 | `abnormal_fps_gain` | 实际 FPS 高于预期且超过阈值，默认 10% | warning |
 | `timestamps_raw_inconsistency` | 原始和处理后时间戳行数差异超过 2 | warning |
 | `modality_alignment_start` / `modality_alignment_end` | 开始/结束时间戳跨度超过 500 ms | fail |
-| `frequency_group_outlier` | 实际 FPS 是 task+robot 组内 IQR 离群值 | needs_review |
 | `consecutive_drops_outlier` | 最大连续丢帧是 IQR 离群值，或在小样本组中超过兜底 warning 阈值 | needs_review / warning |
 
 配置阈值：
@@ -435,8 +440,8 @@ QA_Pipeline/scripts/pipeline/phase3_timestamp.py
 ```json
 phase3_timestamp.abnormal_fps.loss_fail_ratio = 0.10
 phase3_timestamp.abnormal_fps.gain_warning_ratio = 0.10
-phase3_timestamp.frame_drops.normal_video_drop_ratio_fail = 0.15
-phase3_timestamp.frame_drops.tactile_video_drop_ratio_fail = 0.20
+phase3_timestamp.frame_drops.normal_video_drop_ratio_fail = 0.10
+phase3_timestamp.frame_drops.tactile_video_drop_ratio_fail = 0.15
 phase3_timestamp.frame_drops.max_consecutive_fail = 25
 phase3_timestamp.frame_drops.max_consecutive_warn = 10
 ```
@@ -478,7 +483,7 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 1.20 \
   --resource-check-interval 60 \
-  --resource-max-wait-seconds 15 \
+  --resource-max-wait-seconds 0 \
   --resource-error-retries 5 \
   --resource-retry-delay-seconds 20
 ```
@@ -650,17 +655,22 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --workers 3 \
   --batch-size 500 \
   --batch-mode auto \
-  --live-dashboard-interval 5 \
   --min-free-mem-gb 4.0 \
   --max-load-ratio 0.65 \
   --force-rerun \
   --run-id server-smoke-001
 ```
 
-6. 打开 dashboard：
+6. 在单独 terminal 或 tmux pane 中打开 dashboard：
 
 ```bash
-python3 -m http.server 1234 --directory outputs/server_smoke
+python3 QA_Pipeline/scripts/live_dashboard.py \
+  --db-path outputs/server_smoke/qa.db \
+  --output-dir outputs/server_smoke \
+  --interval 5 \
+  --max-episodes 5000 \
+  --max-findings 10000 \
+  --port 1234
 ```
 
 然后浏览：
@@ -711,12 +721,14 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --run-id full-001
 ```
 
-从已有数据库手动生成 dashboard：
+从已有数据库生成一次 dashboard 快照：
 
 ```bash
-python3 QA_Pipeline/scripts/generate_dashboard.py \
+python3 QA_Pipeline/scripts/live_dashboard.py \
   --db-path outputs/full/qa.db \
-  --output outputs/full/dashboard.html
+  --output-dir outputs/full \
+  --once \
+  --port 0
 ```
 
 从已有数据库手动生成 Excel：
@@ -731,7 +743,7 @@ python3 QA_Pipeline/scripts/export_excel_report.py \
 
 - 先在复制出的样本或只读 NAS 挂载上运行。
 - smoke test 使用 `--max-episodes`。
-- 在任何清理或隔离步骤前，先复核 `dashboard.html`、`quality_report.xlsx`、`quality_report.csv` 和 `quality_findings.jsonl`。
+- 在任何清理或隔离步骤前，先复核 `dashboard.html`、`quality_report.csv` 和 `quality_findings.jsonl`。只有需要时再单独导出 Excel。
 - 在本地验证并经过复核前，不要对 NAS 源数据执行裁剪或隔离操作。
 - 输出目录应与源 episode 文件夹分开。
 - 仅在明确想重新计算所选阶段时使用 `--force-rerun`。它会替换当前筛选到的 episode 和阶段的 findings；运行开始时也会清理当前 episode 集合之外的旧 episode 记录，避免旧筛选条件污染当前 dashboard。
@@ -739,7 +751,7 @@ python3 QA_Pipeline/scripts/export_excel_report.py \
 - 8 核 16GB 服务器不要使用全部核心；先使用 `--workers 2`，确认负载稳定后再谨慎提高。
 - NAS 大日期运行使用 `--batch-size 500` 或 `--batch-size 1000`，避免一次加载全部 episode state。
 - 第 2/3 阶段运行时保持默认 `--batch-mode auto`。它可以避免 task 或 task+robot 离群统计分组被切到不同 batch。
-- 默认 resource guard 会在负载或内存风险过高时暂停，默认最多等待 120 秒。NAS 视频阶段更适合较短等待加多次重试，例如 `--resource-max-wait-seconds 15` 和 `--resource-error-retries 5`。
+- 默认 resource guard 会在负载或内存风险过高时暂停。`--resource-max-wait-seconds 0` 表示一直等待到服务器恢复；只有 fail-fast 测试运行才建议设置正数超时。
 
 ## 当前限制
 

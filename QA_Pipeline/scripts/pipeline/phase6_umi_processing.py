@@ -1,11 +1,14 @@
-"""Phase 6 UMI validation, trajectory preprocessing, and world-frame export."""
+"""Phase 6 UMI validation, trajectory preprocessing, world-frame export, and optional IK."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Callable
 import importlib
+import json
+import shlex
 import shutil
 import sys
 import traceback
@@ -25,6 +28,8 @@ from scripts.pipeline.qa_core import (
 PHASE_NUMBER = 6
 DEFAULT_SUFFIX = "_w_world_base"
 SCHEMA_VERSION = 1
+_WORKER_CONTEXT: dict[str, Any] | None = None
+_WORKER_SETTINGS: dict[str, Any] | None = None
 
 
 def run_phase(
@@ -36,9 +41,21 @@ def run_phase(
     """Run UMI-specific validation and derived-data export for unfinished episodes."""
     pending = [state for state in states if PHASE_NUMBER not in state.phases_completed]
     total = len(pending)
-    modules = _load_umi_modules()
     settings = _settings()
+    modules = _load_umi_modules(load_executability=settings["run_executability"])
     context = _build_context(modules, settings)
+    max_parallel = max(1, int(settings["max_concurrent_episodes"]))
+    effective_workers = min(max(1, int(workers)), max_parallel, total)
+
+    if effective_workers > 1:
+        return _run_phase_parallel(
+            states,
+            pending,
+            db_path,
+            progress_callback,
+            settings,
+            effective_workers,
+        )
 
     for index, state in enumerate(pending, start=1):
         _ensure_metadata(state)
@@ -47,6 +64,95 @@ def run_phase(
         if progress_callback:
             progress_callback(index, total)
     return states
+
+
+def _run_phase_parallel(
+    states: list[EpisodeState],
+    pending: list[EpisodeState],
+    db_path: Path,
+    progress_callback: Callable[[int, int], None] | None,
+    settings: dict[str, Any],
+    workers: int,
+) -> list[EpisodeState]:
+    total = len(pending)
+    print(
+        f"Phase 6 UMI parallel mode: workers={workers}, "
+        f"ik_jobs_per_episode={settings['ik']['jobs']}"
+    )
+    states_by_path = {str(state.episode_path): state for state in pending}
+    payloads = [_state_payload(state) for state in pending]
+
+    with Pool(processes=workers, initializer=_init_phase6_worker, initargs=(settings,)) as pool:
+        for index, result in enumerate(pool.imap_unordered(_process_phase6_worker, payloads), start=1):
+            state = states_by_path[result["episode_path"]]
+            state.metrics.update(result["metrics"])
+            state.training_ready = result["training_ready"]
+            findings = [Finding(**item) for item in result["findings"]]
+            _finish_state(state, db_path, findings)
+            if progress_callback:
+                progress_callback(index, total)
+    return states
+
+
+def _init_phase6_worker(settings: dict[str, Any]) -> None:
+    global _WORKER_CONTEXT, _WORKER_SETTINGS
+    _WORKER_SETTINGS = settings
+    modules = _load_umi_modules(load_executability=settings["run_executability"])
+    _WORKER_CONTEXT = _build_context(modules, settings)
+
+
+def _process_phase6_worker(payload: dict[str, Any]) -> dict[str, Any]:
+    if _WORKER_CONTEXT is None or _WORKER_SETTINGS is None:
+        raise RuntimeError("Phase 6 worker was not initialized")
+    state = _state_from_payload(payload)
+    _ensure_metadata(state)
+    findings = _episode_findings(state, _WORKER_CONTEXT, _WORKER_SETTINGS)
+    return {
+        "episode_path": str(state.episode_path),
+        "metrics": state.metrics,
+        "training_ready": state.training_ready,
+        "findings": [_finding_payload(item) for item in findings],
+    }
+
+
+def _state_payload(state: EpisodeState) -> dict[str, Any]:
+    return {
+        "episode_path": str(state.episode_path),
+        "task": state.task,
+        "date": state.date,
+        "operator": state.operator,
+        "robot": state.robot,
+        "controller": state.controller,
+        "metadata": state.metadata,
+        "metrics": state.metrics,
+        "training_ready": state.training_ready,
+    }
+
+
+def _state_from_payload(payload: dict[str, Any]) -> EpisodeState:
+    return EpisodeState(
+        episode_path=Path(payload["episode_path"]),
+        task=str(payload.get("task") or ""),
+        date=str(payload.get("date") or ""),
+        operator=str(payload.get("operator") or ""),
+        robot=str(payload.get("robot") or ""),
+        controller=str(payload.get("controller") or ""),
+        metadata=dict(payload.get("metadata") or {}),
+        metrics=dict(payload.get("metrics") or {}),
+        training_ready=payload.get("training_ready"),
+    )
+
+
+def _finding_payload(finding: Finding) -> dict[str, Any]:
+    return {
+        "episode_path": finding.episode_path,
+        "phase": finding.phase,
+        "check_name": finding.check_name,
+        "severity": finding.severity,
+        "status": finding.status,
+        "message": finding.message,
+        "details": finding.details,
+    }
 
 
 def validate_dependencies() -> None:
@@ -72,6 +178,24 @@ def validate_dependencies() -> None:
         _load_umi_modules()
     except Exception as exc:  # noqa: BLE001 - convert import/setup errors to pipeline config errors
         raise PipelineConfigurationError(f"Could not load DataProcessUMI modules: {exc}") from exc
+    if bool(config_value(["phase6_umi_processing", "run_executability"], False)):
+        try:
+            importlib.import_module("pinocchio")
+            modules = _load_umi_modules(load_executability=True)
+            se = modules["se"]
+            robots = modules["robots"]
+            selected = config_value(["phase6_umi_processing", "ik", "robots"], None)
+            robot_names = selected or robots.list_robots()
+            for robot_name in robot_names:
+                if robot_name not in robots.list_robots():
+                    raise KeyError(f"unknown IK robot '{robot_name}'")
+            # Importing solve_executability validates most internal module wiring.
+            getattr(se, "main")
+        except Exception as exc:  # noqa: BLE001
+            raise PipelineConfigurationError(
+                "Phase 6 UMI executability is enabled but IK dependencies/resources "
+                f"are unavailable: {type(exc).__name__}: {exc}"
+            ) from exc
 
 
 def _episode_findings(state: EpisodeState, context: dict[str, Any], settings: dict[str, Any]) -> list[Finding]:
@@ -123,6 +247,8 @@ def _episode_findings(state: EpisodeState, context: dict[str, Any], settings: di
             "p6_umi_operations": result.get("operations") or [],
             "p6_umi_data_path": result.get("data_path") or "",
             "p6_umi_report_path": result.get("report_path") or "",
+            "p6_umi_trajectory_gate": result.get("trajectory_gate") or {},
+            "p6_umi_executability": result.get("executability") or {},
         }
     )
     if status == "passed":
@@ -151,6 +277,17 @@ def _episode_findings(state: EpisodeState, context: dict[str, Any], settings: di
         ]
     state.training_ready = False
     if status == "rejected":
+        if result.get("failed_stage") == "trajectory":
+            return [
+                _finding(
+                    state,
+                    "umi_trajectory_gate_rejected",
+                    "major",
+                    settings["trajectory_nonpass_status"],
+                    "UMI episode did not pass the strict trajectory-first gate.",
+                    result,
+                )
+            ]
         return [
             _finding(
                 state,
@@ -178,6 +315,7 @@ def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings:
     vrd = modules["vrd"]
     pp = modules["pp"]
     tf = modules["tf"]
+    sa = modules["sa"]
 
     episode_dir = state.episode_path
     generated_at = vrd.now_utc_iso()
@@ -189,19 +327,30 @@ def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings:
     gate = (False, [], [])
     pre_record = None
     tf_record = None
+    exec_record = None
+    trajectory_gate = None
     status = "error"
     failed_stage = None
     reason = None
     data_path = None
 
-    if context["assess_args"] is not None:
+    if settings["trajectory_first_gate"]:
+        trajectory_gate = _trajectory_gate(sa, episode_dir, context["smooth_config"], settings)
+        if trajectory_gate["status"] != "pass":
+            status = "rejected"
+            failed_stage = "trajectory"
+            reason = trajectory_gate["reason"]
+
+    if status != "rejected" and context["assess_args"] is not None:
         assess = _assess_episode(vrd, context["assess_args"], episode_dir, task_name, generated_at)
         if assess is not None:
             validation_path = context["work_root"] / "assessment" / rel_report_dir / f"{episode_name}.validation.json"
             vrd.write_json_report(validation_path, assess)
     gate = _assessment_gate(assess)
 
-    if gate[0]:
+    if status == "rejected":
+        pass
+    elif gate[0]:
         status = "rejected"
         failed_stage = "assessment"
         reason = "assessment failed: " + ", ".join(gate[1])
@@ -232,6 +381,9 @@ def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings:
             dest_ep = context["data_root"] / _data_rel_dir(state, settings["suffix"]) / episode_name
             _ensure_safe_output(context["output_root"], dest_ep, settings["overwrite"])
             tf_record = tf.transform_episode(cleaned_ep, dest_ep, context["tf_config"])
+            if settings["run_executability"]:
+                exec_out = context["report_root"] / rel_report_dir / episode_name / "executability"
+                exec_record = _run_executability(modules, settings, dest_ep, exec_out)
             status = "passed"
             data_path = str(dest_ep)
 
@@ -245,6 +397,8 @@ def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings:
         gate,
         pre_record,
         tf_record,
+        exec_record,
+        trajectory_gate,
         data_path,
         generated_at,
     )
@@ -262,6 +416,8 @@ def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings:
         "operations": pre_record.get("operations") if pre_record else None,
         "data_path": data_path,
         "report_path": str(report_path),
+        "trajectory_gate": trajectory_gate,
+        "executability": _executability_section(exec_record),
     }
 
 
@@ -300,6 +456,12 @@ def _settings() -> dict[str, Any]:
     repaired_status = str(config_value(["phase6_umi_processing", "status_for_repaired"], "warning"))
     if repaired_status not in {"pass", "warning", "needs_review", "fail"}:
         repaired_status = "warning"
+    trajectory_nonpass_status = str(
+        config_value(["phase6_umi_processing", "trajectory_nonpass_status"], "fail")
+    )
+    if trajectory_nonpass_status not in {"fail", "needs_review"}:
+        trajectory_nonpass_status = "fail"
+    ik_config = config_value(["phase6_umi_processing", "ik"], {}) or {}
     return {
         "enabled": bool(config_value(["phase6_umi_processing", "enabled"], True)),
         "output_root": config_value(["phase6_umi_processing", "output_root"], "outputs/umi_processed"),
@@ -310,6 +472,26 @@ def _settings() -> dict[str, Any]:
         "assessment_args": str(config_value(["phase6_umi_processing", "assessment_args"], "")),
         "fps": config_value(["phase6_umi_processing", "fps"], None),
         "status_for_repaired": repaired_status,
+        "trajectory_first_gate": bool(config_value(["phase6_umi_processing", "trajectory_first_gate"], True)),
+        "trajectory_pass_labels": [
+            str(item)
+            for item in config_value(["phase6_umi_processing", "trajectory_pass_labels"], ["smooth"])
+        ],
+        "trajectory_nonpass_status": trajectory_nonpass_status,
+        "run_executability": bool(config_value(["phase6_umi_processing", "run_executability"], False)),
+        "max_concurrent_episodes": int(
+            config_value(["phase6_umi_processing", "max_concurrent_episodes"], 1)
+        ),
+        "ik": {
+            "robots": ik_config.get("robots"),
+            "arm": str(ik_config.get("arm", "both")),
+            "source": str(ik_config.get("source", "action")),
+            "max_points": int(ik_config.get("max_points", 200)),
+            "min_segment": int(ik_config.get("min_segment", 5)),
+            "jobs": int(ik_config.get("jobs", 1)),
+            "samples": int(ik_config.get("samples", 80000)),
+            "extra_args": str(ik_config.get("extra_args", "")),
+        },
         "umi_tokens": [str(item).lower() for item in config_value(["phase6_umi_processing", "umi_tokens"], ["umi"])],
         "required_modalities": [
             str(item)
@@ -324,21 +506,28 @@ def _settings() -> dict[str, Any]:
     }
 
 
-def _load_umi_modules() -> dict[str, Any]:
+def _load_umi_modules(load_executability: bool = False) -> dict[str, Any]:
     repo_root = Path(__file__).resolve().parents[3]
     umi_root = repo_root / "DataProcessUMI"
     if not umi_root.is_dir():
         raise FileNotFoundError(f"DataProcessUMI directory not found: {umi_root}")
-    for rel in ("assessment", "preprocess", "transform"):
+    rels = ["assessment", "preprocess", "transform"]
+    if load_executability:
+        rels.extend(["solve", "executability"])
+    for rel in rels:
         path = umi_root / rel
         if str(path) not in sys.path:
             sys.path.insert(0, str(path))
-    return {
+    modules = {
         "vrd": importlib.import_module("validate_raw_data"),
         "sa": importlib.import_module("smooth_assessment"),
         "pp": importlib.import_module("preprocess_trajectory"),
         "tf": importlib.import_module("transform_episode_w_world_base"),
     }
+    if load_executability:
+        modules["se"] = importlib.import_module("solve_executability")
+        modules["robots"] = importlib.import_module("robots")
+    return modules
 
 
 def _is_umi_episode(state: EpisodeState, settings: dict[str, Any]) -> bool:
@@ -400,6 +589,108 @@ def _assess_episode(vrd: Any, assess_args: Any, episode_dir: Path, class_name: s
         return None
 
 
+def _trajectory_gate(sa: Any, episode_dir: Path, smooth_config: dict[str, Any],
+                     settings: dict[str, Any]) -> dict[str, Any]:
+    result = sa.assess_episode(episode_dir, smooth_config, settings["fps"])
+    if not result.get("ok"):
+        return {
+            "enabled": True,
+            "status": "reject",
+            "label": None,
+            "label_zh": None,
+            "reason": result.get("error") or "trajectory assessment failed",
+            "details": result,
+        }
+    label = result.get("trajectory_label") or {}
+    code = label.get("code")
+    passed = code in set(settings["trajectory_pass_labels"])
+    status = "pass" if passed else settings["trajectory_nonpass_status"]
+    reason = (
+        f"trajectory label '{code}' is allowed by strict gate"
+        if passed else
+        f"trajectory label '{code}' is not in allowed labels: "
+        + ", ".join(settings["trajectory_pass_labels"])
+    )
+    return {
+        "enabled": True,
+        "status": status,
+        "label": code,
+        "label_zh": label.get("name_zh"),
+        "reason": reason,
+        "frame_count": result.get("frame_count"),
+        "duration_s": result.get("duration_s"),
+        "dropped_frames": result.get("dropped_frames"),
+        "details": {
+            "trajectory_label": label,
+            "devices": result.get("devices"),
+        },
+    }
+
+
+def _run_executability(modules: dict[str, Any], settings: dict[str, Any],
+                       episode_dir: Path, outdir: Path) -> dict[str, Any]:
+    se = modules["se"]
+    ik = settings["ik"]
+    argv = [
+        "--episode", str(episode_dir),
+        "--outdir", str(outdir),
+        "--arm", ik["arm"],
+        "--source", ik["source"],
+        "--no-transform",
+        "--max-points", str(ik["max_points"]),
+        "--min-segment", str(ik["min_segment"]),
+        "--jobs", str(ik["jobs"]),
+        "--samples", str(ik["samples"]),
+    ]
+    if ik["robots"]:
+        argv += ["--robots"] + [str(robot) for robot in ik["robots"]]
+    if ik["extra_args"]:
+        argv += shlex.split(ik["extra_args"])
+    rc = se.main(argv)
+    summary_path = outdir / "summary.json"
+    summary = None
+    if summary_path.exists():
+        with summary_path.open("r", encoding="utf-8") as file_obj:
+            summary = json.load(file_obj)
+    if rc not in (0, 1):
+        raise RuntimeError(f"executability solver returned {rc}")
+    return {
+        "ran": True,
+        "return_code": int(rc),
+        "executable": _summary_has_executable(summary or {}),
+        "summary_path": str(summary_path),
+        "outdir": str(outdir),
+        "source": ik["source"],
+        "arm": ik["arm"],
+        "robots": ik["robots"],
+        "summary": summary,
+    }
+
+
+def _summary_has_executable(summary: dict[str, Any]) -> bool:
+    for arm_result in (summary.get("results") or {}).values():
+        for robot_result in (arm_result.get("robots") or {}).values():
+            if robot_result.get("executable"):
+                return True
+    return False
+
+
+def _executability_section(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if record is None:
+        return None
+    return {
+        "ran": True,
+        "return_code": record.get("return_code"),
+        "executable": record.get("executable"),
+        "summary_path": record.get("summary_path"),
+        "outdir": record.get("outdir"),
+        "source": record.get("source"),
+        "arm": record.get("arm"),
+        "robots": record.get("robots"),
+        "summary": record.get("summary"),
+    }
+
+
 def _assessment_gate(report: dict | None) -> tuple[bool, list[str], list[str]]:
     if report is None:
         return False, [], []
@@ -444,6 +735,8 @@ def _combined_report_payload(
     gate: tuple[bool, list[str], list[str]],
     pre_record: dict | None,
     tf_record: dict | None,
+    exec_record: dict | None,
+    trajectory_gate: dict | None,
     data_path: str | None,
     generated_at: str,
 ) -> dict[str, Any]:
@@ -458,6 +751,7 @@ def _combined_report_payload(
         "reason": reason,
         "failed_stage": failed_stage,
         "data_path": data_path,
+        "trajectory_gate": trajectory_gate,
         "assessment": _assessment_section(assess, gate),
         "classification": {
             "label": pre_record.get("label") if pre_record else None,
@@ -466,6 +760,7 @@ def _combined_report_payload(
         },
         "smoothing": _smoothing_section(pre_record) if pre_record else None,
         "transform": tf_record,
+        "executability": _executability_section(exec_record),
     }
 
 
