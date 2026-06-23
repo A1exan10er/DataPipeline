@@ -57,6 +57,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -115,6 +116,7 @@ DEFAULT_CONFIG = {
     "video_codec": "libx264",
     "video_crf": 18,
     "video_preset": "medium",
+    "video_threads": None,
 }
 
 
@@ -133,6 +135,17 @@ def load_preprocess_config(path=None):
             if key in user and user[key] is not None:
                 config[key] = user[key]
     return config
+
+
+def _ffmpeg_thread_args(config):
+    value = config.get("video_threads") or os.environ.get("UMI_FFMPEG_THREADS")
+    if value in (None, ""):
+        return []
+    try:
+        threads = int(value)
+    except (TypeError, ValueError):
+        return []
+    return ["-threads", str(threads)] if threads > 0 else []
 
 
 def parse_args(argv=None):
@@ -387,6 +400,7 @@ def crop_video(src, dst, keep_start, keep_end, fps, config):
         "-vf", vf, "-vsync", "cfr", "-r", f"{fps}",
         "-c:v", str(config["video_codec"]), "-crf", str(config["video_crf"]),
         "-preset", str(config["video_preset"]),
+        *_ffmpeg_thread_args(config),
         "-an", str(dst),
     ]
     subprocess.run(cmd, check=True, capture_output=True)

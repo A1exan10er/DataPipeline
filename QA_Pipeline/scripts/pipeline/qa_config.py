@@ -33,6 +33,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "flexiv": ["flexiv"],
             "aloha": ["aloha"],
         },
+        "robot_device_categories": {
+            "single_arm": ["ur", "ur5", "ur5e", "ur7e", "franka", "fr3", "fr3v2", "flexiv", "flexiv_rizon4"],
+            "dual_arm": ["arx", "arx5", "aloha", "piper", "aloha_piper"],
+            "umi": ["umi"],
+        },
     },
     "phase2_duration": {
         "length_alignment": {

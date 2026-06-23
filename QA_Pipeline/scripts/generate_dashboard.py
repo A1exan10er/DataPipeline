@@ -18,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-STATUS_ORDER = ("fail", "needs_review", "warning", "pass", "pending")
+STATUS_ORDER = ("fail", "needs_review", "warning", "umi_pending", "pass", "pending")
 SEVERITY_ORDER = ("critical", "major", "minor", "info")
 
 
@@ -44,6 +44,7 @@ def generate_dashboard(
 ) -> None:
     """Write a dashboard HTML shell plus atomically updated JSON data."""
     payload = _dashboard_payload(db_path, max_episodes=max_episodes, max_findings=max_findings)
+    payload["run_status"] = _run_status_payload(output_path.parent)
     payload["refresh_interval_seconds"] = max(1.0, float(refresh_interval_seconds))
     html = _render_html(payload)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +85,17 @@ def _dashboard_data_path(output_path: Path) -> Path:
     return output_path.with_name(f"{output_path.stem}_data.json")
 
 
+def _run_status_payload(output_dir: Path) -> dict[str, Any]:
+    pointer = output_dir / "latest_run.txt"
+    try:
+        run_dir = Path(pointer.read_text(encoding="utf-8").strip())
+        status_path = run_dir / "run_status.json"
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return status if isinstance(status, dict) else {}
+
+
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     _write_text_atomic(path, json.dumps(payload, ensure_ascii=False))
 
@@ -105,11 +117,16 @@ def _dashboard_payload(
     findings_by_episode: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for finding in findings:
         findings_by_episode[finding["episode_path"]].append(finding)
-    issue_counts_by_episode = _issue_counts_by_episode(db_path, [episode["episode_path"] for episode in episodes])
+    episode_paths = [episode["episode_path"] for episode in episodes]
+    issue_counts_by_episode = _issue_counts_by_episode(db_path, episode_paths)
+    top_issues_by_episode = _top_issue_names_by_episode(db_path, episode_paths, 4)
     for episode in episodes:
         episode_findings = findings_by_episode.get(episode["episode_path"], [])
         episode["issue_count"] = issue_counts_by_episode.get(episode["episode_path"], len(episode_findings))
-        episode["top_issues"] = _top_issue_names(episode_findings, 4)
+        episode["top_issues"] = top_issues_by_episode.get(
+            episode["episode_path"],
+            _top_issue_names(episode_findings, 4),
+        )
 
     return {
         "generated_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
@@ -276,6 +293,7 @@ def _summary_from_db(db_path: Path) -> dict[str, Any]:
             task: {status: counts.get(status, 0) for status in STATUS_ORDER}
             for task, counts in sorted(task_status.items())
         },
+        "robot_duration": _robot_duration_summary(db_path),
     }
 
 
@@ -304,6 +322,68 @@ def _issue_counts_by_episode(db_path: Path, episode_paths: list[str]) -> dict[st
 def _top_issue_names(findings: list[dict[str, Any]], limit: int) -> str:
     counts = Counter(finding["check_name"] for finding in findings)
     return "; ".join(name for name, _ in counts.most_common(limit))
+
+
+def _top_issue_names_by_episode(db_path: Path, episode_paths: list[str], limit: int) -> dict[str, str]:
+    if not episode_paths:
+        return {}
+    grouped: dict[str, Counter[str]] = defaultdict(Counter)
+    chunk_size = 500
+    with sqlite3.connect(db_path) as conn:
+        for start in range(0, len(episode_paths), chunk_size):
+            chunk = episode_paths[start : start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT episode_path, check_name, COUNT(*) AS count
+                FROM findings
+                WHERE status != ? AND episode_path IN ({placeholders})
+                GROUP BY episode_path, check_name
+                """,
+                ("pass", *chunk),
+            ).fetchall()
+            for episode_path, check_name, count in rows:
+                grouped[episode_path][check_name] = count
+    return {
+        episode_path: "; ".join(name for name, _ in counts.most_common(limit))
+        for episode_path, counts in grouped.items()
+    }
+
+
+def _robot_duration_summary(db_path: Path) -> list[dict[str, Any]]:
+    totals: dict[str, dict[str, float | int | str]] = {}
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT robot, metrics FROM episodes").fetchall()
+    for robot, metrics_json in rows:
+        duration = _duration_from_metrics(metrics_json)
+        if duration is None:
+            continue
+        key = robot or "(unknown)"
+        item = totals.setdefault(
+            key,
+            {"robot": key, "episodes": 0, "duration_seconds": 0.0},
+        )
+        item["episodes"] = int(item["episodes"]) + 1
+        item["duration_seconds"] = float(item["duration_seconds"]) + duration
+    return [
+        {
+            "robot": str(item["robot"]),
+            "episodes": int(item["episodes"]),
+            "duration_seconds": round(float(item["duration_seconds"]), 3),
+            "duration_hours": round(float(item["duration_seconds"]) / 3600.0, 3),
+        }
+        for item in sorted(totals.values(), key=lambda row: (-float(row["duration_seconds"]), str(row["robot"])))
+    ]
+
+
+def _duration_from_metrics(metrics_json: str | None) -> float | None:
+    metrics = _json_value(metrics_json, {})
+    value = metrics.get("p2_duration_seconds") if isinstance(metrics, dict) else None
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return None
+    return duration if duration > 0 else None
 
 
 def _json_value(value: str | None, default: Any) -> Any:
@@ -477,7 +557,28 @@ def _render_html(payload: dict[str, Any]) -> str:
     .pill.fail {{ background: #fee4e2; color: var(--fail); }}
     .pill.needs_review {{ background: #fff2cc; color: var(--review); }}
     .pill.warning {{ background: #fff6d6; color: var(--warn); }}
+    .pill.umi_pending {{ background: #e8eef8; color: var(--pending); }}
     .pill.pass {{ background: #dcfae6; color: var(--pass); }}
+    .robot-duration {{
+      display: grid;
+      gap: 8px;
+    }}
+    .duration-row {{
+      display: grid;
+      grid-template-columns: minmax(100px, 1fr) 90px 90px;
+      gap: 10px;
+      align-items: center;
+      font-size: 13px;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--line);
+    }}
+    .duration-row:last-child {{ border-bottom: 0; }}
+    .duration-head {{
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      font-weight: 800;
+    }}
     .path {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; word-break: break-all; }}
     .details {{ color: var(--muted); max-width: 420px; word-break: break-word; }}
     .tabs {{ display: flex; gap: 6px; margin-top: 14px; }}
@@ -512,6 +613,14 @@ def _render_html(payload: dict[str, Any]) -> str:
   </header>
   <main>
     <section class="grid metrics" id="metrics"></section>
+    <section class="panel">
+      <h2>Run Progress</h2>
+      <div id="runProgress" class="robot-duration"></div>
+    </section>
+    <section class="panel">
+      <h2>Duration By Robot</h2>
+      <div id="robotDurations" class="robot-duration"></div>
+    </section>
     <section class="grid sections">
       <div class="panel">
         <h2>Top Issues</h2>
@@ -567,8 +676,8 @@ def _render_html(payload: dict[str, Any]) -> str:
     let GENERATED_AT = DATA.generated_at;
     const AUTO_REFRESH_MS = Math.max(1000, Number(DATA.refresh_interval_seconds || 5) * 1000);
     const DATA_URL = "dashboard_data.json";
-    const STATUS = ["fail", "needs_review", "warning", "pass", "pending"];
-    const STATUS_LABELS = {{fail: "Fail", needs_review: "Needs Review", warning: "Warning", pass: "Pass", pending: "Pending"}};
+    const STATUS = ["fail", "needs_review", "warning", "umi_pending", "pass", "pending"];
+    const STATUS_LABELS = {{fail: "Fail", needs_review: "Needs Review", warning: "Warning", umi_pending: "UMI Pending", pass: "Pass", pending: "Pending"}};
     const MAX_ROWS = 500;
 
     function esc(value) {{
@@ -595,6 +704,7 @@ def _render_html(payload: dict[str, Any]) -> str:
         ["Fail", s.fail || 0, "fail"],
         ["Needs Review", s.needs_review || 0, "needs_review"],
         ["Warning", s.warning || 0, "warning"],
+        ["UMI Pending", s.umi_pending || 0, "pending"],
         ["Pass", s.pass || 0, "pass"],
       ];
       document.getElementById("metrics").innerHTML = items.map(([label, value, cls]) => `
@@ -604,6 +714,33 @@ def _render_html(payload: dict[str, Any]) -> str:
           ${{label !== "Episodes" && label !== "Issues" ? `<div class="subtle">${{pct(value, total)}}% of episodes</div>` : ""}}
         </div>`).join("");
       document.getElementById("subtitle").textContent = `Generated ${{DATA.generated_at}} from ${{DATA.db_path}}`;
+    }}
+    function renderRunProgress() {{
+      const run = DATA.run_status || {{}};
+      const node = document.getElementById("runProgress");
+      if (!run.run_id) {{
+        node.innerHTML = `<div class="subtle">Run status appears after the pipeline monitor starts.</div>`;
+        return;
+      }}
+      const phaseProcessed = Number(run.current_phase_processed || 0);
+      const phaseTotal = Number(run.current_phase_total || 0);
+      const overallProcessed = Number(run.overall_processed || 0);
+      const overallTotal = Number(run.overall_total || 0);
+      const phasePct = phaseTotal > 0 ? `${{pct(phaseProcessed, phaseTotal)}}%` : "unknown";
+      const overallPct = overallTotal > 0 ? `${{pct(overallProcessed, overallTotal)}}%` : "unknown";
+      node.innerHTML = `
+        <div class="duration-row duration-head"><div>Item</div><div>Progress</div><div>ETA</div></div>
+        <div class="duration-row">
+          <div>Phase ${{esc(run.current_phase || "")}}</div>
+          <div>${{phaseProcessed}}/${{phaseTotal}} (${{phasePct}})</div>
+          <strong>${{formatDuration(run.current_phase_eta_seconds)}}</strong>
+        </div>
+        <div class="duration-row">
+          <div>Overall</div>
+          <div>${{overallProcessed}}/${{overallTotal || "unknown"}} (${{overallPct}})</div>
+          <strong>${{formatDuration(run.overall_eta_seconds)}}</strong>
+        </div>
+      `;
     }}
     function setRefreshState(text) {{
       const node = document.getElementById("refreshState");
@@ -656,6 +793,24 @@ def _render_html(payload: dict[str, Any]) -> str:
     function renderCharts() {{
       renderBars("topIssues", DATA.summary.check_counts, Math.max(1, DATA.summary.issue_count));
       renderBars("phaseIssues", Object.entries(DATA.summary.phase_counts), Math.max(1, DATA.summary.issue_count));
+    }}
+    function formatDuration(seconds) {{
+      const value = Number(seconds || 0);
+      if (value >= 3600) return `${{(value / 3600).toFixed(2)}} h`;
+      if (value >= 60) return `${{(value / 60).toFixed(1)}} min`;
+      return `${{value.toFixed(1)}} s`;
+    }}
+    function renderRobotDurations() {{
+      const rows = DATA.summary.robot_duration || [];
+      document.getElementById("robotDurations").innerHTML = rows.length ? `
+        <div class="duration-row duration-head"><div>Robot</div><div>Episodes</div><div>Duration</div></div>
+        ${{rows.map(row => `
+          <div class="duration-row">
+            <div>${{esc(row.robot)}}</div>
+            <div>${{esc(row.episodes)}}</div>
+            <strong>${{formatDuration(row.duration_seconds)}}</strong>
+          </div>`).join("")}}
+      ` : `<div class="subtle">Duration appears after Phase 2 records p2_duration_seconds.</div>`;
     }}
     function initFilters() {{
       refreshFilterOptions(false);
@@ -746,12 +901,16 @@ def _render_html(payload: dict[str, Any]) -> str:
     function renderAll(resetFilters) {{
       renderMetrics();
       renderCharts();
+      renderRunProgress();
+      renderRobotDurations();
       refreshFilterOptions(resetFilters);
       renderEpisodes();
       renderIssues();
     }}
     renderMetrics();
     renderCharts();
+    renderRunProgress();
+    renderRobotDurations();
     initFilters();
     initTabs();
     renderEpisodes();

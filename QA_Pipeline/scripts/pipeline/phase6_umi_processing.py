@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 import importlib
 import json
+import os
 import shlex
 import shutil
 import sys
@@ -42,6 +43,7 @@ def run_phase(
     pending = [state for state in states if PHASE_NUMBER not in state.phases_completed]
     total = len(pending)
     settings = _settings()
+    _apply_runtime_env(settings)
     modules = _load_umi_modules(load_executability=settings["run_executability"])
     context = _build_context(modules, settings)
     max_parallel = max(1, int(settings["max_concurrent_episodes"]))
@@ -82,7 +84,13 @@ def _run_phase_parallel(
     states_by_path = {str(state.episode_path): state for state in pending}
     payloads = [_state_payload(state) for state in pending]
 
-    with Pool(processes=workers, initializer=_init_phase6_worker, initargs=(settings,)) as pool:
+    max_tasks = settings.get("max_tasks_per_child")
+    with Pool(
+        processes=workers,
+        initializer=_init_phase6_worker,
+        initargs=(settings,),
+        maxtasksperchild=max_tasks,
+    ) as pool:
         for index, result in enumerate(pool.imap_unordered(_process_phase6_worker, payloads), start=1):
             state = states_by_path[result["episode_path"]]
             state.metrics.update(result["metrics"])
@@ -97,6 +105,7 @@ def _run_phase_parallel(
 def _init_phase6_worker(settings: dict[str, Any]) -> None:
     global _WORKER_CONTEXT, _WORKER_SETTINGS
     _WORKER_SETTINGS = settings
+    _apply_runtime_env(settings)
     modules = _load_umi_modules(load_executability=settings["run_executability"])
     _WORKER_CONTEXT = _build_context(modules, settings)
 
@@ -439,6 +448,12 @@ def _build_context(modules: dict[str, Any], settings: dict[str, Any]) -> dict[st
         vrd.apply_validate_config(assess_args)
         vrd.require_check_dependencies(assess_args)
 
+    pre_config = pp.load_preprocess_config(settings["preprocess_config"])
+    if settings["video"]["preprocess_preset"]:
+        pre_config["video_preset"] = settings["video"]["preprocess_preset"]
+    if settings["video"]["ffmpeg_threads"] is not None:
+        pre_config["video_threads"] = settings["video"]["ffmpeg_threads"]
+
     return {
         "modules": modules,
         "output_root": output_root,
@@ -446,7 +461,7 @@ def _build_context(modules: dict[str, Any], settings: dict[str, Any]) -> dict[st
         "report_root": report_root,
         "work_root": work_root,
         "assess_args": assess_args,
-        "pre_config": pp.load_preprocess_config(settings["preprocess_config"]),
+        "pre_config": pre_config,
         "smooth_config": sa.load_config(settings["smooth_config"]),
         "tf_config": tf.load_config(settings["transform_config"]),
     }
@@ -462,6 +477,10 @@ def _settings() -> dict[str, Any]:
     if trajectory_nonpass_status not in {"fail", "needs_review"}:
         trajectory_nonpass_status = "fail"
     ik_config = config_value(["phase6_umi_processing", "ik"], {}) or {}
+    video_config = config_value(["phase6_umi_processing", "video"], {}) or {}
+    ffmpeg_threads = video_config.get("ffmpeg_threads", 2)
+    if ffmpeg_threads is not None:
+        ffmpeg_threads = max(1, int(ffmpeg_threads))
     return {
         "enabled": bool(config_value(["phase6_umi_processing", "enabled"], True)),
         "output_root": config_value(["phase6_umi_processing", "output_root"], "outputs/umi_processed"),
@@ -482,6 +501,9 @@ def _settings() -> dict[str, Any]:
         "max_concurrent_episodes": int(
             config_value(["phase6_umi_processing", "max_concurrent_episodes"], 1)
         ),
+        "max_tasks_per_child": _positive_int_or_none(
+            config_value(["phase6_umi_processing", "max_tasks_per_child"], 10)
+        ),
         "ik": {
             "robots": ik_config.get("robots"),
             "arm": str(ik_config.get("arm", "both")),
@@ -491,6 +513,14 @@ def _settings() -> dict[str, Any]:
             "jobs": int(ik_config.get("jobs", 1)),
             "samples": int(ik_config.get("samples", 80000)),
             "extra_args": str(ik_config.get("extra_args", "")),
+        },
+        "video": {
+            "ffmpeg_threads": ffmpeg_threads,
+            "preprocess_preset": (
+                None
+                if video_config.get("preprocess_preset") in (None, "")
+                else str(video_config.get("preprocess_preset"))
+            ),
         },
         "umi_tokens": [str(item).lower() for item in config_value(["phase6_umi_processing", "umi_tokens"], ["umi"])],
         "required_modalities": [
@@ -504,6 +534,29 @@ def _settings() -> dict[str, Any]:
         "smooth_config": _optional_path(config_value(["phase6_umi_processing", "smooth_config"], None)),
         "transform_config": _optional_path(config_value(["phase6_umi_processing", "transform_config"], None)),
     }
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def is_umi_state(state: EpisodeState) -> bool:
+    """Return whether a state should be handled by Phase 6 UMI processing."""
+    return _is_umi_episode(state, _settings())
+
+
+def _apply_runtime_env(settings: dict[str, Any]) -> None:
+    threads = settings.get("video", {}).get("ffmpeg_threads")
+    if threads is None:
+        os.environ.pop("UMI_FFMPEG_THREADS", None)
+    else:
+        os.environ["UMI_FFMPEG_THREADS"] = str(threads)
 
 
 def _load_umi_modules(load_executability: bool = False) -> dict[str, Any]:

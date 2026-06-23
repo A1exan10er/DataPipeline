@@ -2,6 +2,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -182,6 +183,17 @@ def is_wrist_video_path(video_path):
     return video_path.parent.name in set(VIDEO_STREAMS.values())
 
 
+def ffmpeg_thread_args():
+    value = os.environ.get("UMI_FFMPEG_THREADS")
+    if value in (None, ""):
+        return []
+    try:
+        threads = int(value)
+    except (TypeError, ValueError):
+        return []
+    return ["-threads", str(threads)] if threads > 0 else []
+
+
 def run_video_transcode(video_path, temp_path, clip_start_sec=None, clip_end_sec=None, flip=False):
     command = ["ffmpeg", "-y", "-loglevel", "error"]
     if clip_start_sec is not None:
@@ -199,6 +211,7 @@ def run_video_transcode(video_path, temp_path, clip_start_sec=None, clip_end_sec
             "veryfast",
             "-crf",
             "22",
+            *ffmpeg_thread_args(),
             "-pix_fmt",
             "yuv420p",
             "-movflags",

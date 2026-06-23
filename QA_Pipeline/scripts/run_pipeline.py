@@ -41,6 +41,7 @@ from scripts.pipeline.qa_core import (
     load_metadata,
     prune_db_to_episode_paths,
     replace_discovery_findings,
+    save_findings,
     save_episode_state,
 )
 from scripts.pipeline.resource_guard import ResourceGuard, ResourceGuardError
@@ -89,6 +90,19 @@ class QualityFilterSummary:
     skipped_label_counts: Counter[str]
 
 
+class GracefulStopRequested(RuntimeError):
+    """Raised when the user requested a safe stop via a stop file."""
+
+
+class StopController:
+    def __init__(self, stop_file: Path | None) -> None:
+        self.stop_file = Path(stop_file) if stop_file else None
+
+    def check(self, context: str) -> None:
+        if self.stop_file is not None and self.stop_file.exists():
+            raise GracefulStopRequested(f"Stop requested during {context}: {self.stop_file}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the QA pipeline from the command line."""
     args = _parse_args(argv)
@@ -101,58 +115,55 @@ def main(argv: Sequence[str] | None = None) -> int:
     phases = _parse_phases(args.phases)
     if phases is None:
         return 1
+    active_phases = _active_phases(phases, args.defer_umi_phase6)
+    if not _validate_date_filters(args):
+        return 1
+    stop_controller = StopController(_stop_file_path(args, Path(args.output_dir)))
 
     resource_guard = _make_resource_guard(args)
     effective_workers = resource_guard.effective_workers(args.workers)
 
     if not args.dry_run:
         try:
-            _validate_phase_dependencies(phases)
+            _validate_phase_dependencies(active_phases)
         except PipelineConfigurationError as exc:
             _print_error(str(exc))
             return 1
 
     db_path = Path(args.db_path)
     output_dir = Path(args.output_dir)
-    if args.streaming_discovery:
-        if args.batch_size is None:
-            _print_error("--streaming-discovery requires --batch-size.")
+    if args.episode_list:
+        episodes = _read_episode_list(Path(args.episode_list))
+        missing_episodes = [episode for episode in episodes if not episode.exists()]
+        if missing_episodes:
+            _print_error(
+                "Episode list contains missing path(s): "
+                + ", ".join(str(path) for path in missing_episodes[:5])
+            )
+            if len(missing_episodes) > 5:
+                print(f"  ... {len(missing_episodes) - 5} more missing path(s)")
             return 1
-        init_db(db_path)
-        return _run_streaming_discovery(
-            roots=roots,
-            phases=phases,
-            args=args,
-            db_path=db_path,
-            output_dir=output_dir,
-            workers=effective_workers,
-            resource_guard=resource_guard,
-        )
-
-    cache_meta = _episode_selection_cache_meta(args, roots)
-    episodes, discovery_findings, group_key_cache = (
-        ([], [], {})
-        if args.disable_episode_selection_cache
-        else _load_episode_selection_cache(output_dir, cache_meta)
-    )
-    if episodes:
-        print(f"Loaded episode selection cache: {len(episodes)} episodes", flush=True)
-    else:
-        discovery = discover_episodes_with_report(roots)
-        episodes = discovery.episodes
-        print(f"Episodes discovered: {len(episodes)}", flush=True)
-        if discovery.skipped_hidden_dirs:
-            print(f"Hidden directories skipped: {len(discovery.skipped_hidden_dirs)}", flush=True)
-            for path in discovery.skipped_hidden_dirs[:5]:
-                print(f"  skipped hidden dir: {path}")
-            if len(discovery.skipped_hidden_dirs) > 5:
-                print(f"  ... {len(discovery.skipped_hidden_dirs) - 5} more")
-        if args.date:
+        invalid_episodes = [episode for episode in episodes if not episode.name.startswith("episode_")]
+        if invalid_episodes:
+            _print_error(
+                "Episode list contains non-episode path(s): "
+                + ", ".join(str(path) for path in invalid_episodes[:5])
+            )
+            if len(invalid_episodes) > 5:
+                print(f"  ... {len(invalid_episodes) - 5} more invalid path(s)")
+            return 1
+        print(f"Loaded episode list: {len(episodes)} episodes", flush=True)
+        if args.date or args.date_from or args.date_to:
             episodes = [
                 episode_path for episode_path in episodes
-                if args.date in str(episode_path)
+                if _episode_matches_date_filters(episode_path, args)
             ]
-            print(f"After --date filter ({args.date}): {len(episodes)} episodes", flush=True)
+            print(
+                "After date filter "
+                f"(--date={args.date or ''}, --date-from={args.date_from or ''}, "
+                f"--date-to={args.date_to or ''}): {len(episodes)} episodes",
+                flush=True,
+            )
         if args.task:
             task_lower = args.task.lower()
             episodes = [
@@ -160,7 +171,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if task_lower in str(episode_path).lower()
             ]
             print(f"After --task filter ({args.task}): {len(episodes)} episodes", flush=True)
-        quality_filter_summary: QualityFilterSummary | None = None
         if not args.disable_quality_label_filter:
             print(
                 f"Applying quality label filter ({args.quality_label}) to {len(episodes)} episodes...",
@@ -183,14 +193,93 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"  ... {remaining_labels} more skipped label group(s)")
         if args.max_episodes is not None:
             episodes = episodes[: args.max_episodes]
-        discovery_findings = _discovery_findings(discovery.skipped_hidden_dirs)
-        if not args.dry_run and not args.disable_episode_selection_cache:
-            group_key_cache = _build_group_key_cache(episodes, roots)
-            _write_episode_selection_cache(output_dir, episodes, cache_meta, group_key_cache)
+        discovery_findings = []
+        group_key_cache = _build_group_key_cache(episodes, roots) if episodes else {}
+    elif args.streaming_discovery:
+        if args.batch_size is None:
+            _print_error("--streaming-discovery requires --batch-size.")
+            return 1
+        init_db(db_path)
+        return _run_streaming_discovery(
+            roots=roots,
+            phases=active_phases,
+            requested_phases=phases,
+            args=args,
+            db_path=db_path,
+            output_dir=output_dir,
+            workers=effective_workers,
+            resource_guard=resource_guard,
+            stop_controller=stop_controller,
+        )
+
+    else:
+        cache_meta = _episode_selection_cache_meta(args, roots)
+        episodes, discovery_findings, group_key_cache = (
+            ([], [], {})
+            if args.disable_episode_selection_cache
+            else _load_episode_selection_cache(output_dir, cache_meta)
+        )
+        if episodes:
+            print(f"Loaded episode selection cache: {len(episodes)} episodes", flush=True)
+        else:
+            discovery = discover_episodes_with_report(roots)
+            episodes = discovery.episodes
+            print(f"Episodes discovered: {len(episodes)}", flush=True)
+            if discovery.skipped_hidden_dirs:
+                print(f"Hidden directories skipped: {len(discovery.skipped_hidden_dirs)}", flush=True)
+                for path in discovery.skipped_hidden_dirs[:5]:
+                    print(f"  skipped hidden dir: {path}")
+                if len(discovery.skipped_hidden_dirs) > 5:
+                    print(f"  ... {len(discovery.skipped_hidden_dirs) - 5} more")
+            if args.date or args.date_from or args.date_to:
+                episodes = [
+                    episode_path for episode_path in episodes
+                    if _episode_matches_date_filters(episode_path, args)
+                ]
+                print(
+                    "After date filter "
+                    f"(--date={args.date or ''}, --date-from={args.date_from or ''}, "
+                    f"--date-to={args.date_to or ''}): {len(episodes)} episodes",
+                    flush=True,
+                )
+            if args.task:
+                task_lower = args.task.lower()
+                episodes = [
+                    episode_path for episode_path in episodes
+                    if task_lower in str(episode_path).lower()
+                ]
+                print(f"After --task filter ({args.task}): {len(episodes)} episodes", flush=True)
+            quality_filter_summary: QualityFilterSummary | None = None
+            if not args.disable_quality_label_filter:
+                print(
+                    f"Applying quality label filter ({args.quality_label}) to {len(episodes)} episodes...",
+                    flush=True,
+                )
+                episodes, quality_filter_summary = _filter_by_quality_label(episodes, args.quality_label)
+                print(
+                    f"After quality label filter ({args.quality_label}): {len(episodes)} episodes "
+                    f"({quality_filter_summary.skipped} skipped)"
+                )
+                if quality_filter_summary.unreadable_metadata:
+                    print(
+                        "  skipped due to missing/unreadable metadata: "
+                        f"{quality_filter_summary.unreadable_metadata}"
+                    )
+                for label_summary, count in quality_filter_summary.skipped_label_counts.most_common(5):
+                    print(f"  skipped label {label_summary}: {count}")
+                remaining_labels = len(quality_filter_summary.skipped_label_counts) - 5
+                if remaining_labels > 0:
+                    print(f"  ... {remaining_labels} more skipped label group(s)")
+            if args.max_episodes is not None:
+                episodes = episodes[: args.max_episodes]
+            discovery_findings = _discovery_findings(discovery.skipped_hidden_dirs)
+            if not args.dry_run and not args.disable_episode_selection_cache:
+                group_key_cache = _build_group_key_cache(episodes, roots)
+                _write_episode_selection_cache(output_dir, episodes, cache_meta, group_key_cache)
 
     if args.dry_run:
         print("Dry run: no phases executed and no reports written.")
-        print("Phases selected: " + ",".join(str(phase) for phase in phases))
+        print("Phases selected: " + ",".join(str(phase) for phase in active_phases))
         return 0
 
     init_db(db_path)
@@ -200,6 +289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_batched(
             episodes,
             roots,
+            active_phases,
             phases,
             args,
             db_path,
@@ -208,9 +298,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             resource_guard,
             discovery_findings,
             group_key_cache,
+            stop_controller,
         )
 
-    states = _load_or_create_states(episodes, roots, db_path, args.force_rerun)
+    states = _load_or_create_states(episodes, roots, db_path, args.force_rerun, active_phases)
     monitor = None
     if not args.disable_live_monitor:
         run_id = args.run_id or datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
@@ -219,7 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root=output_dir,
             run_id=run_id,
             roots=roots,
-            phases=phases,
+            phases=active_phases,
             workers=effective_workers,
             refresh_interval_seconds=args.live_report_interval,
         )
@@ -228,7 +319,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_live_dashboard_command(args, db_path, output_dir)
     _record_discovery_findings(db_path, discovery_findings, monitor)
     try:
-        for phase_number in phases:
+        for phase_number in active_phases:
+            stop_controller.check(f"before Phase {phase_number}")
             _run_phase_with_retries(
                 phase_number,
                 states,
@@ -239,7 +331,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 resource_guard,
                 args.resource_error_retries,
                 args.resource_retry_delay_seconds,
+                stop_controller,
             )
+        _mark_deferred_umi_pending(states, db_path, args.defer_umi_phase6, phases)
+    except GracefulStopRequested as exc:
+        print(str(exc))
+        _write_final_verdicts(states, db_path)
+        if monitor is not None:
+            monitor.finish_run(states, status="stopped")
+        return 130
     except ResourceGuardError as exc:
         _print_error(str(exc))
         if monitor is not None:
@@ -261,6 +361,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the QA data quality pipeline.")
     parser.add_argument("--roots", nargs="+", required=True, help="One or more root directories to scan.")
+    parser.add_argument(
+        "--episode-list",
+        default=None,
+        help=(
+            "Optional text file containing exact episode directories to process, one per line. "
+            "When set, normal full-root discovery and streaming discovery are skipped."
+        ),
+    )
     parser.add_argument("--db-path", default="outputs/qa_pipeline.db", help="SQLite state database path.")
     parser.add_argument("--output-dir", default="outputs", help="Directory for exported reports.")
     parser.add_argument("--phases", default=None, help="Comma-separated phase numbers to run, e.g. 1,2.")
@@ -304,6 +412,18 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=None,
         help="Only process episodes under directories matching this date string "
         "(e.g. '20260606'). Filters after discovery.",
+    )
+    parser.add_argument(
+        "--date-from",
+        type=str,
+        default=None,
+        help="Only process episodes whose path date is on or after YYYYMMDD. Inclusive.",
+    )
+    parser.add_argument(
+        "--date-to",
+        type=str,
+        default=None,
+        help="Only process episodes whose path date is on or before YYYYMMDD. Inclusive.",
     )
     parser.add_argument(
         "--task",
@@ -435,6 +555,22 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Disable run_status.json, issue_events.jsonl, and live_summary.md output.",
     )
+    parser.add_argument(
+        "--defer-umi-phase6",
+        action="store_true",
+        help=(
+            "Do not run Phase 6 in the main pipeline. Mark eligible UMI episodes "
+            "as umi_pending so a separate deferred UMI worker can process them."
+        ),
+    )
+    parser.add_argument(
+        "--stop-file",
+        default=None,
+        help=(
+            "Gracefully stop when this file exists. Default: <output-dir>/STOP_REQUESTED. "
+            "Set to 'none' to disable stop-file checks."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -442,6 +578,7 @@ def _run_batched(
     episodes: list[Path],
     roots: list[Path],
     phases: list[int],
+    requested_phases: list[int],
     args: argparse.Namespace,
     db_path: Path,
     output_dir: Path,
@@ -449,6 +586,7 @@ def _run_batched(
     resource_guard: ResourceGuard,
     discovery_findings: list[Finding],
     group_key_cache: dict[str, tuple[str, str]],
+    stop_controller: StopController,
 ) -> int:
     batch_size = max(1, int(args.batch_size))
     total = len(episodes)
@@ -488,6 +626,7 @@ def _run_batched(
     try:
         processed_before = 0
         for batch_index, batch in enumerate(batch_plan.batches, start=1):
+            stop_controller.check(f"before batch {batch_index}")
             print()
             batch_start = processed_before + 1
             batch_end = processed_before + len(batch)
@@ -496,8 +635,9 @@ def _run_batched(
                 group_count = len({_group_key_for_path(roots, episode_path, phases) for episode_path in batch})
                 print(f"Group-aware batch: groups={group_count}, episodes={len(batch)}")
             resource_guard.wait_if_needed(f"before batch {batch_index}", force=True)
-            states = _load_or_create_states(batch, roots, db_path, args.force_rerun)
-            for phase_number in phases:
+            states = _load_or_create_states(batch, roots, db_path, args.force_rerun, phases)
+            for phase_index, phase_number in enumerate(phases, start=1):
+                stop_controller.check(f"before Phase {phase_number}")
                 _run_phase_with_retries(
                     phase_number,
                     states,
@@ -508,7 +648,17 @@ def _run_batched(
                     resource_guard,
                     args.resource_error_retries,
                     args.resource_retry_delay_seconds,
+                    stop_controller,
+                    overall_offset=(processed_before * len(phases)) + ((phase_index - 1) * len(states)),
+                    overall_total=total * len(phases),
                 )
+                if monitor is not None:
+                    monitor.overall_progress(
+                        (processed_before * len(phases)) + (phase_index * len(states)),
+                        total * len(phases),
+                        f"batch {batch_index}/{batch_count}",
+                    )
+            _mark_deferred_umi_pending(states, db_path, args.defer_umi_phase6, requested_phases)
             _write_final_verdicts(states, db_path)
             processed += len(states)
             processed_before += len(batch)
@@ -517,6 +667,11 @@ def _run_batched(
             print(f"Batch {batch_index}/{batch_count} complete. Processed so far: {processed}/{total}")
             del states
             gc.collect()
+    except GracefulStopRequested as exc:
+        print(str(exc))
+        if monitor is not None:
+            monitor.finish_run([], status="stopped")
+        return 130
     except ResourceGuardError as exc:
         _print_error(str(exc))
         if monitor is not None:
@@ -537,11 +692,13 @@ def _run_batched(
 def _run_streaming_discovery(
     roots: list[Path],
     phases: list[int],
+    requested_phases: list[int],
     args: argparse.Namespace,
     db_path: Path,
     output_dir: Path,
     workers: int,
     resource_guard: ResourceGuard,
+    stop_controller: StopController,
 ) -> int:
     batch_size = max(1, int(args.batch_size))
     streaming_mode = _streaming_batch_mode(args.batch_mode, phases)
@@ -602,6 +759,7 @@ def _run_streaming_discovery(
 
     def flush_batch(force: bool = False) -> bool:
         nonlocal batch, processed, batch_index
+        stop_controller.check("before streaming batch flush")
         if not batch:
             return True
         if not force and len(batch) < batch_size:
@@ -613,9 +771,11 @@ def _run_streaming_discovery(
             f"processed_so_far={processed}, scanned={scanned} ==="
         )
         resource_guard.wait_if_needed(f"before streaming batch {batch_index}", force=True)
-        states = _load_or_create_states(batch, roots, db_path, args.force_rerun)
+        states = _load_or_create_states(batch, roots, db_path, args.force_rerun, phases)
         try:
-            for phase_number in phases:
+            for phase_index, phase_number in enumerate(phases, start=1):
+                stop_controller.check(f"before Phase {phase_number}")
+                overall_total = max_selected * len(phases) if max_selected is not None else 0
                 _run_phase_with_retries(
                     phase_number,
                     states,
@@ -626,7 +786,17 @@ def _run_streaming_discovery(
                     resource_guard,
                     args.resource_error_retries,
                     args.resource_retry_delay_seconds,
+                    stop_controller,
+                    overall_offset=(processed * len(phases)) + ((phase_index - 1) * len(states)),
+                    overall_total=overall_total,
                 )
+                if monitor is not None:
+                    monitor.overall_progress(
+                        (processed * len(phases)) + (phase_index * len(states)),
+                        overall_total,
+                        f"streaming batch {batch_index}",
+                    )
+            _mark_deferred_umi_pending(states, db_path, args.defer_umi_phase6, requested_phases)
             _write_final_verdicts(states, db_path)
             processed += len(states)
             if monitor is not None:
@@ -668,11 +838,12 @@ def _run_streaming_discovery(
 
     try:
         for episode_path, hidden_dirs in _iter_episode_paths_streaming(roots):
+            stop_controller.check("streaming discovery")
             if hidden_dirs:
                 skipped_hidden_dirs.extend(hidden_dirs)
                 continue
             scanned += 1
-            if args.date and args.date not in str(episode_path):
+            if not _episode_matches_date_filters(episode_path, args):
                 last_report = _print_streaming_progress(
                     scanned,
                     selected,
@@ -764,6 +935,11 @@ def _run_streaming_discovery(
             current_group = []
             current_group_key = None
         flush_batch(force=True)
+    except GracefulStopRequested as exc:
+        print(str(exc))
+        if monitor is not None:
+            monitor.finish_run([], status="stopped")
+        return 130
     except ResourceGuardError as exc:
         _print_error(str(exc))
         if monitor is not None:
@@ -816,10 +992,110 @@ def _iter_episode_paths_streaming(roots: list[Path]):
                 stack.append(child)
 
 
+def _read_episode_list(path: Path) -> list[Path]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise SystemExit(f"Unable to read --episode-list {path}: {exc}") from exc
+    episodes: list[Path] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        episodes.append(Path(stripped))
+    return episodes
+
+
 def _streaming_batch_mode(requested_mode: str, phases: list[int]) -> str:
     if requested_mode == "auto":
         return "group-aware" if any(phase in phases for phase in (2, 3)) else "fixed"
     return requested_mode
+
+
+def _active_phases(phases: list[int], defer_umi_phase6: bool) -> list[int]:
+    if not defer_umi_phase6:
+        return phases
+    return [phase for phase in phases if phase != 6]
+
+
+def _stop_file_path(args: argparse.Namespace, output_dir: Path) -> Path | None:
+    if args.stop_file == "none":
+        return None
+    if args.stop_file:
+        return Path(args.stop_file)
+    return output_dir / "STOP_REQUESTED"
+
+
+def _mark_deferred_umi_pending(
+    states: list[EpisodeState],
+    db_path: Path,
+    defer_umi_phase6: bool,
+    requested_phases: list[int],
+) -> None:
+    if not defer_umi_phase6 or 6 not in requested_phases:
+        return
+    marked = 0
+    for state in states:
+        if 6 in {int(phase) for phase in state.phases_completed}:
+            continue
+        if _has_failed_prior_phase(state, 6):
+            continue
+        if not phase6_umi_processing.is_umi_state(state):
+            continue
+        state.metrics["p6_umi_status"] = "pending"
+        state.metrics["p6_umi_reason"] = "Deferred UMI Phase 6 is pending."
+        state.phase_status[6] = "pending"
+        state.last_updated = datetime.now().isoformat()
+        save_episode_state(db_path, state)
+        save_findings(
+            db_path,
+            [
+                Finding(
+                    episode_path=str(state.episode_path),
+                    phase=6,
+                    check_name="umi_phase6_deferred",
+                    severity="info",
+                    status="pending",
+                    message="UMI Phase 6 processing is deferred to a separate worker.",
+                    details={},
+                )
+            ],
+            phase=6,
+            episode_path=str(state.episode_path),
+        )
+        marked += 1
+    if marked:
+        print(f"Deferred UMI Phase 6: marked {marked} episode(s) as umi_pending.")
+
+
+def _has_failed_prior_phase(state: EpisodeState, current_phase: int) -> bool:
+    return any(
+        status == "fail"
+        for phase_num, status in state.phase_status.items()
+        if int(phase_num) < current_phase
+    )
+
+
+def _episode_matches_date_filters(episode_path: Path, args: argparse.Namespace) -> bool:
+    if args.date and args.date not in str(episode_path):
+        return False
+    if not args.date_from and not args.date_to:
+        return True
+    episode_date = _episode_path_date(episode_path)
+    if episode_date is None:
+        return False
+    if args.date_from and episode_date < args.date_from:
+        return False
+    if args.date_to and episode_date > args.date_to:
+        return False
+    return True
+
+
+def _episode_path_date(episode_path: Path) -> str | None:
+    for part in episode_path.parts:
+        if len(part) == 8 and part.isdigit():
+            return part
+    return None
 
 
 def _streaming_quality_filter(episode_path: Path, args: argparse.Namespace) -> tuple[bool, bool]:
@@ -1076,6 +1352,8 @@ def _episode_selection_cache_meta(args: argparse.Namespace, roots: list[Path]) -
         "version": 1,
         "roots": [str(root) for root in roots],
         "date": args.date or "",
+        "date_from": args.date_from or "",
+        "date_to": args.date_to or "",
         "task": args.task or "",
         "quality_label_filter_enabled": not args.disable_quality_label_filter,
         "quality_label": args.quality_label if not args.disable_quality_label_filter else "",
@@ -1281,6 +1559,20 @@ def _parse_phases(value: str | None) -> list[int] | None:
     return sorted(set(phases))
 
 
+def _validate_date_filters(args: argparse.Namespace) -> bool:
+    for option_name, value in (
+        ("--date-from", args.date_from),
+        ("--date-to", args.date_to),
+    ):
+        if value and (len(value) != 8 or not value.isdigit()):
+            _print_error(f"{option_name} must use YYYYMMDD format, got: {value}")
+            return False
+    if args.date_from and args.date_to and args.date_from > args.date_to:
+        _print_error("--date-from must be earlier than or equal to --date-to")
+        return False
+    return True
+
+
 def _validate_phase_dependencies(phases: list[int]) -> None:
     for phase_number in phases:
         validator = getattr(PHASE_MODULES[phase_number], "validate_dependencies", None)
@@ -1289,7 +1581,11 @@ def _validate_phase_dependencies(phases: list[int]) -> None:
 
 
 def _load_or_create_states(
-    episodes: list[Path], roots: list[Path], db_path: Path, force_rerun: bool
+    episodes: list[Path],
+    roots: list[Path],
+    db_path: Path,
+    force_rerun: bool,
+    force_rerun_phases: list[int] | None = None,
 ) -> list[EpisodeState]:
     print("Loading episode states...")
     states = []
@@ -1300,7 +1596,15 @@ def _load_or_create_states(
         if state is None:
             state = _new_episode_state(roots, episode_path)
         if force_rerun:
-            state.phases_completed = []
+            selected_phases = {int(phase) for phase in (force_rerun_phases or [])}
+            if selected_phases:
+                state.phases_completed = [
+                    int(phase)
+                    for phase in state.phases_completed
+                    if int(phase) not in selected_phases
+                ]
+            else:
+                state.phases_completed = []
         states.append(state)
         if (index + 1) % 500 == 0 or (index + 1) == total:
             current = index + 1
@@ -1342,10 +1646,14 @@ def _run_phase_with_retries(
     resource_guard: ResourceGuard,
     max_retries: int,
     retry_delay_seconds: float,
+    stop_controller: StopController,
+    overall_offset: int = 0,
+    overall_total: int = 0,
 ) -> None:
     attempts = max(0, int(max_retries)) + 1
     for attempt in range(1, attempts + 1):
         try:
+            stop_controller.check(f"before Phase {phase_number} attempt {attempt}")
             _run_phase(
                 phase_number,
                 states,
@@ -1354,6 +1662,9 @@ def _run_phase_with_retries(
                 continue_after_fail,
                 monitor,
                 resource_guard,
+                stop_controller,
+                overall_offset,
+                overall_total,
             )
             return
         except ResourceGuardError as exc:
@@ -1383,7 +1694,11 @@ def _run_phase(
     continue_after_fail: bool,
     monitor: RunMonitor | None,
     resource_guard: ResourceGuard,
+    stop_controller: StopController,
+    overall_offset: int = 0,
+    overall_total: int = 0,
 ) -> None:
+    stop_controller.check(f"before Phase {phase_number}")
     runnable = _filter_runnable_states(states, phase_number, continue_after_fail)
     skipped = len(states) - len(runnable)
     if skipped:
@@ -1397,7 +1712,16 @@ def _run_phase(
     runner = PHASE_RUNNERS[phase_number]
     if monitor is not None:
         monitor.start_phase(phase_number, len(runnable), skipped, states)
-    callback = _make_progress_callback(len(runnable), monitor, phase_number, states, resource_guard)
+    callback = _make_progress_callback(
+        len(runnable),
+        monitor,
+        phase_number,
+        states,
+        resource_guard,
+        stop_controller,
+        overall_offset,
+        overall_total,
+    )
     phase_start = time.time()
     if phase_number in (1, 2, 3, 4, 5, 6):
         runner(runnable, db_path, progress_callback=callback, workers=workers)
@@ -1430,12 +1754,7 @@ def _filter_runnable_states(
         ]
     runnable = []
     for state in states:
-        failed = any(
-            status == "fail"
-            for phase_num, status in state.phase_status.items()
-            if int(phase_num) < current_phase
-        )
-        if not failed:
+        if not _has_failed_prior_phase(state, current_phase):
             runnable.append(state)
     return runnable
 
@@ -1467,6 +1786,9 @@ def _make_progress_callback(
     phase_number: int,
     states: list[EpisodeState],
     resource_guard: ResourceGuard,
+    stop_controller: StopController,
+    overall_offset: int = 0,
+    overall_total: int = 0,
 ) -> Callable[[int, int], None]:
     started = time.perf_counter()
 
@@ -1474,6 +1796,9 @@ def _make_progress_callback(
         _print_progress(current, total, started)
         if monitor is not None:
             monitor.progress(phase_number, current, total, states)
+            if overall_total > 0:
+                monitor.overall_progress(overall_offset + current, overall_total)
+        stop_controller.check(f"Phase {phase_number} progress {current}/{total}")
         resource_guard.wait_if_needed(f"Phase {phase_number} progress {current}/{total}")
 
     return callback
@@ -1495,6 +1820,8 @@ def _write_final_verdicts(states: list[EpisodeState], db_path: Path) -> None:
 
 
 def _final_status(state: EpisodeState) -> str:
+    if state.metrics.get("p6_umi_status") == "pending":
+        return "umi_pending"
     statuses = set(state.phase_status.values())
     if "fail" in statuses:
         return "fail"
@@ -1526,6 +1853,7 @@ def _print_final_summary(states: list[EpisodeState], output_dir: Path) -> None:
     print(f"Warning            : {counts['warning']}")
     print(f"Fail               : {counts['fail']}")
     print(f"Needs review       : {counts['needs_review']}")
+    print(f"UMI pending        : {counts['umi_pending']}")
     print(f"Reports written to : {output_dir}/")
 
 
@@ -1546,6 +1874,7 @@ def _print_db_final_summary(db_path: Path, output_dir: Path) -> None:
     print(f"Warning            : {counts['warning']}")
     print(f"Fail               : {counts['fail']}")
     print(f"Needs review       : {counts['needs_review']}")
+    print(f"UMI pending        : {counts['umi_pending']}")
     print(f"Pending/other      : {counts['pending']}")
     print(f"Reports written to : {output_dir}/")
 

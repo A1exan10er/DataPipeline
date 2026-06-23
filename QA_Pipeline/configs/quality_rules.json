@@ -18,6 +18,11 @@
       "arx5": ["arx", "arx5"],
       "flexiv": ["flexiv"],
       "aloha": ["aloha"]
+    },
+    "robot_device_categories": {
+      "single_arm": ["ur", "ur5", "ur5e", "ur7e", "franka", "fr3", "fr3v2", "flexiv", "flexiv_rizon4"],
+      "dual_arm": ["arx", "arx5", "aloha", "piper", "aloha_piper"],
+      "umi": ["umi"]
     }
   },
   "phase2_duration": {
@@ -65,6 +70,11 @@
     "trajectory_nonpass_status": "fail",
     "run_executability": false,
     "max_concurrent_episodes": 1,
+    "max_tasks_per_child": 10,
+    "video": {
+      "ffmpeg_threads": 2,
+      "preprocess_preset": "veryfast"
+    },
     "ik": {
       "robots": null,
       "arm": "both",

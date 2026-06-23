@@ -18,6 +18,11 @@ from scripts.pipeline.qa_core import (
     save_findings,
 )
 from scripts.pipeline.qa_config import config_value
+from scripts.pipeline.task_device_reference import (
+    categories_compatible,
+    robot_device_category,
+    task_device_category,
+)
 
 
 PHASE_NUMBER = 1
@@ -232,48 +237,92 @@ def _check_task_context_consistency(state: EpisodeState) -> list[Finding]:
                 },
             )
         )
-    expected = _expected_robot_from_task_names([task_key, robot_tagged_folder, task_folder])
-    if expected and not _robot_matches_expected(robot, expected):
-        suggested_folder = _suggest_task_folder_for_robot(
-            first_present(robot_tagged_folder, task_folder, task_key),
-            expected,
-            robot,
+    reference = task_device_category([task_key, robot_tagged_folder, task_folder])
+    task_category = str(reference.get("category", ""))
+    actual_category = robot_device_category(robot)
+    if reference.get("reference_available") and not reference.get("defined"):
+        findings.append(
+            _finding(
+                state,
+                "task_device_reference_missing",
+                "info",
+                "pass",
+                "Task has no compatible device type reference, so task_robot_mismatch is skipped.",
+                {
+                    "task_key": task_key,
+                    "task_folder": task_folder,
+                    "robot_tagged_task_folder": robot_tagged_folder,
+                    "matched_reference_task_key": reference.get("matched_task_key", ""),
+                    "reference_source": reference.get("source", ""),
+                    "compatible_device_types": reference.get("raw_compatible_device_types"),
+                    "actual_robot": robot,
+                    "actual_robot_category": actual_category,
+                    "note": "Undefined task device type is not treated as a mismatch.",
+                },
+            )
         )
+    elif task_category and not actual_category:
+        findings.append(
+            _finding(
+                state,
+                "robot_device_category_unknown",
+                "info",
+                "pass",
+                "Episode robot/source has no device category mapping, so task_robot_mismatch is skipped.",
+                {
+                    "task_key": task_key,
+                    "task_folder": task_folder,
+                    "expected_task_device_category": task_category,
+                    "actual_robot": robot,
+                    "metadata_robot": str(state.metadata.get("robot", "")),
+                    "episode_name_robot": _robot_from_episode_name(state.episode_path.name),
+                    "robot_type_folder_robot": _robot_from_robot_type_folder(state.episode_path),
+                    "reference_source": reference.get("source", ""),
+                    "note": "Unknown robot category is not treated as a mismatch.",
+                },
+            )
+        )
+    elif task_category and actual_category and not categories_compatible(task_category, actual_category):
         findings.append(
             _finding(
                 state,
                 "task_robot_mismatch",
                 "major",
                 "fail",
-                "Episode robot/source does not match the robot/source indicated by the task folder.",
+                "Episode robot/source category does not match the task compatible device type.",
                 {
                     "task_key": task_key,
                     "task_folder": task_folder,
                     "robot_tagged_task_folder": robot_tagged_folder,
-                    "expected_robot": expected,
+                    "expected_task_device_category": task_category,
+                    "actual_robot_category": actual_category,
+                    "matched_reference_task_key": reference.get("matched_task_key", ""),
+                    "reference_source": reference.get("source", ""),
+                    "compatible_device_types": reference.get("raw_compatible_device_types"),
                     "actual_robot": robot,
                     "metadata_robot": str(state.metadata.get("robot", "")),
                     "episode_name_robot": _robot_from_episode_name(state.episode_path.name),
                     "robot_type_folder_robot": _robot_from_robot_type_folder(state.episode_path),
-                    "accepted_robot_values": _robot_aliases(expected),
                     "current_episode_path": str(state.episode_path),
-                    "suggested_task_folder": suggested_folder,
                     "fix_items": [
                         {
-                            "operation": "move_episode_to_matching_robot_task_folder_or_fix_metadata",
+                            "operation": "move_episode_to_compatible_device_task_folder_or_fix_metadata",
                             "current_task_folder": first_present(robot_tagged_folder, task_folder),
-                            "suggested_task_folder": suggested_folder,
-                            "expected_robot": expected,
+                            "expected_task_device_category": task_category,
+                            "actual_robot_category": actual_category,
                             "actual_robot": robot,
                         }
                     ],
-                    "note": "The episode is likely located under the wrong robot-specific task folder, "
-                            "or metadata/episode naming is wrong.",
+                    "note": "Exact robot suffix matching is no longer enforced. Only single-arm, "
+                            "dual-arm, and UMI category mismatches fail.",
                 },
             )
         )
     state.metrics["p1_task_folder"] = task_folder
-    state.metrics["p1_task_expected_robot"] = expected or ""
+    state.metrics["p1_task_expected_robot"] = ""
+    state.metrics["p1_task_device_category"] = task_category
+    state.metrics["p1_robot_device_category"] = actual_category
+    state.metrics["p1_task_device_reference_source"] = str(reference.get("source", ""))
     return findings
 
 

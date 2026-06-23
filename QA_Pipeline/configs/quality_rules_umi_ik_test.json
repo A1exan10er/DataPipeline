@@ -14,6 +14,11 @@
     "trajectory_nonpass_status": "fail",
     "run_executability": true,
     "max_concurrent_episodes": 3,
+    "max_tasks_per_child": 10,
+    "video": {
+      "ffmpeg_threads": 2,
+      "preprocess_preset": "veryfast"
+    },
     "ik": {
       "robots": ["flexiv_rizon4"],
       "arm": "both",

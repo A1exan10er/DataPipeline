@@ -60,6 +60,10 @@ class RunMonitor:
         self.current_phase_started_perf = 0.0
         self.current_phase_total = 0
         self.current_phase_processed = 0
+        self.overall_label = ""
+        self.overall_total = 0
+        self.overall_processed = 0
+        self.overall_started_perf = self.started_perf
         self.last_refresh_perf = 0.0
         self.last_finding_id = 0
         self.issue_counts: Counter[str] = Counter()
@@ -96,6 +100,11 @@ class RunMonitor:
         self.current_phase_total = total
         self.refresh(states)
 
+    def overall_progress(self, processed: int, total: int, label: str = "") -> None:
+        self.overall_processed = max(0, int(processed))
+        self.overall_total = max(0, int(total))
+        self.overall_label = label
+
     def finish_phase(self, phase_number: int, states: list[EpisodeState]) -> None:
         self.current_phase = phase_number
         self.refresh(states, force=True)
@@ -113,9 +122,9 @@ class RunMonitor:
         self._write_run_status(states, "running")
         self._write_live_summary(states)
 
-    def finish_run(self, states: list[EpisodeState]) -> None:
+    def finish_run(self, states: list[EpisodeState], status: str = "complete") -> None:
         self.refresh(states, force=True)
-        self._write_run_status(states, "complete")
+        self._write_run_status(states, status)
         self._write_live_summary(states)
 
     def refresh(self, states: list[EpisodeState], force: bool = False) -> None:
@@ -232,10 +241,17 @@ class RunMonitor:
             "current_phase_processed": self.current_phase_processed,
             "current_phase_total": self.current_phase_total,
             "current_phase_elapsed_seconds": self._phase_elapsed_seconds(),
+            "current_phase_eta_seconds": self._phase_eta_seconds(),
+            "overall_label": self.overall_label,
+            "overall_processed": self.overall_processed,
+            "overall_total": self.overall_total,
+            "overall_elapsed_seconds": self._overall_elapsed_seconds(),
+            "overall_eta_seconds": self._overall_eta_seconds(),
             "final_status_counts": _final_counts(states, self.db_path),
             "issue_counts": dict(self.issue_counts),
             "severity_counts": dict(self.severity_counts),
             "finding_status_counts": dict(self.status_counts),
+            "robot_duration": _duration_by_robot(self.db_path),
             "latest_issue": self.latest_issue,
             "run_dir": str(self.run_dir),
         }
@@ -249,6 +265,9 @@ class RunMonitor:
             f"Status updated: `{_now()}`",
             f"Current phase: `{self.current_phase}`",
             f"Progress: `{self.current_phase_processed}/{self.current_phase_total}`",
+            f"Current phase ETA: `{_format_duration_seconds(self._phase_eta_seconds())}`",
+            f"Overall progress: `{self.overall_processed}/{self.overall_total}`",
+            f"Overall ETA: `{_format_duration_seconds(self._overall_eta_seconds())}`",
             f"Run directory: `{self.run_dir}`",
             "",
             "## Final Status Counts",
@@ -256,6 +275,16 @@ class RunMonitor:
         ]
         for status, count in sorted(_final_counts(states, self.db_path).items()):
             lines.append(f"- `{status}`: {count}")
+        lines.extend(["", "## Duration By Robot", ""])
+        robot_duration = _duration_by_robot(self.db_path)
+        if robot_duration:
+            for row in robot_duration:
+                lines.append(
+                    f"- `{row['robot']}`: {row['episodes']} episode(s), "
+                    f"{_format_duration_seconds(row['duration_seconds'])}"
+                )
+        else:
+            lines.append("- Duration appears after Phase 2 records p2_duration_seconds.")
         lines.extend(["", "## Issue Counts", ""])
         if self.issue_counts:
             for check_name, count in self.issue_counts.most_common(20):
@@ -285,6 +314,15 @@ class RunMonitor:
         if not self.current_phase_started_perf:
             return 0.0
         return time.perf_counter() - self.current_phase_started_perf
+
+    def _phase_eta_seconds(self) -> float:
+        return _eta_seconds(self.current_phase_processed, self.current_phase_total, self._phase_elapsed_seconds())
+
+    def _overall_elapsed_seconds(self) -> float:
+        return time.perf_counter() - self.overall_started_perf
+
+    def _overall_eta_seconds(self) -> float:
+        return _eta_seconds(self.overall_processed, self.overall_total, self._overall_elapsed_seconds())
 
 
 def _issue_csv_row(event: dict[str, Any]) -> dict[str, Any]:
@@ -334,6 +372,56 @@ def _final_counts(states: list[EpisodeState], db_path: Path | None = None) -> di
         status = state.final_status or "pending"
         counts[status] += 1
     return dict(counts)
+
+
+def _duration_by_robot(db_path: Path) -> list[dict[str, Any]]:
+    if not db_path.exists():
+        return []
+    totals: dict[str, dict[str, float | int | str]] = {}
+    with sqlite3.connect(db_path) as conn:
+        try:
+            rows = conn.execute("SELECT robot, metrics FROM episodes").fetchall()
+        except sqlite3.OperationalError:
+            return []
+    for robot, metrics_json in rows:
+        metrics = _json_dict(metrics_json)
+        try:
+            duration = float(metrics.get("p2_duration_seconds"))
+        except (TypeError, ValueError):
+            continue
+        if duration <= 0:
+            continue
+        key = robot or "(unknown)"
+        item = totals.setdefault(key, {"robot": key, "episodes": 0, "duration_seconds": 0.0})
+        item["episodes"] = int(item["episodes"]) + 1
+        item["duration_seconds"] = float(item["duration_seconds"]) + duration
+    return [
+        {
+            "robot": str(item["robot"]),
+            "episodes": int(item["episodes"]),
+            "duration_seconds": round(float(item["duration_seconds"]), 3),
+            "duration_hours": round(float(item["duration_seconds"]) / 3600.0, 3),
+        }
+        for item in sorted(totals.values(), key=lambda row: (-float(row["duration_seconds"]), str(row["robot"])))
+    ]
+
+
+def _format_duration_seconds(seconds: float | int) -> str:
+    value = float(seconds)
+    if value <= 0:
+        return "unknown"
+    if value >= 3600:
+        return f"{value / 3600:.2f} h"
+    if value >= 60:
+        return f"{value / 60:.1f} min"
+    return f"{value:.1f} s"
+
+
+def _eta_seconds(processed: int, total: int, elapsed: float) -> float:
+    if processed <= 0 or total <= 0 or processed >= total or elapsed <= 0:
+        return 0.0
+    rate = processed / elapsed
+    return (total - processed) / rate if rate > 0 else 0.0
 
 
 def _json_dict(value: str | None) -> dict[str, Any]:

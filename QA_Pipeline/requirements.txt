@@ -4,3 +4,7 @@ openpyxl>=3.1
 tqdm>=4.66
 pin>=3.4
 xacro>=2.1
+psycopg[binary]>=3.2
+aio-pika>=9.0
+pydantic>=2.0
+python-jose>=3.0
