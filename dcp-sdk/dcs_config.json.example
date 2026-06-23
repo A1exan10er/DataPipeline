@@ -1,0 +1,6 @@
+{
+  "rabbitmq": {
+    "url": "amqp://username:password@rabbitmq-host:5672/",
+    "exchange": "event_center.events"
+  }
+}
