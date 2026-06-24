@@ -2,7 +2,7 @@
 
 ## Overview
 
-The QA pipeline checks recorded robot episodes before they are used for training. It discovers `episode_*` folders, creates or loads one SQLite row per episode in `outputs/qa_pipeline.db`, then runs phases 1 through 5 in order. Before each phase, episodes that failed an earlier phase are skipped, so obvious structural or timing failures do not waste later video and robot-state work.
+The QA pipeline checks recorded robot episodes before they are used for training. It discovers `episode_*` folders, creates or loads one SQLite row per episode in `outputs/qa_pipeline.db`, then runs the selected phases in order. The current implemented phases are 1 through 7. Before each phase, episodes that failed an earlier phase are skipped by default, so obvious structural or timing failures do not waste later video, UMI, or motion-content work.
 
 Each phase writes findings back to SQLite. At the end, the runner computes one final status per episode and exports `outputs/quality_report.csv`, `outputs/quality_findings.jsonl`, and `outputs/quality_summary.md`. The CSV is the compact per-episode view, JSONL is the detailed finding log, and the Markdown summary groups results by status, task, operator, robot, and issue type.
 
@@ -40,6 +40,13 @@ Input: image `timestamps.csv`, metadata `frame_integrity`, and optional `timesta
 
 Method: For image modalities except flow, Phase 3 reads `timestamp_ms` rows where `is_new == 1`. It checks strictly increasing timestamps, duplicates, actual frequency versus expected FPS, and start/end alignment across modalities. A start or end spread above 500 ms means cameras do not cover the same time interval. It uses `frame_integrity`, with a `timestamps.csv` fallback, to fail if RGB-like video frame drop ratio exceeds 10% or tactile video frame drop ratio exceeds 15%. It warns when `timestamps_raw.csv` and processed `timestamps.csv` differ by more than 2 rows. Group checks flag unusually long consecutive frame-drop runs within task+robot groups.
 
+Important issue names:
+
+- `abnormal_fps_loss`: actual FPS is lower than expected by more than the configured threshold. The formula is `actual_fps = (timestamp_count - 1) / duration_seconds`, then `loss_ratio = (expected_fps - actual_fps) / expected_fps`. The default fail threshold is `loss_ratio > 0.10`. For a 30 FPS stream, actual FPS below 27 triggers `major/fail`. The finding details include `modality`, `actual_fps`, `expected_fps`, `deviation_ratio`, and `threshold`.
+- `frame_drop_ratio`: too many image frames were marked as dropped. The formula is `drop_ratio = total_drops / frame_count`. For normal image streams the default fail threshold is `drop_ratio > 0.10`; for tactile image streams it is `drop_ratio > 0.15`. The finding details include `modality`, `drop_ratio`, `threshold`, `total_drops`, and `frame_count`.
+
+These two findings often appear together because dropped image frames reduce effective FPS, but they are not the same check. `frame_drop_ratio` measures explicit dropped-frame count. `abnormal_fps_loss` measures timestamp-derived frequency loss.
+
 Classification: frequent non-monotonic or duplicate timestamps can fail; smaller ratios warn or need review. Large gaps over 5x median interval warn, over 20x fail. This phase is medium cost because it reads timestamp rows and performs group statistics.
 
 ## Phase 4 — Video Health
@@ -61,6 +68,26 @@ Input: `actions.joint_position/data.csv`, `observation.state.joint_position/data
 Method: Phase 5 parses numeric columns and detects ARX bimanual columns (`left_j*`, `right_j*`) or Flexiv columns (`j1`, `joint_*.pos`). It checks NaN/Inf values, monotonic timestamps, joint and gripper limits, per-frame joint/gripper steps, measured or estimated velocity, acceleration, jitter, and EEF position jumps. ARX5 and Flexiv have separate limits; unknown robots fall back to ARX defaults. Standstill detection uses joint position rows: if all non-gripper joints move less than a tiny threshold for more than a 5 second buffer, the extra idle time is reported, and more than 20% idle excess needs review.
 
 Classification: parse failures, NaN/Inf, frequent timestamp violations, or high jitter can fail. Joint limits, large steps, high velocity, and EEF jumps usually need review; high acceleration warns. This phase is medium to slow because it loads numeric CSVs and can run in parallel.
+
+## Phase 6 — UMI Processing
+
+Purpose: run UMI-specific processing and validation that does not apply to ordinary robot episodes.
+
+Input: UMI episode folders, UMI action/EEF trajectories, camera videos, and the processing tools under `DataProcessUMI`.
+
+Method: Phase 6 first decides whether an episode is UMI data by checking robot/task/path tokens. Non-UMI robot episodes are skipped by this phase. For UMI data, it can run trajectory assessment, preprocessing, world-base transformation, video-related processing, and optional inverse-kinematics/executability checks. The strict trajectory gate can reject unusable trajectories before slower processing. Phase 6 writes processed artifacts under the configured UMI output directory rather than modifying the original NAS episode.
+
+Classification: UMI trajectory failures, processing errors, missing required UMI modalities, or failed executability checks become QA findings. The phase is slow compared with phases 1-3 because it may call external processing scripts and video/IK logic. For large runs it can be deferred so normal robot phases finish first.
+
+## Phase 7 — Standstill / Operator Idle Detection
+
+Purpose: detect episodes where the operator stopped for too long during collection, at the beginning, middle, or end of the recording.
+
+Input: the first usable motion source from this priority list: `observation.state.joint_position`, `actions.joint_position`, `observation.state.eef_pose`, `actions.eef_pose`, and `action.eef_pose`.
+
+Method: Phase 7 compares consecutive motion rows. If all selected non-gripper motion columns change by less than `motion_delta_threshold`, that row pair is treated as still. Still segments shorter than `stillness_buffer_ms` are allowed. Longer segments are classified by location: `leading`, `middle`, or `trailing`. The phase reports both individual segments and excessive total idle time. It does not modify raw CSV files.
+
+Classification: standstill segments above the warning/review/fail durations produce `operator_standstill_leading`, `operator_standstill_middle`, or `operator_standstill_trailing`. Excessive total idle time produces `operator_standstill_excessive`. If useful non-standstill motion is below the configured minimum, the episode fails with `operator_standstill_motion_too_short`.
 
 ## Supplementary Tool: Frame Alignment (align_frames.py)
 

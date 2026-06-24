@@ -99,6 +99,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "smooth_config": None,
         "transform_config": None
     },
+    "phase7_standstill": {
+        "enabled": True,
+        "motion_delta_threshold": 0.001,
+        "stillness_buffer_ms": 5000,
+        "warn_segment_ms": 5000,
+        "review_segment_ms": 10000,
+        "fail_segment_ms": 30000,
+        "review_excess_ratio": 0.20,
+        "fail_excess_ratio": 0.40,
+        "edge_tolerance_ms": 1000,
+        "min_useful_motion_ms": 5000,
+        "source_modalities": [
+            "observation.state.joint_position",
+            "actions.joint_position",
+            "observation.state.eef_pose",
+            "actions.eef_pose",
+            "action.eef_pose",
+        ],
+    },
     "standstill_trim": {
         "enabled": True,
         "motion_delta_threshold_rad": 0.001,

@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -32,6 +33,7 @@ DEFAULT_DC_ROOT = str(Path(__file__).resolve().parents[1] / "dcp-sdk")
 DEFAULT_QA_PYTHON = "datapipeline-env/bin/python3"
 
 PENDING_STATUSES = ("pending", "retry")
+RETENTION_MANIFEST = "retention_cleanup.jsonl"
 
 
 def utc_now() -> str:
@@ -456,8 +458,11 @@ def run_pipeline_for_jobs(
         str(args.resource_retry_delay_seconds),
         "--resource-max-wait-seconds",
         str(args.resource_max_wait_seconds),
-        "--disable-quality-label-filter",
+        "--quality-label",
+        args.quality_label,
     ]
+    if args.disable_quality_label_filter:
+        command.append("--disable-quality-label-filter")
     if args.disable_live_monitor:
         command.append("--disable-live-monitor")
     if args.force_rerun:
@@ -490,7 +495,112 @@ def run_pipeline_for_jobs(
             db_path=qa_db,
             error="" if completed.returncode == 0 else f"pipeline exit code {completed.returncode}",
         )
+    cleanup_event_outputs(args)
     return completed.returncode == 0, str(console_log), len(valid_jobs)
+
+
+def cleanup_event_outputs(args: argparse.Namespace) -> None:
+    """Bound event-listener artifact growth without touching the job DB."""
+    max_runs = int(args.retention_max_runs)
+    max_days = float(args.retention_days)
+    max_gb = float(args.retention_max_gb)
+    if max_runs <= 0 and max_days <= 0 and max_gb <= 0:
+        return
+    output_dir = Path(args.output_dir)
+    candidates = _retention_candidates(output_dir, include_size=max_gb > 0)
+    if not candidates:
+        return
+    now = time.time()
+    keep: set[Path] = set()
+    remove: dict[Path, str] = {}
+
+    if max_days > 0:
+        cutoff = now - (max_days * 86400)
+        for item in candidates:
+            if item["mtime"] < cutoff:
+                remove[item["path"]] = f"older_than_{max_days:g}_days"
+
+    remaining = [item for item in candidates if item["path"] not in remove]
+    remaining.sort(key=lambda item: item["mtime"], reverse=True)
+    if max_runs > 0:
+        for item in remaining[:max_runs]:
+            keep.add(item["path"])
+        for item in remaining[max_runs:]:
+            remove.setdefault(item["path"], f"over_{max_runs}_runs")
+
+    if max_gb > 0:
+        max_bytes = int(max_gb * 1024**3)
+        size_items = [item for item in remaining if item["path"] not in remove]
+        size_items.sort(key=lambda item: item["mtime"], reverse=True)
+        total = 0
+        for item in size_items:
+            total += int(item["size"])
+            if total > max_bytes and item["path"] not in keep:
+                remove.setdefault(item["path"], f"over_{max_gb:g}_gb")
+
+    if not remove:
+        return
+    manifest_path = output_dir / RETENTION_MANIFEST
+    output_dir.mkdir(parents=True, exist_ok=True)
+    removed = 0
+    with manifest_path.open("a", encoding="utf-8") as manifest:
+        for path, reason in sorted(remove.items(), key=lambda item: str(item[0])):
+            try:
+                size = directory_size_bytes(path)
+                shutil.rmtree(path)
+                removed += 1
+                manifest.write(
+                    json.dumps(
+                        {
+                            "removed_at": utc_now(),
+                            "path": str(path),
+                            "reason": reason,
+                            "size_bytes": size,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            except OSError as exc:
+                print(f"retention cleanup warning: could not remove {path}: {exc}", flush=True)
+    if removed:
+        print(f"retention cleanup: removed {removed} old event-listener output folder(s)", flush=True)
+
+
+def _retention_candidates(output_dir: Path, include_size: bool = False) -> list[dict[str, Any]]:
+    candidates = []
+    for parent_name in ("jobs", "batches"):
+        parent = output_dir / parent_name
+        if not parent.is_dir():
+            continue
+        for child in parent.iterdir():
+            if not child.is_dir():
+                continue
+            try:
+                stat = child.stat()
+            except OSError:
+                continue
+            candidates.append(
+                {
+                    "path": child,
+                    "mtime": stat.st_mtime,
+                    "size": directory_size_bytes(child) if include_size else 0,
+                }
+            )
+    return candidates
+
+
+def directory_size_bytes(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                pass
+    return total
 
 
 async def listen_events(args: argparse.Namespace) -> None:
@@ -672,7 +782,7 @@ def add_worker_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--qa-python", default=DEFAULT_QA_PYTHON)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--phases", default="1,2,3")
+    parser.add_argument("--phases", default="1,2,3,7")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument(
         "--batch-size",
@@ -691,6 +801,11 @@ def add_worker_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--resource-error-retries", type=int, default=2)
     parser.add_argument("--resource-retry-delay-seconds", type=float, default=60.0)
     parser.add_argument("--resource-max-wait-seconds", type=float, default=300.0)
+    parser.add_argument("--retention-days", type=float, default=14.0, help="Delete event-listener run output folders older than this many days. 0 disables age cleanup.")
+    parser.add_argument("--retention-max-runs", type=int, default=0, help="Keep at most this many event-listener run output folders. 0 disables count cleanup.")
+    parser.add_argument("--retention-max-gb", type=float, default=0.0, help="Keep event-listener run output folders below this approximate total size in GB. 0 disables size cleanup.")
+    parser.add_argument("--quality-label", default="完全正常", help="Only process jobs whose metadata quality.labels contains this label. Default: 完全正常.")
+    parser.add_argument("--disable-quality-label-filter", action="store_true", help="Process listener jobs regardless of metadata quality.labels.")
     parser.add_argument("--run-id-prefix", default="event-verified")
     parser.add_argument("--disable-live-monitor", action="store_true")
     parser.add_argument("--force-rerun", action="store_true")

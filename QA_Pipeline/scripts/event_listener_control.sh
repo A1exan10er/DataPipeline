@@ -14,6 +14,7 @@ DCS_CONFIG_FILE="${DCS_CONFIG_FILE:-$HOME/DataPipeline/dcp-sdk/dcs_config.json.e
 DC_ROOT="${DC_ROOT:-$REPO_ROOT/dcp-sdk}"
 MOUNT_PREFIX="${MOUNT_PREFIX:-/mnt/nas/database/verified}"
 QA_PYTHON="${QA_PYTHON:-datapipeline-env/bin/python}"
+PHASES="${PHASES:-1,2,3,7}"
 WORKERS="${WORKERS:-1}"
 EVENT_BATCH_SIZE="${EVENT_BATCH_SIZE:-16}"
 STABILITY_INTERVAL="${STABILITY_INTERVAL:-3}"
@@ -21,7 +22,16 @@ STABILITY_TIMEOUT="${STABILITY_TIMEOUT:-90}"
 MIN_FREE_MEM_GB="${MIN_FREE_MEM_GB:-6}"
 MAX_LOAD_RATIO="${MAX_LOAD_RATIO:-0.75}"
 RESOURCE_MAX_WAIT_SECONDS="${RESOURCE_MAX_WAIT_SECONDS:-300}"
+RETENTION_DAYS="${RETENTION_DAYS:-14}"
+RETENTION_MAX_RUNS="${RETENTION_MAX_RUNS:-0}"
+RETENTION_MAX_GB="${RETENTION_MAX_GB:-0}"
+QUALITY_LABEL="${QUALITY_LABEL:-完全正常}"
+DISABLE_QUALITY_LABEL_FILTER="${DISABLE_QUALITY_LABEL_FILTER:-0}"
 TASK_DB_ENV_FILE="${TASK_DB_ENV_FILE:-$HOME/.qa_task_db_env}"
+DISABLE_QUALITY_LABEL_ARG=""
+if [[ "$DISABLE_QUALITY_LABEL_FILTER" == "1" ]]; then
+  DISABLE_QUALITY_LABEL_ARG="--disable-quality-label-filter"
+fi
 
 require_tmux() {
   if ! command -v tmux >/dev/null 2>&1; then
@@ -69,6 +79,7 @@ case "$ACTION" in
          --dc-root '$DC_ROOT' \
          --mount-prefix '$MOUNT_PREFIX' \
          --qa-python '$QA_PYTHON' \
+         --phases '$PHASES' \
          --workers '$WORKERS' \
          --batch-size '$EVENT_BATCH_SIZE' \
          --stability-interval '$STABILITY_INTERVAL' \
@@ -76,6 +87,11 @@ case "$ACTION" in
          --max-load-ratio '$MAX_LOAD_RATIO' \
          --min-free-mem-gb '$MIN_FREE_MEM_GB' \
          --resource-max-wait-seconds '$RESOURCE_MAX_WAIT_SECONDS' \
+         --retention-days '$RETENTION_DAYS' \
+         --retention-max-runs '$RETENTION_MAX_RUNS' \
+         --retention-max-gb '$RETENTION_MAX_GB' \
+         --quality-label '$QUALITY_LABEL' \
+         $DISABLE_QUALITY_LABEL_ARG \
          --recover-running \
          >> '$LOG_FILE' 2>&1"
     echo "Started event listener: $SESSION"

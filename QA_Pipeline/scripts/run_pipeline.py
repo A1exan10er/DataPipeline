@@ -26,6 +26,7 @@ from scripts.pipeline import (
     phase4_video,
     phase5_robot_state,
     phase6_umi_processing,
+    phase7_standstill,
 )
 from QA_Pipeline.scripts.generate_dashboard import generate_dashboard
 from scripts.pipeline.qa_core import (
@@ -65,6 +66,7 @@ PHASE_RUNNERS: dict[int, Callable[..., list[EpisodeState]]] = {
     4: phase4_video.run_phase,
     5: phase5_robot_state.run_phase,
     6: phase6_umi_processing.run_phase,
+    7: phase7_standstill.run_phase,
 }
 
 PHASE_MODULES = {
@@ -74,6 +76,7 @@ PHASE_MODULES = {
     4: phase4_video,
     5: phase5_robot_state,
     6: phase6_umi_processing,
+    7: phase7_standstill,
 }
 
 EPISODE_SELECTION_CACHE = "selected_episodes.jsonl"
