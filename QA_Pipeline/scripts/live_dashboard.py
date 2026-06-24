@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from scripts.generate_dashboard import generate_dashboard
+from QA_Pipeline.scripts.generate_dashboard import generate_dashboard
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):

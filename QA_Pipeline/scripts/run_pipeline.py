@@ -27,7 +27,7 @@ from scripts.pipeline import (
     phase5_robot_state,
     phase6_umi_processing,
 )
-from scripts.generate_dashboard import generate_dashboard
+from QA_Pipeline.scripts.generate_dashboard import generate_dashboard
 from scripts.pipeline.qa_core import (
     EpisodeState,
     Finding,
