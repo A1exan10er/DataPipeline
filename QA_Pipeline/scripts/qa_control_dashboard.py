@@ -30,12 +30,15 @@ from urllib.parse import parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = REPO_ROOT.parent
+SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MANAGER_DIR = PROJECT_ROOT / "outputs" / "dashboard_manager"
 DEFAULT_REGISTRY_DB = DEFAULT_MANAGER_DIR / "runs.db"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "dashboard_runs"
 DEFAULT_VERIFIED_ROOT = Path("/mnt/nas/database/verified")
 EVENT_CONTROL_SCRIPT = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listener_control.sh"
 EVENT_JOB_DB = PROJECT_ROOT / "outputs" / "event_listener" / "jobs.db"
+ISSUE_TRANSLATIONS_PATH = SCRIPT_DIR / "issue_translations.json"
+_ISSUE_TRANSLATIONS_CACHE: dict[str, str] | None = None
 
 
 class DashboardState:
@@ -729,20 +732,26 @@ def job_episode_result(job: dict[str, Any], include_findings: bool = False) -> d
                 "SELECT COUNT(*) FROM findings WHERE episode_path = ? AND status != ?",
                 (episode_path, "pass"),
             )
-            result["top_issues"] = [
-                {"check_name": str(name), "count": int(count)}
-                for name, count in conn.execute(
-                    """
-                    SELECT check_name, COUNT(*) AS count
-                    FROM findings
-                    WHERE episode_path = ? AND status != ?
-                    GROUP BY check_name
-                    ORDER BY count DESC, check_name
-                    LIMIT 10
-                    """,
-                    (episode_path, "pass"),
-                )
-            ]
+            top_issue_groups: dict[str, dict[str, Any]] = {}
+            for check_name, details_raw in conn.execute(
+                """
+                SELECT check_name, details
+                FROM findings
+                WHERE episode_path = ? AND status != ?
+                ORDER BY id
+                """,
+                (episode_path, "pass"),
+            ):
+                name = str(check_name)
+                group = top_issue_groups.setdefault(name, {"check_name": name, "count": 0, "fields": []})
+                group["count"] += 1
+                for field in finding_detail_fields(json_value(details_raw, {})):
+                    if field not in group["fields"]:
+                        group["fields"].append(field)
+            result["top_issues"] = sorted(
+                top_issue_groups.values(),
+                key=lambda item: (-int(item["count"]), str(item["check_name"])),
+            )[:10]
             if include_findings:
                 findings = conn.execute(
                     """
@@ -1090,6 +1099,21 @@ def json_value(raw: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def finding_detail_fields(details: Any) -> list[str]:
+    if not isinstance(details, dict):
+        return []
+    fields: list[str] = []
+    for key in ("modality", "field", "sensor", "channel"):
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            fields.append(value)
+    for key in ("modalities", "fields", "sensors", "channels"):
+        value = details.get(key)
+        if isinstance(value, list):
+            fields.extend(str(item) for item in value if str(item))
+    return fields
+
+
 def write_run_script(path: Path, command: list[str], log_path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -1119,13 +1143,16 @@ def start_tmux(session: str, command: str) -> None:
 def tmux_session_running(session: str) -> bool:
     if not session:
         return False
-    completed = subprocess.run(
-        ["tmux", "has-session", "-t", session],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return completed.returncode == 0
+    try:
+        completed = subprocess.run(
+            ["tmux", "has-session", "-t", session],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return completed.returncode == 0
+    except FileNotFoundError:
+        return False
 
 
 def normalize_verified_path(raw: str, verified_root: Path) -> str:
@@ -1206,6 +1233,24 @@ def directory_size(path: Path) -> str:
     return human_bytes(total)
 
 
+def issue_translations() -> dict[str, str]:
+    global _ISSUE_TRANSLATIONS_CACHE
+    if _ISSUE_TRANSLATIONS_CACHE is not None:
+        return _ISSUE_TRANSLATIONS_CACHE
+    try:
+        raw = json.loads(ISSUE_TRANSLATIONS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Warning: could not load issue translations from {ISSUE_TRANSLATIONS_PATH}: {exc}", flush=True)
+        _ISSUE_TRANSLATIONS_CACHE = {}
+        return _ISSUE_TRANSLATIONS_CACHE
+    if not isinstance(raw, dict):
+        print(f"Warning: issue translations file must contain a JSON object: {ISSUE_TRANSLATIONS_PATH}", flush=True)
+        _ISSUE_TRANSLATIONS_CACHE = {}
+        return _ISSUE_TRANSLATIONS_CACHE
+    _ISSUE_TRANSLATIONS_CACHE = {str(key): str(value) for key, value in raw.items()}
+    return _ISSUE_TRANSLATIONS_CACHE
+
+
 def disk_payload(usage: shutil._ntuple_diskusage | None) -> dict[str, Any]:
     if usage is None:
         return {}
@@ -1263,6 +1308,7 @@ def human_bytes(value: int) -> str:
 
 def render_index_html(state: DashboardState) -> str:
     refresh = int(state.refresh_seconds * 1000)
+    issue_translations_json = json.dumps(issue_translations(), ensure_ascii=False, sort_keys=True)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1315,6 +1361,10 @@ def render_index_html(state: DashboardState) -> str:
     table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
     th, td {{ border-bottom: 1px solid var(--line); padding: 7px 6px; text-align: left; vertical-align: top; }}
     th {{ color: var(--muted); font-weight: 600; }}
+    .table-scroll {{ max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+    .table-scroll table {{ min-width: 760px; }}
+    .table-scroll.wide table {{ min-width: 1040px; }}
+    .task-cell {{ max-width: 150px; width: 150px; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }}
     tr.run-row {{ cursor: pointer; }}
     tr.run-row:hover {{ background: #f1f5f9; }}
     .link-btn {{ height: 28px; padding: 0 7px; font-size: 12px; }}
@@ -1322,6 +1372,15 @@ def render_index_html(state: DashboardState) -> str:
     .status-fail, .status-failed {{ color: var(--danger); font-weight: 700; }}
     .status-running {{ color: var(--accent); font-weight: 700; }}
     .status-warning, .status-pending {{ color: var(--warn); font-weight: 700; }}
+    .issue-summary {{ min-width: 260px; max-width: 720px; white-space: normal; }}
+    .issue-summary-line {{ line-height: 1.35; overflow-wrap: anywhere; word-break: break-word; }}
+    .issue-summary-head {{ white-space: nowrap; }}
+    .issue-summary-empty {{ color: var(--muted); }}
+    .issue-check-name {{ cursor: help; text-decoration: underline dotted var(--muted); text-underline-offset: 2px; }}
+    #checkNameTooltip {{ position: fixed; z-index: 50; display: none; max-width: 340px; padding: 7px 9px; border-radius: 5px; background: #101828; color: #fff; font-size: 12px; line-height: 1.4; box-shadow: 0 8px 20px rgba(15, 23, 42, 0.25); pointer-events: none; }}
+    th.sortable {{ cursor: pointer; user-select: none; white-space: nowrap; }}
+    th.sortable:hover {{ color: var(--text); }}
+    .sort-arrow {{ display: inline-block; width: 1em; margin-left: 3px; color: var(--accent); }}
     pre {{ background: #101828; color: #e5e7eb; padding: 12px; border-radius: 6px; overflow: auto; max-height: 360px; }}
     .two {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
     .modal-backdrop {{ position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); display: none; align-items: center; justify-content: center; padding: 24px; z-index: 20; }}
@@ -1415,14 +1474,26 @@ def render_index_html(state: DashboardState) -> str:
         <h2>Event Issue Episodes</h2>
         <span class="muted">episodes with non-pass findings from event listener</span>
       </div>
-      <table>
-        <thead><tr><th>ID</th><th>Status</th><th>QA</th><th>Task</th><th>Robot</th><th>Episode</th><th>Issues</th><th>Updated</th><th></th></tr></thead>
-        <tbody id="eventJobsBody"></tbody>
-      </table>
+      <div class="table-scroll wide">
+        <table>
+          <thead><tr>
+            <th class="sortable" onclick="setEventJobsSort('id')">ID<span id="eventSort-id" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('status')">Status<span id="eventSort-status" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('qa')">QA<span id="eventSort-qa" class="sort-arrow"></span></th>
+            <th class="sortable task-cell" onclick="setEventJobsSort('task')">Task<span id="eventSort-task" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('robot')">Robot<span id="eventSort-robot" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('episode')">Episode<span id="eventSort-episode" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('issues')">Issues<span id="eventSort-issues" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('updated')">Updated<span id="eventSort-updated" class="sort-arrow"></span></th>
+            <th></th>
+          </tr></thead>
+          <tbody id="eventJobsBody"></tbody>
+        </table>
+      </div>
     </div>
     <div class="panel">
       <h2>Runs</h2>
-      <table><thead><tr><th>Run</th><th>Mode</th><th>Status</th><th>Episodes</th><th>Issues</th><th>Updated</th><th></th></tr></thead><tbody id="runsBody"></tbody></table>
+      <div class="table-scroll"><table><thead><tr><th>Run</th><th>Mode</th><th>Status</th><th>Episodes</th><th>Issues</th><th>Updated</th><th></th></tr></thead><tbody id="runsBody"></tbody></table></div>
     </div>
     <div class="panel">
       <h2>Run Detail</h2>
@@ -1430,7 +1501,7 @@ def render_index_html(state: DashboardState) -> str:
     </div>
     <div class="panel">
       <h2>Server Processes</h2>
-      <table><thead><tr><th>PID</th><th>CPU</th><th>Mem</th><th>RSS MB</th><th>Command</th></tr></thead><tbody id="procBody"></tbody></table>
+      <div class="table-scroll"><table><thead><tr><th>PID</th><th>CPU</th><th>Mem</th><th>RSS MB</th><th>Command</th></tr></thead><tbody id="procBody"></tbody></table></div>
     </div>
     <div class="panel">
       <h2>Log</h2>
@@ -1459,22 +1530,25 @@ def render_index_html(state: DashboardState) -> str:
     <div class="modal-body">
       <div id="eventSummaryModalSeverity" class="severity-strip" style="margin-bottom:12px"></div>
       <h3>By Task, Device, Collector</h3>
-      <table>
-        <thead><tr><th>Task</th><th>Device</th><th>Collector</th><th>Episodes</th><th>Findings</th><th>Severity</th><th>Top Issues</th></tr></thead>
-        <tbody id="eventContextSummaryBody"></tbody>
-      </table>
+      <div class="table-scroll wide"><table>
+          <thead><tr><th class="task-cell">Task</th><th>Device</th><th>Collector</th><th>Episodes</th><th>Findings</th><th>Severity</th><th>Top Issues</th></tr></thead>
+          <tbody id="eventContextSummaryBody"></tbody>
+      </table></div>
       <h3>By Issue Type</h3>
-      <table>
-        <thead><tr><th>Issue</th><th>Severity</th><th>Findings</th><th>Episodes</th><th>Task/device/collector groups</th></tr></thead>
-        <tbody id="eventIssueSummaryBody"></tbody>
-      </table>
+      <div class="table-scroll"><table>
+          <thead><tr><th>Issue</th><th>Severity</th><th>Findings</th><th>Episodes</th><th>Task/device/collector groups</th></tr></thead>
+          <tbody id="eventIssueSummaryBody"></tbody>
+      </table></div>
     </div>
   </div>
 </div>
+<div id="checkNameTooltip" role="tooltip"></div>
 <script>
 const refreshMs = {refresh};
 let selectedRun = null;
 let selectedEventJob = null;
+let eventJobsSort = {{key: 'id', direction: 'asc'}};
+let eventJobsCache = [];
 
 async function getJson(url) {{
   const r = await fetch(url, {{cache: 'no-store'}});
@@ -1494,9 +1568,18 @@ function esc(s) {{
   return String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
 }}
 
+function localTimestamp(value) {{
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const pad = number => String(number).padStart(2, '0');
+  return `${{date.getFullYear()}}-${{pad(date.getMonth() + 1)}}-${{pad(date.getDate())}} ` +
+    `${{pad(date.getHours())}}:${{pad(date.getMinutes())}}:${{pad(date.getSeconds())}}`;
+}}
+
 async function refresh() {{
   const data = await getJson('/api/status');
-  document.getElementById('clock').textContent = data.generated_at || '';
+  document.getElementById('clock').textContent = localTimestamp(data.generated_at);
   document.getElementById('load1').textContent = Number(val(data,'server.load.1m',0)).toFixed(2);
   document.getElementById('memUsed').textContent =
     val(data,'server.memory.used_gb','-') + ' / ' + val(data,'server.memory.total_gb','-') + ' GB';
@@ -1525,7 +1608,7 @@ function renderRuns(runs) {{
       <td>${{run.run_id}}</td><td>${{run.mode || ''}}</td>
       <td class="${{cls(run.status || val(run,'live_status.status',''))}}">${{run.status || val(run,'live_status.status','')}}</td>
       <td>${{run.episode_count || 0}}</td><td>${{run.finding_count || 0}}</td>
-      <td>${{run.updated_at || ''}}</td>
+      <td>${{localTimestamp(run.updated_at)}}</td>
       <td><button onclick="event.stopPropagation(); stopRun('${{run.run_id}}')">Stop</button></td>
     </tr>`;
   }}).join('');
@@ -1533,7 +1616,8 @@ function renderRuns(runs) {{
 
 async function refreshEventJobs() {{
   const data = await getJson('/api/event-listener/jobs?limit=120&issues_only=1');
-  renderEventJobs(data.jobs || []);
+  eventJobsCache = data.jobs || [];
+  renderEventJobs(eventJobsCache);
 }}
 
 async function refreshEventIssueSummary() {{
@@ -1548,6 +1632,115 @@ function severityText(counts) {{
 
 function severityBadge(name, count) {{
   return `<span class="severity-chip ${{cls(name)}}">${{esc(name)}} ${{count}}</span>`;
+}}
+
+const CHECK_NAME_TOOLTIPS = {issue_translations_json};
+let checkNameTooltipTimer = null;
+
+function checkNameTooltipHtml(checkName) {{
+  const name = String(checkName || '');
+  const tooltip = CHECK_NAME_TOOLTIPS[name] || '暂无说明';
+  return `<span class="issue-check-name" data-tooltip="${{esc(tooltip)}}">${{esc(name)}}</span>`;
+}}
+
+function hideCheckNameTooltip() {{
+  if (checkNameTooltipTimer) {{
+    clearTimeout(checkNameTooltipTimer);
+    checkNameTooltipTimer = null;
+  }}
+  const tooltip = document.getElementById('checkNameTooltip');
+  if (tooltip) tooltip.style.display = 'none';
+}}
+
+function positionCheckNameTooltip(target, tooltip) {{
+  const rect = target.getBoundingClientRect();
+  tooltip.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - tooltip.offsetWidth - 12)) + 'px';
+  tooltip.style.top = Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - tooltip.offsetHeight - 12)) + 'px';
+}}
+
+function showCheckNameTooltip(target) {{
+  hideCheckNameTooltip();
+  checkNameTooltipTimer = setTimeout(() => {{
+    const tooltip = document.getElementById('checkNameTooltip');
+    if (!tooltip) return;
+    tooltip.textContent = target.dataset.tooltip || '暂无说明';
+    tooltip.style.display = 'block';
+    positionCheckNameTooltip(target, tooltip);
+  }}, 120);
+}}
+
+function eventIssueSummaryHtml(job) {{
+  const issues = job.top_issues || [];
+  if (!issues.length) {{
+    return `<div class="issue-summary issue-summary-empty">${{job.issue_count || 0}}</div>`;
+  }}
+  const issueText = issues.map(issue =>
+    `<span class="issue-summary-head">${{checkNameTooltipHtml(issue.check_name)}} (${{issue.count || 0}})</span>`
+  ).join(', ');
+  return `<div class="issue-summary">${{job.issue_count || 0}}: ${{issueText}}</div>`;
+}}
+
+function findingDetailFields(details) {{
+  if (!details || typeof details !== 'object') return [];
+  const fields = [];
+  ['modality', 'field', 'sensor', 'channel'].forEach(key => {{
+    const value = details[key];
+    if (typeof value === 'string' && value) fields.push(value);
+  }});
+  ['modalities', 'fields', 'sensors', 'channels'].forEach(key => {{
+    const value = details[key];
+    if (Array.isArray(value)) value.forEach(item => {{
+      if (item !== null && item !== undefined && String(item)) fields.push(String(item));
+    }});
+  }});
+  return [...new Set(fields)];
+}}
+
+function findingMessageHtml(finding) {{
+  const fields = findingDetailFields(finding.details);
+  const prefix = fields.length ? `[${{fields.map(field => esc(field)).join(', ')}}] ` : '';
+  return prefix + esc(finding.message || '');
+}}
+
+function eventJobSortValue(job, key) {{
+  if (key === 'id') return Number(job.id || 0);
+  if (key === 'issues') return Number(job.issue_count || 0);
+  if (key === 'updated') {{
+    const timestamp = Date.parse(job.updated_at || '');
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  }}
+  if (key === 'qa') return String(job.final_status || (job.status === 'done' ? 'complete' : '') || '').toLowerCase();
+  if (key === 'episode') return String(job.episode_name || '').toLowerCase();
+  return String(job[key] || '').toLowerCase();
+}}
+
+function compareEventJobs(left, right) {{
+  const leftValue = eventJobSortValue(left, eventJobsSort.key);
+  const rightValue = eventJobSortValue(right, eventJobsSort.key);
+  let result = 0;
+  if (typeof leftValue === 'number' && typeof rightValue === 'number') {{
+    result = leftValue - rightValue;
+  }} else {{
+    result = String(leftValue).localeCompare(String(rightValue), undefined, {{numeric: true, sensitivity: 'base'}});
+  }}
+  if (result === 0) result = Number(left.id || 0) - Number(right.id || 0);
+  return eventJobsSort.direction === 'asc' ? result : -result;
+}}
+
+function setEventJobsSort(key) {{
+  if (eventJobsSort.key === key) {{
+    eventJobsSort.direction = eventJobsSort.direction === 'asc' ? 'desc' : 'asc';
+  }} else {{
+    eventJobsSort = {{key, direction: 'asc'}};
+  }}
+  renderEventJobs(eventJobsCache);
+}}
+
+function updateEventJobsSortIndicators() {{
+  ['id', 'status', 'qa', 'task', 'robot', 'episode', 'issues', 'updated'].forEach(key => {{
+    const marker = document.getElementById('eventSort-' + key);
+    if (marker) marker.textContent = eventJobsSort.key === key ? (eventJobsSort.direction === 'asc' ? '▲' : '▼') : '';
+  }});
 }}
 
 function openEventSummaryModal() {{
@@ -1576,7 +1769,7 @@ function renderEventIssueSummary(summary) {{
   document.getElementById('eventContextSummaryBody').innerHTML = (summary.by_context || []).map(row => {{
     const issues = (row.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ');
     return `<tr>
-      <td>${{esc(row.task || '')}}</td>
+      <td class="task-cell">${{esc(row.task || '')}}</td>
       <td>${{esc(row.robot || '')}}</td>
       <td>${{esc(row.operator || '')}}</td>
       <td>${{row.episode_count || 0}}</td>
@@ -1598,18 +1791,18 @@ function renderEventIssueSummary(summary) {{
 
 function renderEventJobs(jobs) {{
   const body = document.getElementById('eventJobsBody');
-  body.innerHTML = jobs.map(job => {{
+  updateEventJobsSortIndicators();
+  body.innerHTML = [...jobs].sort(compareEventJobs).map(job => {{
     const qa = job.final_status || (job.status === 'done' ? 'complete' : '');
-    const issues = (job.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ');
     return `<tr>
       <td>${{job.id}}</td>
       <td class="${{cls(job.status)}}">${{esc(job.status)}}</td>
       <td class="${{cls(qa)}}">${{esc(qa || '-')}}</td>
-      <td>${{esc(job.task || '')}}</td>
+      <td class="task-cell">${{esc(job.task || '')}}</td>
       <td>${{esc(job.robot || '')}}</td>
       <td title="${{esc(job.mounted_path || '')}}">${{esc(job.episode_name || '')}}</td>
-      <td>${{job.issue_count || 0}} ${{issues ? '- ' + issues : ''}}</td>
-      <td>${{esc(job.updated_at || '')}}</td>
+      <td>${{eventIssueSummaryHtml(job)}}</td>
+      <td>${{localTimestamp(job.updated_at)}}</td>
       <td><button class="link-btn" onclick="loadEventJob(${{job.id}}, true)">Details</button></td>
     </tr>`;
   }}).join('');
@@ -1626,11 +1819,11 @@ async function loadEventJob(jobId, openModal) {{
   const job = data.job || {{}};
   const findings = job.findings || [];
   const issueRows = findings.length ? findings.map(f =>
-    `<tr><td>${{f.phase}}</td><td>${{esc(f.check_name)}}</td><td>${{esc(f.severity)}}</td><td class="${{cls(f.status)}}">${{esc(f.status)}}</td><td>${{esc(f.message)}}</td></tr>`
+    `<tr><td>${{f.phase}}</td><td>${{esc(f.check_name)}}</td><td>${{esc(f.severity)}}</td><td class="${{cls(f.status)}}">${{esc(f.status)}}</td><td>${{findingMessageHtml(f)}}</td></tr>`
   ).join('') : '<tr><td colspan="5" class="muted">No non-pass findings.</td></tr>';
   const phaseStatus = Object.entries(job.phase_status || {{}}).map(([phase,status]) => `P${{phase}}=${{status}}`).join(', ');
   const topIssues = (job.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ') || 'None';
-  const issueSummary = findings.map(f => `${{esc(f.check_name)}}: ${{esc(f.message)}}`).join('\\n');
+  const issueSummary = findings.map(f => `${{esc(f.check_name)}}: ${{findingMessageHtml(f)}}`).join('\\n');
   document.getElementById('eventJobDetail').innerHTML =
     `<div class="row"><b>Job ${{job.id}}</b><span class="${{cls(job.status)}}">${{esc(job.status)}}</span><span class="${{cls(job.final_status)}}">${{esc(job.final_status || '-')}}</span></div>` +
     `<div><b>Episode:</b> ${{esc(job.episode_name || '')}}</div>` +
@@ -1641,7 +1834,7 @@ async function loadEventJob(jobId, openModal) {{
     `<div><b>Output:</b> ${{esc(job.output_dir || '')}}</div>` +
     `<h3>Issue Summary</h3><pre>${{issueSummary || 'No non-pass findings.'}}</pre>` +
     `<h3>Episode Issues</h3>` +
-    `<table><thead><tr><th>Phase</th><th>Check</th><th>Severity</th><th>Status</th><th>Message</th></tr></thead><tbody>${{issueRows}}</tbody></table>`;
+    `<div class="table-scroll"><table><thead><tr><th>Phase</th><th>Check</th><th>Severity</th><th>Status</th><th>Message</th></tr></thead><tbody>${{issueRows}}</tbody></table></div>`;
   if (openModal) {{
     selectedEventJob = jobId;
     document.getElementById('eventJobModal').classList.add('open');
@@ -1663,7 +1856,7 @@ async function loadRun(runId, select) {{
   const live = run.live_status || run.run_status || {{}};
   const issueEpisodes = run.issue_episodes || [];
   const issueEpisodeRows = issueEpisodes.length ? issueEpisodes.map(ep =>
-    `<tr class="run-row"><td>${{esc(ep.episode_name)}}</td><td class="${{cls(ep.final_status)}}">${{esc(ep.final_status)}}</td><td>${{esc(ep.task)}}</td><td>${{esc(ep.robot)}}</td><td>${{ep.issue_count}}</td><td>${{esc((ep.issue_names || []).join(', '))}}</td></tr>`
+    `<tr class="run-row"><td>${{esc(ep.episode_name)}}</td><td class="${{cls(ep.final_status)}}">${{esc(ep.final_status)}}</td><td class="task-cell">${{esc(ep.task)}}</td><td>${{esc(ep.robot)}}</td><td>${{ep.issue_count}}</td><td>${{esc((ep.issue_names || []).join(', '))}}</td></tr>`
   ).join('') : '<tr><td colspan="6" class="muted">No issue episodes in this run.</td></tr>';
   document.getElementById('runDetail').innerHTML =
     `<div class="row"><b>${{run.run_id}}</b><span class="${{cls(run.status)}}">${{run.status}}</span></div>` +
@@ -1673,9 +1866,9 @@ async function loadRun(runId, select) {{
     `<div>Pass: ${{counts.pass || 0}} Warning: ${{counts.warning || 0}} Fail: ${{counts.fail || 0}} Review: ${{counts.needs_review || 0}}</div>` +
     `<div>Phase: ${{live.current_phase || '-'}} ${{live.current_phase_processed || 0}}/${{live.current_phase_total || 0}}</div>` +
     `<h3>Top Issues</h3>` +
-    `<table><tbody>${{(run.top_issues || []).map(i=>`<tr><td>${{i.check_name}}</td><td>${{i.count}}</td></tr>`).join('')}}</tbody></table>` +
+    `<div class="table-scroll"><table><tbody>${{(run.top_issues || []).map(i=>`<tr><td>${{i.check_name}}</td><td>${{i.count}}</td></tr>`).join('')}}</tbody></table></div>` +
     `<h3>Episodes With Issues</h3>` +
-    `<table><thead><tr><th>Episode</th><th>Status</th><th>Task</th><th>Robot</th><th>Issues</th><th>Issue Names</th></tr></thead><tbody>${{issueEpisodeRows}}</tbody></table>`;
+    `<div class="table-scroll wide"><table><thead><tr><th>Episode</th><th>Status</th><th class="task-cell">Task</th><th>Robot</th><th>Issues</th><th>Issue Names</th></tr></thead><tbody>${{issueEpisodeRows}}</tbody></table></div>`;
   await loadLog(runId);
 }}
 
@@ -1719,6 +1912,15 @@ async function eventAction(action) {{
 
 refresh();
 setInterval(refresh, refreshMs);
+document.addEventListener('mouseover', event => {{
+  const target = event.target.closest?.('.issue-check-name');
+  if (target) showCheckNameTooltip(target);
+}});
+document.addEventListener('mouseout', event => {{
+  const target = event.target.closest?.('.issue-check-name');
+  if (target && !target.contains(event.relatedTarget)) hideCheckNameTooltip();
+}});
+document.addEventListener('scroll', hideCheckNameTooltip, true);
 </script>
 </body>
 </html>"""
