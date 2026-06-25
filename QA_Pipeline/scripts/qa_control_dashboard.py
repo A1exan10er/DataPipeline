@@ -1364,7 +1364,8 @@ def render_index_html(state: DashboardState) -> str:
     .table-scroll {{ max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
     .table-scroll table {{ min-width: 760px; }}
     .table-scroll.wide table {{ min-width: 1040px; }}
-    .task-cell {{ max-width: 150px; width: 150px; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }}
+    .task-cell {{ max-width: 150px; width: 150px; white-space: normal; overflow-wrap: normal; word-break: normal; }}
+    .numeric-cell {{ text-align: right; font-variant-numeric: tabular-nums; }}
     tr.run-row {{ cursor: pointer; }}
     tr.run-row:hover {{ background: #f1f5f9; }}
     .link-btn {{ height: 28px; padding: 0 7px; font-size: 12px; }}
@@ -1377,6 +1378,12 @@ def render_index_html(state: DashboardState) -> str:
     .issue-summary-head {{ white-space: nowrap; }}
     .issue-summary-empty {{ color: var(--muted); }}
     .issue-check-name {{ cursor: help; text-decoration: underline dotted var(--muted); text-underline-offset: 2px; }}
+    .event-summary-section {{ margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }}
+    .event-summary-overview {{ margin-top: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; }}
+    .severity-text {{ font-weight: 700; }}
+    .severity-text.status-critical, .severity-text.status-fatal {{ color: var(--danger); }}
+    .severity-text.status-major, .severity-text.status-fail, .severity-text.status-high {{ color: var(--warn); }}
+    .severity-text.status-minor, .severity-text.status-warning, .severity-text.status-medium {{ color: var(--accent); }}
     #checkNameTooltip {{ position: fixed; z-index: 50; display: none; max-width: 340px; padding: 7px 9px; border-radius: 5px; background: #101828; color: #fff; font-size: 12px; line-height: 1.4; box-shadow: 0 8px 20px rgba(15, 23, 42, 0.25); pointer-events: none; }}
     th.sortable {{ cursor: pointer; user-select: none; white-space: nowrap; }}
     th.sortable:hover {{ color: var(--text); }}
@@ -1528,17 +1535,35 @@ def render_index_html(state: DashboardState) -> str:
       <button onclick="closeEventSummaryModal()" class="link-btn">Close</button>
     </div>
     <div class="modal-body">
-      <div id="eventSummaryModalSeverity" class="severity-strip" style="margin-bottom:12px"></div>
-      <h3>By Task, Device, Collector</h3>
-      <div class="table-scroll wide"><table>
-          <thead><tr><th class="task-cell">Task</th><th>Device</th><th>Collector</th><th>Episodes</th><th>Findings</th><th>Severity</th><th>Top Issues</th></tr></thead>
+      <div id="eventSummaryModalSeverity" class="severity-strip event-summary-overview"></div>
+      <div class="event-summary-section">
+        <h3>By Task, Device, Collector</h3>
+        <div class="table-scroll wide"><table>
+          <thead><tr>
+            <th class="sortable task-cell" onclick="setEventContextSummarySort('task')">Task<span id="eventContextSort-task" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventContextSummarySort('robot')">Device<span id="eventContextSort-robot" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventContextSummarySort('operator')">Collector<span id="eventContextSort-operator" class="sort-arrow"></span></th>
+            <th class="sortable numeric-cell" onclick="setEventContextSummarySort('episodes')">Episodes<span id="eventContextSort-episodes" class="sort-arrow"></span></th>
+            <th class="sortable numeric-cell" onclick="setEventContextSummarySort('findings')">Findings<span id="eventContextSort-findings" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventContextSummarySort('severity')">Severity<span id="eventContextSort-severity" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventContextSummarySort('issues')">Top Issues<span id="eventContextSort-issues" class="sort-arrow"></span></th>
+          </tr></thead>
           <tbody id="eventContextSummaryBody"></tbody>
-      </table></div>
-      <h3>By Issue Type</h3>
-      <div class="table-scroll"><table>
-          <thead><tr><th>Issue</th><th>Severity</th><th>Findings</th><th>Episodes</th><th>Task/device/collector groups</th></tr></thead>
+        </table></div>
+      </div>
+      <div class="event-summary-section">
+        <h3>By Issue Type</h3>
+        <div class="table-scroll"><table>
+          <thead><tr>
+            <th class="sortable" onclick="setEventIssueSummarySort('issue')">Issue<span id="eventIssueSort-issue" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventIssueSummarySort('severity')">Severity<span id="eventIssueSort-severity" class="sort-arrow"></span></th>
+            <th class="sortable numeric-cell" onclick="setEventIssueSummarySort('findings')">Findings<span id="eventIssueSort-findings" class="sort-arrow"></span></th>
+            <th class="sortable numeric-cell" onclick="setEventIssueSummarySort('episodes')">Episodes<span id="eventIssueSort-episodes" class="sort-arrow"></span></th>
+            <th class="sortable numeric-cell" onclick="setEventIssueSummarySort('contexts')">Task/device/collector groups<span id="eventIssueSort-contexts" class="sort-arrow"></span></th>
+          </tr></thead>
           <tbody id="eventIssueSummaryBody"></tbody>
-      </table></div>
+        </table></div>
+      </div>
     </div>
   </div>
 </div>
@@ -1549,6 +1574,9 @@ let selectedRun = null;
 let selectedEventJob = null;
 let eventJobsSort = {{key: 'id', direction: 'asc'}};
 let eventJobsCache = [];
+let eventIssueSummaryCache = {{}};
+let eventContextSummarySort = {{key: null, direction: 'asc'}};
+let eventIssueSummarySort = {{key: null, direction: 'asc'}};
 
 async function getJson(url) {{
   const r = await fetch(url, {{cache: 'no-store'}});
@@ -1641,6 +1669,10 @@ function checkNameTooltipHtml(checkName) {{
   const name = String(checkName || '');
   const tooltip = CHECK_NAME_TOOLTIPS[name] || '暂无说明';
   return `<span class="issue-check-name" data-tooltip="${{esc(tooltip)}}">${{esc(name)}}</span>`;
+}}
+
+function wrapTaskTextHtml(value) {{
+  return esc(value || '').replace(/([_/-])/g, '$1<wbr>');
 }}
 
 function hideCheckNameTooltip() {{
@@ -1743,6 +1775,103 @@ function updateEventJobsSortIndicators() {{
   }});
 }}
 
+function severitySortRank(severity) {{
+  const ranks = {{
+    critical: 6,
+    fatal: 6,
+    fail: 5,
+    major: 5,
+    high: 5,
+    warning: 4,
+    minor: 4,
+    medium: 4,
+    low: 3,
+    info: 2,
+    pass: 2,
+    unknown: 1
+  }};
+  return ranks[String(severity || '').toLowerCase()] || 1;
+}}
+
+function maxSeveritySortRank(counts) {{
+  return Math.max(0, ...Object.keys(counts || {{}}).map(severitySortRank));
+}}
+
+function topIssuesSortText(issues) {{
+  return (issues || []).map(issue => `${{issue.check_name || ''}}(${{issue.count || 0}})`).join(', ').toLowerCase();
+}}
+
+function compareSummaryValues(leftValue, rightValue) {{
+  if (typeof leftValue === 'number' && typeof rightValue === 'number') {{
+    return leftValue - rightValue;
+  }}
+  return String(leftValue).localeCompare(String(rightValue), undefined, {{numeric: true, sensitivity: 'base'}});
+}}
+
+function eventContextSummarySortValue(row, key) {{
+  if (key === 'episodes') return Number(row.episode_count || 0);
+  if (key === 'findings') return Number(row.finding_count || 0);
+  if (key === 'severity') return maxSeveritySortRank(row.severity_counts);
+  if (key === 'issues') return topIssuesSortText(row.top_issues);
+  return String(row[key] || '').toLowerCase();
+}}
+
+function eventIssueSummarySortValue(row, key) {{
+  if (key === 'findings') return Number(row.finding_count || 0);
+  if (key === 'episodes') return Number(row.episode_count || 0);
+  if (key === 'contexts') return Number(row.context_count || 0);
+  if (key === 'severity') return severitySortRank(row.severity);
+  if (key === 'issue') return String(row.check_name || '').toLowerCase();
+  return String(row[key] || '').toLowerCase();
+}}
+
+function compareEventContextSummaryRows(left, right) {{
+  if (!eventContextSummarySort.key) return 0;
+  const result = compareSummaryValues(
+    eventContextSummarySortValue(left, eventContextSummarySort.key),
+    eventContextSummarySortValue(right, eventContextSummarySort.key)
+  );
+  return eventContextSummarySort.direction === 'asc' ? result : -result;
+}}
+
+function compareEventIssueSummaryRows(left, right) {{
+  if (!eventIssueSummarySort.key) return 0;
+  const result = compareSummaryValues(
+    eventIssueSummarySortValue(left, eventIssueSummarySort.key),
+    eventIssueSummarySortValue(right, eventIssueSummarySort.key)
+  );
+  return eventIssueSummarySort.direction === 'asc' ? result : -result;
+}}
+
+function setEventContextSummarySort(key) {{
+  if (eventContextSummarySort.key === key) {{
+    eventContextSummarySort.direction = eventContextSummarySort.direction === 'asc' ? 'desc' : 'asc';
+  }} else {{
+    eventContextSummarySort = {{key, direction: 'asc'}};
+  }}
+  renderEventSummaryTables(eventIssueSummaryCache);
+}}
+
+function setEventIssueSummarySort(key) {{
+  if (eventIssueSummarySort.key === key) {{
+    eventIssueSummarySort.direction = eventIssueSummarySort.direction === 'asc' ? 'desc' : 'asc';
+  }} else {{
+    eventIssueSummarySort = {{key, direction: 'asc'}};
+  }}
+  renderEventSummaryTables(eventIssueSummaryCache);
+}}
+
+function updateEventSummarySortIndicators() {{
+  ['task', 'robot', 'operator', 'episodes', 'findings', 'severity', 'issues'].forEach(key => {{
+    const marker = document.getElementById('eventContextSort-' + key);
+    if (marker) marker.textContent = eventContextSummarySort.key === key ? (eventContextSummarySort.direction === 'asc' ? '▲' : '▼') : '';
+  }});
+  ['issue', 'severity', 'findings', 'episodes', 'contexts'].forEach(key => {{
+    const marker = document.getElementById('eventIssueSort-' + key);
+    if (marker) marker.textContent = eventIssueSummarySort.key === key ? (eventIssueSummarySort.direction === 'asc' ? '▲' : '▼') : '';
+  }});
+}}
+
 function openEventSummaryModal() {{
   document.getElementById('eventSummaryModal').classList.add('open');
 }}
@@ -1753,6 +1882,7 @@ function closeEventSummaryModal(event) {{
 }}
 
 function renderEventIssueSummary(summary) {{
+  eventIssueSummaryCache = summary || {{}};
   const meta = `${{summary.issue_episode_count || 0}} issue episodes, ${{summary.finding_count || 0}} findings from ${{summary.job_count || 0}} recent jobs`;
   document.getElementById('eventSummaryCount').textContent = summary.issue_episode_count || 0;
   document.getElementById('eventIssueSummaryMeta').textContent = meta;
@@ -1766,25 +1896,30 @@ function renderEventIssueSummary(summary) {{
   document.getElementById('eventSummaryLead').textContent = lead
     ? `Top group: ${{lead.task || '-'}} / ${{lead.robot || '-'}} / ${{lead.operator || '-'}} with ${{lead.finding_count || 0}} findings`
     : 'No grouped issue context available yet.';
-  document.getElementById('eventContextSummaryBody').innerHTML = (summary.by_context || []).map(row => {{
-    const issues = (row.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ');
+  renderEventSummaryTables(summary);
+}}
+
+function renderEventSummaryTables(summary) {{
+  updateEventSummarySortIndicators();
+  document.getElementById('eventContextSummaryBody').innerHTML = [...(summary.by_context || [])].sort(compareEventContextSummaryRows).map(row => {{
+    const issues = (row.top_issues || []).map(i => `${{esc(i.check_name)}} (${{i.count}})`).join(', ');
     return `<tr>
-      <td class="task-cell">${{esc(row.task || '')}}</td>
+      <td class="task-cell">${{wrapTaskTextHtml(row.task || '')}}</td>
       <td>${{esc(row.robot || '')}}</td>
       <td>${{esc(row.operator || '')}}</td>
-      <td>${{row.episode_count || 0}}</td>
-      <td>${{row.finding_count || 0}}</td>
+      <td class="numeric-cell">${{row.episode_count || 0}}</td>
+      <td class="numeric-cell">${{row.finding_count || 0}}</td>
       <td>${{severityText(row.severity_counts)}}</td>
       <td>${{issues || '-'}}</td>
     </tr>`;
   }}).join('');
-  document.getElementById('eventIssueSummaryBody').innerHTML = (summary.by_issue || []).map(row =>
+  document.getElementById('eventIssueSummaryBody').innerHTML = [...(summary.by_issue || [])].sort(compareEventIssueSummaryRows).map(row =>
     `<tr>
       <td>${{esc(row.check_name || '')}}</td>
-      <td class="${{cls(row.severity)}}">${{esc(row.severity || '')}}</td>
-      <td>${{row.finding_count || 0}}</td>
-      <td>${{row.episode_count || 0}}</td>
-      <td>${{row.context_count || 0}}</td>
+      <td class="severity-text ${{cls(row.severity)}}">${{esc(row.severity || '')}}</td>
+      <td class="numeric-cell">${{row.finding_count || 0}}</td>
+      <td class="numeric-cell">${{row.episode_count || 0}}</td>
+      <td class="numeric-cell">${{row.context_count || 0}}</td>
     </tr>`
   ).join('');
 }}
@@ -1798,7 +1933,7 @@ function renderEventJobs(jobs) {{
       <td>${{job.id}}</td>
       <td class="${{cls(job.status)}}">${{esc(job.status)}}</td>
       <td class="${{cls(qa)}}">${{esc(qa || '-')}}</td>
-      <td class="task-cell">${{esc(job.task || '')}}</td>
+      <td class="task-cell">${{wrapTaskTextHtml(job.task || '')}}</td>
       <td>${{esc(job.robot || '')}}</td>
       <td title="${{esc(job.mounted_path || '')}}">${{esc(job.episode_name || '')}}</td>
       <td>${{eventIssueSummaryHtml(job)}}</td>
@@ -1856,7 +1991,7 @@ async function loadRun(runId, select) {{
   const live = run.live_status || run.run_status || {{}};
   const issueEpisodes = run.issue_episodes || [];
   const issueEpisodeRows = issueEpisodes.length ? issueEpisodes.map(ep =>
-    `<tr class="run-row"><td>${{esc(ep.episode_name)}}</td><td class="${{cls(ep.final_status)}}">${{esc(ep.final_status)}}</td><td class="task-cell">${{esc(ep.task)}}</td><td>${{esc(ep.robot)}}</td><td>${{ep.issue_count}}</td><td>${{esc((ep.issue_names || []).join(', '))}}</td></tr>`
+    `<tr class="run-row"><td>${{esc(ep.episode_name)}}</td><td class="${{cls(ep.final_status)}}">${{esc(ep.final_status)}}</td><td class="task-cell">${{wrapTaskTextHtml(ep.task)}}</td><td>${{esc(ep.robot)}}</td><td>${{ep.issue_count}}</td><td>${{esc((ep.issue_names || []).join(', '))}}</td></tr>`
   ).join('') : '<tr><td colspan="6" class="muted">No issue episodes in this run.</td></tr>';
   document.getElementById('runDetail').innerHTML =
     `<div class="row"><b>${{run.run_id}}</b><span class="${{cls(run.status)}}">${{run.status}}</span></div>` +
