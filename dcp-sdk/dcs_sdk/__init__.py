@@ -23,8 +23,18 @@ from dcs_sdk.control_events import (
 )
 from dcs_sdk.events import (
     BaseEvent,
+    EPISODE_FINALIZED,
+    EPISODE_VERIFIED,
+    EventListener,
+    QA_EPISODE_ABNORMAL_DETECTED,
+    QAEpisodeAbnormalEvent,
+    QAEpisodeAbnormalPayload,
+    TASK_CREATED,
+    TASK_STATUS_CHANGED,
+    build_event,
     emit_event,
     get_event_client,
+    listen_event,
     subscribe_events,
 )
 
@@ -49,7 +59,17 @@ __all__ = [
     "REPAIR_FAILED",
     "REPAIR_STARTED",
     "BaseEvent",
+    "EPISODE_FINALIZED",
+    "EPISODE_VERIFIED",
+    "EventListener",
+    "QA_EPISODE_ABNORMAL_DETECTED",
+    "QAEpisodeAbnormalEvent",
+    "QAEpisodeAbnormalPayload",
+    "TASK_CREATED",
+    "TASK_STATUS_CHANGED",
+    "build_event",
     "emit_event",
     "get_event_client",
+    "listen_event",
     "subscribe_events",
 ]

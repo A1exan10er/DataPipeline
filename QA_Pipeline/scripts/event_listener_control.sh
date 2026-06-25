@@ -10,7 +10,7 @@ SESSION="${EVENT_LISTENER_SESSION:-qa_event_listener}"
 JOB_DB="${EVENT_LISTENER_JOB_DB:-outputs/event_listener/jobs.db}"
 OUTPUT_DIR="${EVENT_LISTENER_OUTPUT_DIR:-outputs/event_listener}"
 LOG_FILE="${EVENT_LISTENER_LOG_FILE:-$OUTPUT_DIR/listener.log}"
-DCS_CONFIG_FILE="${DCS_CONFIG_FILE:-$HOME/DataPipeline/dcp-sdk/dcs_config.json.example}"
+DCS_CONFIG_FILE="${DCS_CONFIG_FILE:-$HOME/DataPipeline/dcp-sdk/dcs_config.json}"
 DC_ROOT="${DC_ROOT:-$REPO_ROOT/dcp-sdk}"
 MOUNT_PREFIX="${MOUNT_PREFIX:-/mnt/nas/database/verified}"
 QA_PYTHON="${QA_PYTHON:-datapipeline-env/bin/python}"
@@ -28,6 +28,14 @@ RETENTION_MAX_GB="${RETENTION_MAX_GB:-0}"
 QUALITY_LABEL="${QUALITY_LABEL:-完全正常}"
 DISABLE_QUALITY_LABEL_FILTER="${DISABLE_QUALITY_LABEL_FILTER:-0}"
 TASK_DB_ENV_FILE="${TASK_DB_ENV_FILE:-$HOME/.qa_task_db_env}"
+QA_DCS_NOTIFY_ENABLED="${QA_DCS_NOTIFY_ENABLED:-0}"
+QA_DCS_NOTIFY_DRY_RUN="${QA_DCS_NOTIFY_DRY_RUN:-1}"
+QA_DCS_NOTIFY_WAIT="${QA_DCS_NOTIFY_WAIT:-0}"
+QA_DCS_NOTIFY_EVENT="${QA_DCS_NOTIFY_EVENT:-qa.episode_abnormal.detected}"
+QA_DCS_NOTIFY_STATUSES="${QA_DCS_NOTIFY_STATUSES:-fail}"
+QA_DCS_NOTIFY_ACTIONABLE_STATUSES="${QA_DCS_NOTIFY_ACTIONABLE_STATUSES:-needs_review}"
+QA_DCS_NOTIFY_ACTIONABLE_CHECKS="${QA_DCS_NOTIFY_ACTIONABLE_CHECKS:-}"
+QA_DCS_NOTIFY_EXCLUDE_CHECKS="${QA_DCS_NOTIFY_EXCLUDE_CHECKS:-timestamps_raw_inconsistency}"
 DISABLE_QUALITY_LABEL_ARG=""
 if [[ "$DISABLE_QUALITY_LABEL_FILTER" == "1" ]]; then
   DISABLE_QUALITY_LABEL_ARG="--disable-quality-label-filter"
@@ -73,6 +81,14 @@ case "$ACTION" in
       "cd '$REPO_ROOT' && \
        set -a && [ -f '$TASK_DB_ENV_FILE' ] && . '$TASK_DB_ENV_FILE'; set +a; \
        export DCS_CONFIG_FILE='$DCS_CONFIG_FILE'; \
+       export QA_DCS_NOTIFY_ENABLED='$QA_DCS_NOTIFY_ENABLED'; \
+       export QA_DCS_NOTIFY_DRY_RUN='$QA_DCS_NOTIFY_DRY_RUN'; \
+       export QA_DCS_NOTIFY_WAIT='$QA_DCS_NOTIFY_WAIT'; \
+       export QA_DCS_NOTIFY_EVENT='$QA_DCS_NOTIFY_EVENT'; \
+       export QA_DCS_NOTIFY_STATUSES='$QA_DCS_NOTIFY_STATUSES'; \
+       export QA_DCS_NOTIFY_ACTIONABLE_STATUSES='$QA_DCS_NOTIFY_ACTIONABLE_STATUSES'; \
+       export QA_DCS_NOTIFY_ACTIONABLE_CHECKS='$QA_DCS_NOTIFY_ACTIONABLE_CHECKS'; \
+       export QA_DCS_NOTIFY_EXCLUDE_CHECKS='$QA_DCS_NOTIFY_EXCLUDE_CHECKS'; \
        exec '$QA_PYTHON' Werkzeuge/listen_episode_verified.py serve \
          --job-db '$JOB_DB' \
          --output-dir '$OUTPUT_DIR' \

@@ -9,6 +9,7 @@ from event_center.events.base import BaseEvent
 class EventBus:
     RELIABLE_EPISODE_QUEUE = "collector.episode_finalize.workflow"
     RELIABLE_EPISODE_ROUTING_KEY = "collector.episode_finalize"
+    PLATFORM_EPISODE_VERIFIED_ROUTING_KEY = "collector_platform.episode_verified"
 
     def __init__(self, url: str, exchange_name: str = "app.events"):
         self.url = url

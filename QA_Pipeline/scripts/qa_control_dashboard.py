@@ -38,6 +38,11 @@ EVENT_CONTROL_SCRIPT = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listene
 EVENT_JOB_DB = PROJECT_ROOT / "outputs" / "event_listener" / "jobs.db"
 
 
+class DashboardHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 class DashboardState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.host = args.host
@@ -49,13 +54,15 @@ class DashboardState:
         self.refresh_seconds = max(1.0, float(args.refresh_seconds))
         self.max_discovered_runs = max(0, int(args.max_discovered_runs))
         self.lock = threading.Lock()
+        self.cache_lock = threading.RLock()
+        self.cache: dict[str, tuple[float, Any]] = {}
         init_registry(self.registry_db)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     state = DashboardState(args)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
+    server = DashboardHTTPServer((args.host, args.port), make_handler(state))
     print(f"QA control dashboard: http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
@@ -83,7 +90,7 @@ def make_handler(state: DashboardState):
     class Handler(BaseHTTPRequestHandler):
         server_version = "QAControlDashboard/1.0"
 
-        def log_message(self, format: str, *args: object) -> None:
+        def log_message(self, message_format: str, *args: object) -> None:
             return
 
         def do_GET(self) -> None:
@@ -95,21 +102,37 @@ def make_handler(state: DashboardState):
                 elif path == "/api/status":
                     self._send_json(api_status(state))
                 elif path == "/api/runs":
-                    self._send_json({"runs": list_runs(state)})
+                    self._send_json({"runs": cached_value(state, "runs:all", 30.0, lambda: list_runs(state))})
                 elif path.startswith("/api/runs/"):
                     run_id = path.rsplit("/", 1)[-1]
                     self._send_json(api_run_detail(state, run_id))
                 elif path == "/api/event-listener/status":
-                    self._send_json(api_event_listener_status())
+                    self._send_json(
+                        cached_value(state, "event_listener_status_api", 10.0, api_event_listener_status)
+                    )
                 elif path == "/api/event-listener/issue-summary":
                     query = parse_qs(parsed.query)
                     limit = int(query.get("limit", ["500"])[0] or "500")
-                    self._send_json({"summary": event_issue_summary(limit=limit)})
+                    self._send_json(
+                        cached_value(
+                            state,
+                            f"event_issue_summary:{limit}",
+                            45.0,
+                            lambda: {"summary": event_issue_summary(limit=limit)},
+                        )
+                    )
                 elif path == "/api/event-listener/jobs":
                     query = parse_qs(parsed.query)
                     limit = int(query.get("limit", ["100"])[0] or "100")
                     issues_only = query.get("issues_only", ["0"])[0] in {"1", "true", "yes"}
-                    self._send_json({"jobs": event_listener_jobs(limit=limit, issues_only=issues_only)})
+                    self._send_json(
+                        cached_value(
+                            state,
+                            f"event_listener_jobs:{limit}:{int(issues_only)}",
+                            15.0,
+                            lambda: {"jobs": event_listener_jobs(limit=limit, issues_only=issues_only)},
+                        )
+                    )
                 elif path.startswith("/api/event-listener/jobs/"):
                     job_id = int(path.rsplit("/", 1)[-1])
                     self._send_json({"job": event_listener_job_detail(job_id)})
@@ -121,8 +144,13 @@ def make_handler(state: DashboardState):
                     self._send_json({"lines": log_tail(state, target)})
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
+            except (BrokenPipeError, ConnectionResetError):
+                return
             except Exception as exc:
-                self._send_json({"error": str(exc)}, status=500)
+                try:
+                    self._send_json({"error": str(exc)}, status=500)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
@@ -130,20 +158,30 @@ def make_handler(state: DashboardState):
             try:
                 payload = self._read_json()
                 if path == "/api/start":
+                    clear_cache(state)
                     self._send_json(api_start_run(state, payload))
                 elif path.startswith("/api/stop/"):
                     run_id = path.rsplit("/", 1)[-1]
+                    clear_cache(state)
                     self._send_json(api_stop_run(state, run_id))
                 elif path == "/api/event-listener/start":
+                    clear_cache(state)
                     self._send_json(api_event_listener_action("start", payload))
                 elif path == "/api/event-listener/stop":
+                    clear_cache(state)
                     self._send_json(api_event_listener_action("stop", payload))
                 elif path == "/api/event-listener/restart":
+                    clear_cache(state)
                     self._send_json(api_event_listener_action("restart", payload))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
+            except (BrokenPipeError, ConnectionResetError):
+                return
             except Exception as exc:
-                self._send_json({"error": str(exc)}, status=500)
+                try:
+                    self._send_json({"error": str(exc)}, status=500)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
         def _read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0") or "0")
@@ -216,14 +254,33 @@ def init_registry(db_path: Path) -> None:
         )
 
 
+def cached_value(state: DashboardState, key: str, ttl_seconds: float, producer) -> Any:
+    now = time.monotonic()
+    with state.cache_lock:
+        cached = state.cache.get(key)
+        if cached and now - cached[0] < ttl_seconds:
+            return cached[1]
+        value = producer()
+        state.cache[key] = (now, value)
+        return value
+
+
+def clear_cache(state: DashboardState) -> None:
+    with state.cache_lock:
+        state.cache.clear()
+
+
 def api_status(state: DashboardState) -> dict[str, Any]:
-    sync_registered_run_statuses(state)
-    return {
-        "generated_at": now_iso(),
-        "server": server_load(),
-        "event_listener": event_listener_status(),
-        "runs": list_runs(state, limit=30),
-    }
+    def produce() -> dict[str, Any]:
+        sync_registered_run_statuses(state)
+        return {
+            "generated_at": now_iso(),
+            "server": server_load(),
+            "event_listener": event_listener_status(),
+            "runs": list_runs(state, limit=30),
+        }
+
+    return cached_value(state, "api_status", max(3.0, state.refresh_seconds), produce)
 
 
 def list_runs(state: DashboardState, limit: int | None = None) -> list[dict[str, Any]]:
@@ -433,9 +490,23 @@ def api_event_listener_action(action: str, payload: dict[str, Any]) -> dict[str,
         "STABILITY_INTERVAL",
         "STABILITY_TIMEOUT",
         "MIN_FREE_MEM_GB",
+        "MAX_LOAD_RATIO",
+        "RESOURCE_MAX_WAIT_SECONDS",
+        "RETENTION_DAYS",
+        "RETENTION_MAX_RUNS",
+        "RETENTION_MAX_GB",
         "PHASES",
         "QUALITY_LABEL",
         "DISABLE_QUALITY_LABEL_FILTER",
+        "DCS_CONFIG_FILE",
+        "QA_DCS_NOTIFY_ENABLED",
+        "QA_DCS_NOTIFY_DRY_RUN",
+        "QA_DCS_NOTIFY_WAIT",
+        "QA_DCS_NOTIFY_EVENT",
+        "QA_DCS_NOTIFY_STATUSES",
+        "QA_DCS_NOTIFY_ACTIONABLE_STATUSES",
+        "QA_DCS_NOTIFY_ACTIONABLE_CHECKS",
+        "QA_DCS_NOTIFY_EXCLUDE_CHECKS",
     ):
         if key.lower() in payload:
             env[key] = str(payload[key.lower()])
@@ -469,6 +540,7 @@ def event_listener_status() -> dict[str, Any]:
         "counts": {},
         "recent": [],
         "output_size": directory_size(PROJECT_ROOT / "outputs" / "event_listener"),
+        "settings": event_listener_settings(),
     }
     if not EVENT_JOB_DB.exists():
         return status
@@ -491,6 +563,51 @@ def event_listener_status() -> dict[str, Any]:
     except sqlite3.Error as exc:
         status["error"] = str(exc)
     return status
+
+
+def event_listener_settings() -> dict[str, Any]:
+    args = current_process_args("Werkzeuge/listen_episode_verified.py")
+    if not args:
+        return {}
+    return {
+        "phases": option_value(args, "--phases", ""),
+        "workers": option_value(args, "--workers", ""),
+        "batch_size": option_value(args, "--batch-size", ""),
+        "max_load_ratio": option_value(args, "--max-load-ratio", ""),
+        "min_free_mem_gb": option_value(args, "--min-free-mem-gb", ""),
+        "stability_interval": option_value(args, "--stability-interval", ""),
+        "stability_timeout": option_value(args, "--stability-timeout", ""),
+        "resource_max_wait_seconds": option_value(args, "--resource-max-wait-seconds", ""),
+    }
+
+
+def current_process_args(marker: str) -> list[str]:
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return []
+    for path in proc_root.iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            raw = (path / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        args = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+        if any(marker in arg for arg in args) and "serve" in args:
+            return args
+    return []
+
+
+def option_value(args: list[str], flag: str, default: str = "") -> str:
+    try:
+        index = args.index(flag)
+    except ValueError:
+        return default
+    if index + 1 >= len(args):
+        return default
+    return args[index + 1]
 
 
 def event_listener_jobs(limit: int = 100, issues_only: bool = False) -> list[dict[str, Any]]:
@@ -1206,7 +1323,7 @@ def directory_size(path: Path) -> str:
     return human_bytes(total)
 
 
-def disk_payload(usage: shutil._ntuple_diskusage | None) -> dict[str, Any]:
+def disk_payload(usage: Any | None) -> dict[str, Any]:
     if usage is None:
         return {}
     return {
@@ -1373,6 +1490,22 @@ def render_index_html(state: DashboardState) -> str:
     </div>
     <div class="panel">
       <h2>Event Listener</h2>
+      <div class="two">
+        <div><label>Phases</label><input id="eventPhases" value="1,2,3,7"></div>
+        <div><label>Workers</label><input id="eventWorkers" type="number" value="1" min="1" max="8"></div>
+      </div>
+      <div class="two">
+        <div><label>Event batch size</label><input id="eventBatchSize" type="number" value="16" min="1" max="256"></div>
+        <div><label>Max load ratio</label><input id="eventMaxLoadRatio" type="number" value="0.75" min="0.1" max="1.5" step="0.05"></div>
+      </div>
+      <div class="two">
+        <div><label>Min free mem GB</label><input id="eventMinMem" type="number" value="6" min="1" max="64" step="0.1"></div>
+        <div><label>Resource wait sec</label><input id="eventResourceWait" type="number" value="300" min="0" max="3600"></div>
+      </div>
+      <div class="two">
+        <div><label>Stability interval sec</label><input id="eventStabilityInterval" type="number" value="3" min="1" max="120"></div>
+        <div><label>Stability timeout sec</label><input id="eventStabilityTimeout" type="number" value="90" min="10" max="3600"></div>
+      </div>
       <label>Quality label filter</label>
       <input id="eventQualityLabel" value="完全正常">
       <label class="row" style="margin-top:8px">
@@ -1475,6 +1608,9 @@ def render_index_html(state: DashboardState) -> str:
 const refreshMs = {refresh};
 let selectedRun = null;
 let selectedEventJob = null;
+let refreshInFlight = false;
+let lastHeavyRefresh = 0;
+let eventSettingsInitialized = false;
 
 async function getJson(url) {{
   const r = await fetch(url, {{cache: 'no-store'}});
@@ -1495,6 +1631,9 @@ function esc(s) {{
 }}
 
 async function refresh() {{
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  try {{
   const data = await getJson('/api/status');
   document.getElementById('clock').textContent = data.generated_at || '';
   document.getElementById('load1').textContent = Number(val(data,'server.load.1m',0)).toFixed(2);
@@ -1504,17 +1643,49 @@ async function refresh() {{
     'remaining ' + val(data,'server.memory.available_gb','-') + ' GB, swap used ' + val(data,'server.memory.swap_used_gb','-') + ' GB';
   document.getElementById('eventPending').textContent = val(data,'event_listener.counts.pending',0);
   document.getElementById('eventDone').textContent = val(data,'event_listener.counts.done',0);
+  const settings = val(data, 'event_listener.settings', {{}});
+  applyEventSettings(settings);
   document.getElementById('eventBox').innerHTML =
     '<div>tmux: <b>' + (val(data,'event_listener.tmux_running',false) ? 'running' : 'stopped') + '</b></div>' +
     '<div>running: ' + val(data,'event_listener.counts.running',0) + '</div>' +
     '<div>pending: ' + val(data,'event_listener.counts.pending',0) + '</div>' +
-    '<div>output: ' + val(data,'event_listener.output_size','-') + '</div>';
+    '<div>workers: ' + esc(settings.workers || '-') + ', batch: ' + esc(settings.batch_size || '-') + ', phases: ' + esc(settings.phases || '-') + '</div>' +
+    '<div>guard: max load ratio ' + esc(settings.max_load_ratio || '-') + ', min free mem ' + esc(settings.min_free_mem_gb || '-') + ' GB</div>' +
+    '<div>output: ' + val(data,'event_listener.output_size','-') + '</div>' +
+    '<div class="muted">Changing these values requires Restart if the listener is already running.</div>';
   renderRuns(data.runs || []);
-  await refreshEventIssueSummary();
+  const now = Date.now();
+  if (now - lastHeavyRefresh > Math.max(30000, refreshMs * 4)) {{
+    lastHeavyRefresh = now;
+    await refreshEventIssueSummary();
+  }}
   await refreshEventJobs();
   renderProcesses(val(data,'server.top_processes',[]));
   if (selectedRun) await loadRun(selectedRun, false);
   else await loadLog('event_listener');
+  }} catch (err) {{
+    document.getElementById('clock').textContent = 'dashboard refresh failed: ' + err;
+  }} finally {{
+    refreshInFlight = false;
+  }}
+}}
+
+function applyEventSettings(settings) {{
+  if (eventSettingsInitialized || !settings || !settings.workers) return;
+  const mapping = {{
+    eventPhases: settings.phases,
+    eventWorkers: settings.workers,
+    eventBatchSize: settings.batch_size,
+    eventMaxLoadRatio: settings.max_load_ratio,
+    eventMinMem: settings.min_free_mem_gb,
+    eventResourceWait: settings.resource_max_wait_seconds,
+    eventStabilityInterval: settings.stability_interval,
+    eventStabilityTimeout: settings.stability_timeout
+  }};
+  for (const [id, value] of Object.entries(mapping)) {{
+    if (value !== undefined && value !== null && value !== '') document.getElementById(id).value = value;
+  }}
+  eventSettingsInitialized = true;
 }}
 
 function renderRuns(runs) {{
@@ -1711,6 +1882,14 @@ async function stopRun(runId) {{
 
 async function eventAction(action) {{
   await postJson('/api/event-listener/' + action, {{
+    phases: document.getElementById('eventPhases').value,
+    workers: Number(document.getElementById('eventWorkers').value),
+    event_batch_size: Number(document.getElementById('eventBatchSize').value),
+    max_load_ratio: Number(document.getElementById('eventMaxLoadRatio').value),
+    min_free_mem_gb: Number(document.getElementById('eventMinMem').value),
+    resource_max_wait_seconds: Number(document.getElementById('eventResourceWait').value),
+    stability_interval: Number(document.getElementById('eventStabilityInterval').value),
+    stability_timeout: Number(document.getElementById('eventStabilityTimeout').value),
     quality_label: document.getElementById('eventQualityLabel').value,
     disable_quality_label_filter: document.getElementById('eventDisableQualityLabelFilter').checked ? '1' : '0'
   }});
