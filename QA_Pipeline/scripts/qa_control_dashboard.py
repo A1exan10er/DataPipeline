@@ -20,12 +20,28 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+from generate_work_session_report import (
+    DEFAULT_CONFIG as WORK_SESSION_REPORT_CONFIG,
+    SEVERITY_ORDER,
+    STATUS_ORDER,
+    build_report as build_work_session_report,
+    core_issue_rows,
+    action_rows,
+    affected_episode_rows,
+    load_config as load_work_session_report_config,
+    ordered_counter,
+    query_all_rows,
+    resolve_window as resolve_work_session_window,
+    write_report as write_work_session_report,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +52,7 @@ DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "dashboard_runs"
 DEFAULT_VERIFIED_ROOT = Path("/mnt/nas/database/verified")
 EVENT_CONTROL_SCRIPT = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listener_control.sh"
 EVENT_JOB_DB = PROJECT_ROOT / "outputs" / "event_listener" / "jobs.db"
+RETENTION_MANIFEST = "retention_cleanup.jsonl"
 
 
 class DashboardHTTPServer(ThreadingHTTPServer):
@@ -53,6 +70,9 @@ class DashboardState:
         self.qa_python = Path(args.qa_python)
         self.refresh_seconds = max(1.0, float(args.refresh_seconds))
         self.max_discovered_runs = max(0, int(args.max_discovered_runs))
+        self.auto_work_session_reports = not args.disable_auto_work_session_reports
+        self.work_session_report_interval_seconds = max(60, int(args.work_session_report_interval_seconds))
+        self.work_session_report_last_run = 0.0
         self.lock = threading.Lock()
         self.cache_lock = threading.RLock()
         self.cache: dict[str, tuple[float, Any]] = {}
@@ -62,6 +82,7 @@ class DashboardState:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     state = DashboardState(args)
+    start_work_session_report_scheduler(state)
     server = DashboardHTTPServer((args.host, args.port), make_handler(state))
     print(f"QA control dashboard: http://{args.host}:{args.port}", flush=True)
     try:
@@ -83,6 +104,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--qa-python", default="datapipeline-env/bin/python")
     parser.add_argument("--refresh-seconds", type=float, default=5.0)
     parser.add_argument("--max-discovered-runs", type=int, default=200)
+    parser.add_argument(
+        "--disable-auto-work-session-reports",
+        action="store_true",
+        help="Disable automatic event-listener Chinese work-session report generation.",
+    )
+    parser.add_argument(
+        "--work-session-report-interval-seconds",
+        type=int,
+        default=600,
+        help="Automatic event-listener work-session report refresh interval. Default: 600.",
+    )
     return parser.parse_args(argv)
 
 
@@ -99,6 +131,8 @@ def make_handler(state: DashboardState):
             try:
                 if path in ("/", "/index.html"):
                     self._send_html(render_index_html(state))
+                elif path == "/event-listener/work-session-report.html":
+                    self._send_html(render_event_work_session_report_html())
                 elif path == "/api/status":
                     self._send_json(api_status(state))
                 elif path == "/api/runs":
@@ -121,6 +155,8 @@ def make_handler(state: DashboardState):
                             lambda: {"summary": event_issue_summary(limit=limit)},
                         )
                     )
+                elif path == "/api/event-listener/work-session-report":
+                    self._send_json({"report": latest_event_work_session_report()})
                 elif path == "/api/event-listener/jobs":
                     query = parse_qs(parsed.query)
                     limit = int(query.get("limit", ["100"])[0] or "100")
@@ -160,6 +196,10 @@ def make_handler(state: DashboardState):
                 if path == "/api/start":
                     clear_cache(state)
                     self._send_json(api_start_run(state, payload))
+                elif path.startswith("/api/runs/") and path.endswith("/work-session-report"):
+                    run_id = path.split("/")[-2]
+                    clear_cache(state)
+                    self._send_json(api_generate_work_session_report(state, run_id, payload))
                 elif path.startswith("/api/stop/"):
                     run_id = path.rsplit("/", 1)[-1]
                     clear_cache(state)
@@ -173,6 +213,9 @@ def make_handler(state: DashboardState):
                 elif path == "/api/event-listener/restart":
                     clear_cache(state)
                     self._send_json(api_event_listener_action("restart", payload))
+                elif path == "/api/event-listener/work-session-report":
+                    clear_cache(state)
+                    self._send_json(api_generate_event_work_session_report(payload))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
             except (BrokenPipeError, ConnectionResetError):
@@ -315,21 +358,29 @@ def registered_runs(registry_db: Path) -> list[dict[str, Any]]:
 
 
 def discover_output_runs(state: DashboardState) -> list[dict[str, Any]]:
-    outputs = PROJECT_ROOT / "outputs"
-    if not outputs.is_dir() or state.max_discovered_runs <= 0:
+    if state.max_discovered_runs <= 0:
         return []
     candidates = []
-    for db_path in outputs.rglob("qa.db"):
-        rel = db_path.relative_to(outputs)
-        if len(rel.parts) > 5:
+    for outputs in (PROJECT_ROOT / "outputs", REPO_ROOT / "outputs"):
+        if not outputs.is_dir():
             continue
-        output_dir = db_path.parent
-        stat = safe_stat(db_path)
-        candidates.append((stat[0], db_path, output_dir))
+        for db_path in likely_dashboard_databases(outputs):
+            output_dir = db_path.parent
+            stat = safe_stat(db_path)
+            candidates.append((stat[0], db_path, output_dir))
     candidates.sort(reverse=True)
     runs = []
-    for _mtime, db_path, output_dir in candidates[: state.max_discovered_runs]:
+    seen_db_paths: set[str] = set()
+    for _mtime, db_path, output_dir in candidates:
+        db_key = str(db_path.resolve(strict=False))
+        if db_key in seen_db_paths:
+            continue
+        seen_db_paths.add(db_key)
+        if len(runs) >= state.max_discovered_runs:
+            break
         run_id = discovered_run_id(output_dir)
+        if db_path.name != "qa.db":
+            run_id = sanitize_id(f"{run_id}-{db_path.stem}")
         item = {
             "run_id": run_id,
             "mode": "discovered",
@@ -346,6 +397,23 @@ def discover_output_runs(state: DashboardState) -> list[dict[str, Any]]:
     return runs
 
 
+def likely_dashboard_databases(outputs: Path) -> list[Path]:
+    """Find common QA DB locations without recursively scanning huge output trees."""
+    candidates: list[Path] = []
+    patterns = (
+        "qa.db",
+        "qa_pipeline.db",
+        "qa_pipeline *.db",
+        "*/qa.db",
+        "*/*/qa.db",
+        "*/qa_pipeline.db",
+        "*/qa_pipeline *.db",
+    )
+    for pattern in patterns:
+        candidates.extend(path for path in outputs.glob(pattern) if path.is_file())
+    return candidates
+
+
 def api_run_detail(state: DashboardState, run_id: str) -> dict[str, Any]:
     sync_registered_run_statuses(state)
     run = find_run(state, run_id)
@@ -358,6 +426,7 @@ def api_run_detail(state: DashboardState, run_id: str) -> dict[str, Any]:
     detail["run_status"] = latest_run_status(output_dir)
     detail["recent_findings"] = recent_findings(db_path)
     detail["issue_episodes"] = issue_episodes(db_path)
+    detail["latest_work_session_report"] = latest_work_session_report(output_dir)
     detail["logs"] = tail_file(output_dir / f"{run_id}_pipeline.log", 80)
     if not detail["logs"]:
         detail["logs"] = tail_file(output_dir / "pipeline.log", 80)
@@ -482,11 +551,418 @@ def api_stop_run(state: DashboardState, run_id: str) -> dict[str, Any]:
     return {"ok": True, "run_id": run_id, "status": "stopped"}
 
 
+def api_generate_work_session_report(
+    state: DashboardState,
+    run_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    run = find_run(state, run_id)
+    if not run:
+        raise ValueError(f"unknown run_id: {run_id}")
+    db_path = Path(str(run.get("db_path") or ""))
+    output_dir = Path(str(run.get("output_dir") or ""))
+    if not db_path.is_file():
+        raise ValueError(f"QA database does not exist for run {run_id}: {db_path}")
+
+    config = load_work_session_report_config(WORK_SESSION_REPORT_CONFIG)
+    session = str(payload.get("session") or "previous")
+    args = argparse.Namespace(
+        session=session,
+        start=str(payload.get("start") or "") or None,
+        end=str(payload.get("end") or "") or None,
+    )
+    window = resolve_work_session_window(args, config)
+    report = build_work_session_report(
+        db_path,
+        window,
+        config,
+        include_all_when_empty=bool(payload.get("include_all_when_empty", True)),
+    )
+    report_dir = write_work_session_report(output_dir / "reports" / "work_sessions", report, config)
+    append_run_event(
+        state.registry_db,
+        run_id,
+        "work_session_report",
+        f"Generated Chinese work-session report: {report_dir}",
+    )
+    latest = work_session_report_payload(report_dir)
+    return {"ok": True, "run_id": run_id, "report": latest}
+
+
+def api_generate_event_work_session_report(payload: dict[str, Any]) -> dict[str, Any]:
+    session = str(payload.get("session") or "current")
+    config = load_work_session_report_config(WORK_SESSION_REPORT_CONFIG)
+    args = argparse.Namespace(
+        session=session,
+        start=str(payload.get("start") or "") or None,
+        end=str(payload.get("end") or "") or None,
+    )
+    window = resolve_work_session_window(args, config)
+    report = build_event_work_session_report(window, config)
+    report_dir = write_work_session_report(event_work_session_report_root(), report, config)
+    cleanup_event_work_session_reports()
+    return {"ok": True, "report": work_session_report_payload(report_dir)}
+
+
+def build_event_work_session_report(window: Any, config: dict[str, Any]) -> dict[str, Any]:
+    jobs = event_listener_report_jobs(window)
+    episode_rows: list[dict[str, Any]] = []
+    finding_rows: list[dict[str, Any]] = []
+    seen_db_paths: set[str] = set()
+    source_dbs: list[str] = []
+    for job in jobs:
+        db_path = resolve_project_path(str(job.get("db_path") or ""))
+        if not db_path.is_file():
+            continue
+        db_key = str(db_path.resolve(strict=False))
+        if db_key in seen_db_paths:
+            continue
+        seen_db_paths.add(db_key)
+        source_dbs.append(str(db_path))
+        try:
+            db_episodes, db_findings = query_all_rows(db_path)
+        except sqlite3.Error:
+            continue
+        for episode in db_episodes:
+            episode["source_db"] = str(db_path)
+        for finding in db_findings:
+            finding["source_db"] = str(db_path)
+        episode_rows.extend(db_episodes)
+        finding_rows.extend(db_findings)
+
+    findings_by_episode: dict[str, list[dict[str, Any]]] = {}
+    for finding in finding_rows:
+        findings_by_episode.setdefault(finding["episode_path"], []).append(finding)
+    core_issues = core_issue_rows(
+        finding_rows,
+        config,
+        total_episodes=len(episode_rows),
+        total_issue_episodes=len(findings_by_episode),
+        total_findings=len(finding_rows),
+    )
+    affected_episodes = affected_episode_rows(episode_rows, findings_by_episode, config)
+    actions = action_rows(core_issues, config)
+    status_counts = ordered_counter(Counter(row.get("final_status") or "pending" for row in episode_rows), STATUS_ORDER)
+    severity_counts = ordered_counter(Counter(row.get("severity") or "unknown" for row in finding_rows), SEVERITY_ORDER)
+    blocking_episodes = {row["episode_path"] for row in affected_episodes if row.get("blocks_training")}
+    return {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "source_db": str(EVENT_JOB_DB),
+        "window": {
+            "key": window.key,
+            "label": f"事件监听{window.label}",
+            "start": window.start.isoformat(timespec="seconds"),
+            "end": window.end.isoformat(timespec="seconds"),
+            "used_all_episode_fallback": False,
+        },
+        "summary": {
+            "episode_count": len(episode_rows),
+            "finding_count": len(finding_rows),
+            "issue_episode_count": len(findings_by_episode),
+            "training_blocking_episode_count": len(blocking_episodes),
+            "event_job_count": len(jobs),
+            "source_db_count": len(source_dbs),
+            "status_counts": status_counts,
+            "severity_counts": severity_counts,
+        },
+        "core_issues": core_issues,
+        "affected_episodes": affected_episodes,
+        "suggested_actions": actions,
+        "metadata": {
+            "source_dbs": source_dbs,
+            "event_jobs": jobs,
+        },
+    }
+
+
+def event_listener_report_jobs(window: Any, limit: int = 20000) -> list[dict[str, Any]]:
+    if not EVENT_JOB_DB.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with sqlite3.connect(EVENT_JOB_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        candidates = conn.execute(
+            """
+            SELECT id, status, run_id, output_dir, db_path, updated_at, finished_at
+            FROM jobs
+            WHERE status = ?
+              AND db_path IS NOT NULL
+              AND db_path != ''
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            ("done", limit),
+        ).fetchall()
+    for row in candidates:
+        item = dict(row)
+        timestamp = parse_event_listener_timestamp(str(item.get("finished_at") or item.get("updated_at") or ""))
+        if timestamp is None:
+            continue
+        if window.start <= timestamp < window.end:
+            item["report_timestamp"] = timestamp.isoformat(timespec="seconds")
+            rows.append(item)
+    rows.sort(key=lambda item: item.get("report_timestamp") or "")
+    return rows
+
+
+def parse_event_listener_timestamp(value: str) -> datetime | None:
+    if not value:
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed.astimezone()
+
+
+def resolve_project_path(value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def event_work_session_report_root() -> Path:
+    return PROJECT_ROOT / "outputs" / "event_listener" / "reports" / "work_sessions"
+
+
+def latest_event_work_session_report() -> dict[str, Any]:
+    reports_root = event_work_session_report_root()
+    if not reports_root.is_dir():
+        return {}
+    report_dirs = [path for path in reports_root.iterdir() if path.is_dir()]
+    report_dirs.sort(key=lambda path: safe_stat(path / "半日质检报告.md")[0], reverse=True)
+    for report_dir in report_dirs:
+        payload = work_session_report_payload(report_dir)
+        if payload:
+            return payload
+    return {}
+
+
+def cleanup_event_work_session_reports() -> None:
+    """Apply event-listener retention policy to generated report folders."""
+    settings = event_listener_settings()
+    max_days = parse_float_setting(settings.get("retention_days"), 14.0)
+    max_runs = parse_int_setting(settings.get("retention_max_runs"), 0)
+    max_gb = parse_float_setting(settings.get("retention_max_gb"), 0.0)
+    cleanup_report_outputs(
+        event_work_session_report_root(),
+        max_days=max_days,
+        max_runs=max_runs,
+        max_gb=max_gb,
+    )
+
+
+def cleanup_report_outputs(output_dir: Path, max_days: float, max_runs: int, max_gb: float) -> None:
+    if max_runs <= 0 and max_days <= 0 and max_gb <= 0:
+        return
+    candidates = report_retention_candidates(output_dir, include_size=max_gb > 0)
+    if not candidates:
+        return
+    now = time.time()
+    keep: set[Path] = set()
+    remove: dict[Path, str] = {}
+
+    if max_days > 0:
+        cutoff = now - (max_days * 86400)
+        for item in candidates:
+            if item["mtime"] < cutoff:
+                remove[item["path"]] = f"older_than_{max_days:g}_days"
+
+    remaining = [item for item in candidates if item["path"] not in remove]
+    remaining.sort(key=lambda item: item["mtime"], reverse=True)
+    if max_runs > 0:
+        for item in remaining[:max_runs]:
+            keep.add(item["path"])
+        for item in remaining[max_runs:]:
+            remove.setdefault(item["path"], f"over_{max_runs}_runs")
+
+    if max_gb > 0:
+        max_bytes = int(max_gb * 1024**3)
+        size_items = [item for item in remaining if item["path"] not in remove]
+        size_items.sort(key=lambda item: item["mtime"], reverse=True)
+        total = 0
+        for item in size_items:
+            total += int(item["size"])
+            if total > max_bytes and item["path"] not in keep:
+                remove.setdefault(item["path"], f"over_{max_gb:g}_gb")
+
+    if not remove:
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / RETENTION_MANIFEST
+    removed = 0
+    with manifest_path.open("a", encoding="utf-8") as manifest:
+        for path, reason in sorted(remove.items(), key=lambda item: str(item[0])):
+            try:
+                size = directory_size_bytes(path)
+                shutil.rmtree(path)
+                removed += 1
+                manifest.write(
+                    json.dumps(
+                        {
+                            "removed_at": now_iso(),
+                            "path": str(path),
+                            "reason": reason,
+                            "size_bytes": size,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            except OSError as exc:
+                print(f"report retention cleanup warning: could not remove {path}: {exc}", flush=True)
+    if removed:
+        print(f"report retention cleanup: removed {removed} old work-session report folder(s)", flush=True)
+
+
+def report_retention_candidates(output_dir: Path, include_size: bool = False) -> list[dict[str, Any]]:
+    if not output_dir.is_dir():
+        return []
+    candidates = []
+    for child in output_dir.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            stat = child.stat()
+        except OSError:
+            continue
+        candidates.append(
+            {
+                "path": child,
+                "mtime": stat.st_mtime,
+                "size": directory_size_bytes(child) if include_size else 0,
+            }
+        )
+    return candidates
+
+
+def directory_size_bytes(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def parse_float_setting(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_int_setting(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def render_event_work_session_report_html() -> str:
+    report = latest_event_work_session_report()
+    if not report:
+        body = """
+        <main>
+          <h1>事件监听半日报告</h1>
+          <p class="muted">尚未生成报告。请回到控制台点击“生成半日报告”。</p>
+          <p><a href="/">返回控制台</a></p>
+        </main>
+        """
+    else:
+        summary = report.get("summary") or {}
+        window = report.get("window") or {}
+        body = f"""
+        <main>
+          <div class="topbar">
+            <div>
+              <h1>事件监听半日报告</h1>
+              <p class="muted">{esc_html(window.get("start", ""))} 至 {esc_html(window.get("end", ""))}</p>
+            </div>
+            <p><a href="/">返回控制台</a></p>
+          </div>
+          <div class="metrics">
+            <div><b>{int(summary.get("episode_count") or 0)}</b><span>episode</span></div>
+            <div><b>{int(summary.get("issue_episode_count") or 0)}</b><span>问题 episode</span></div>
+            <div><b>{int(summary.get("finding_count") or 0)}</b><span>finding</span></div>
+            <div><b>{int(summary.get("training_blocking_episode_count") or 0)}</b><span>影响训练</span></div>
+          </div>
+          <p class="muted">报告文件：{esc_html(report.get("markdown_path", ""))}</p>
+          <p class="muted">附件：{esc_html(report.get("core_issues_csv", ""))} | {esc_html(report.get("affected_episodes_csv", ""))} | {esc_html(report.get("actions_csv", ""))}</p>
+          <pre>{esc_html(report.get("markdown", ""))}</pre>
+        </main>
+        """
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>事件监听半日报告</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1b1f24; }}
+    main {{ max-width: 1120px; margin: 0 auto; padding: 24px; }}
+    h1 {{ margin: 0 0 6px; font-size: 22px; }}
+    a {{ color: #1769aa; text-decoration: none; }}
+    .muted {{ color: #667085; font-size: 13px; }}
+    .topbar {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 16px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 12px; margin: 16px 0; }}
+    .metrics div {{ background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 12px; }}
+    .metrics b {{ display: block; font-size: 28px; }}
+    .metrics span {{ color: #667085; font-size: 12px; }}
+    pre {{ white-space: pre-wrap; background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 18px; line-height: 1.55; overflow: auto; }}
+    @media (max-width: 760px) {{ .topbar, .metrics {{ display: block; }} .metrics div {{ margin-bottom: 10px; }} }}
+  </style>
+</head>
+<body>{body}</body>
+</html>"""
+
+
+def esc_html(value: Any) -> str:
+    return (
+        str(value or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+def start_work_session_report_scheduler(state: DashboardState) -> None:
+    if not state.auto_work_session_reports:
+        return
+
+    def worker() -> None:
+        time.sleep(5)
+        while True:
+            try:
+                now = time.monotonic()
+                if now - state.work_session_report_last_run >= state.work_session_report_interval_seconds:
+                    api_generate_event_work_session_report({"session": "current"})
+                    state.work_session_report_last_run = now
+            except Exception as exc:
+                print(f"Auto work-session report failed: {exc}", flush=True)
+            time.sleep(60)
+
+    threading.Thread(target=worker, name="work-session-report-scheduler", daemon=True).start()
+
+
 def api_event_listener_action(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     env = os.environ.copy()
     for key in (
         "WORKERS",
         "EVENT_BATCH_SIZE",
+        "EVENT_DATE",
+        "EVENT_DATE_FROM",
+        "EVENT_DATE_TO",
         "STABILITY_INTERVAL",
         "STABILITY_TIMEOUT",
         "MIN_FREE_MEM_GB",
@@ -539,7 +1015,7 @@ def event_listener_status() -> dict[str, Any]:
         "job_db": str(EVENT_JOB_DB),
         "counts": {},
         "recent": [],
-        "output_size": directory_size(PROJECT_ROOT / "outputs" / "event_listener"),
+        "output_size": directory_size(PROJECT_ROOT / "outputs" / "event_listener", max_files=2000),
         "settings": event_listener_settings(),
     }
     if not EVENT_JOB_DB.exists():
@@ -573,11 +1049,17 @@ def event_listener_settings() -> dict[str, Any]:
         "phases": option_value(args, "--phases", ""),
         "workers": option_value(args, "--workers", ""),
         "batch_size": option_value(args, "--batch-size", ""),
+        "event_date": option_value(args, "--event-date", ""),
+        "event_date_from": option_value(args, "--event-date-from", ""),
+        "event_date_to": option_value(args, "--event-date-to", ""),
         "max_load_ratio": option_value(args, "--max-load-ratio", ""),
         "min_free_mem_gb": option_value(args, "--min-free-mem-gb", ""),
         "stability_interval": option_value(args, "--stability-interval", ""),
         "stability_timeout": option_value(args, "--stability-timeout", ""),
         "resource_max_wait_seconds": option_value(args, "--resource-max-wait-seconds", ""),
+        "retention_days": option_value(args, "--retention-days", ""),
+        "retention_max_runs": option_value(args, "--retention-max-runs", ""),
+        "retention_max_gb": option_value(args, "--retention-max-gb", ""),
     }
 
 
@@ -1127,6 +1609,50 @@ def latest_run_status(output_dir: Path) -> dict[str, Any]:
     return {}
 
 
+def latest_work_session_report(output_dir: Path) -> dict[str, Any]:
+    reports_root = output_dir / "reports" / "work_sessions"
+    if not reports_root.is_dir():
+        return {}
+    report_dirs = [path for path in reports_root.iterdir() if path.is_dir()]
+    report_dirs.sort(key=lambda path: safe_stat(path / "半日质检报告.md")[0], reverse=True)
+    for report_dir in report_dirs:
+        payload = work_session_report_payload(report_dir)
+        if payload:
+            return payload
+    return {}
+
+
+def work_session_report_payload(report_dir: Path) -> dict[str, Any]:
+    markdown_path = report_dir / "半日质检报告.md"
+    json_path = report_dir / "report.json"
+    try:
+        markdown = markdown_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    metadata: dict[str, Any] = {}
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            metadata = {
+                "generated_at": raw.get("generated_at", ""),
+                "window": raw.get("window", {}),
+                "summary": raw.get("summary", {}),
+                "core_issue_count": len(raw.get("core_issues") or []),
+            }
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {
+        "report_dir": str(report_dir),
+        "markdown_path": str(markdown_path),
+        "json_path": str(json_path),
+        "core_issues_csv": str(report_dir / "核心问题汇总.csv"),
+        "affected_episodes_csv": str(report_dir / "问题episode清单.csv"),
+        "actions_csv": str(report_dir / "处理建议.csv"),
+        "markdown": markdown,
+        **metadata,
+    }
+
+
 def server_load() -> dict[str, Any]:
     load1, load5, load15 = os.getloadavg()
     mem = meminfo()
@@ -1310,16 +1836,31 @@ def tail_file(path: Path, limit: int) -> list[str]:
     return lines[-limit:]
 
 
-def directory_size(path: Path) -> str:
+def directory_size(path: Path, max_files: int | None = None) -> str:
     if not path.exists():
         return "0B"
     total = 0
-    for item in path.rglob("*"):
-        if item.is_file():
+    scanned = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        for item in entries:
+            if item.is_dir():
+                stack.append(item)
+                continue
+            if not item.is_file():
+                continue
             try:
                 total += item.stat().st_size
             except OSError:
                 pass
+            scanned += 1
+            if max_files is not None and scanned >= max_files:
+                return human_bytes(total) + "+"
     return human_bytes(total)
 
 
@@ -1357,7 +1898,15 @@ def discovered_run_id(output_dir: Path) -> str:
             return run_dir.name
     except OSError:
         pass
-    return sanitize_id(str(output_dir.relative_to(PROJECT_ROOT / "outputs")).replace("/", "-"))
+    for root in (PROJECT_ROOT / "outputs", REPO_ROOT / "outputs", PROJECT_ROOT):
+        try:
+            relative = str(output_dir.relative_to(root)).replace("/", "-")
+            if relative in {"", "."}:
+                return sanitize_id(f"{root.parent.name}-{root.name}")
+            return sanitize_id(relative)
+        except ValueError:
+            continue
+    return sanitize_id(output_dir.name)
 
 
 def now_iso() -> str:
@@ -1447,6 +1996,7 @@ def render_index_html(state: DashboardState) -> str:
     .modal.wide {{ width: min(1280px, 96vw); }}
     .modal-header {{ position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
     .modal-body {{ padding: 12px; }}
+    .report-preview {{ max-height: 460px; overflow: auto; white-space: pre-wrap; }}
     @media (max-width: 1000px) {{ main {{ grid-template-columns: 1fr; }} aside {{ border-right: 0; border-bottom: 1px solid var(--line); }} .grid, .two, .summary-card {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
@@ -1498,6 +2048,12 @@ def render_index_html(state: DashboardState) -> str:
         <div><label>Event batch size</label><input id="eventBatchSize" type="number" value="16" min="1" max="256"></div>
         <div><label>Max load ratio</label><input id="eventMaxLoadRatio" type="number" value="0.75" min="0.1" max="1.5" step="0.05"></div>
       </div>
+      <label>Event exact date</label>
+      <input id="eventDate" placeholder="YYYYMMDD/today/yesterday, optional">
+      <div class="two">
+        <div><label>Event date from</label><input id="eventDateFrom" placeholder="YYYYMMDD or today"></div>
+        <div><label>Event date to</label><input id="eventDateTo" placeholder="YYYYMMDD or today"></div>
+      </div>
       <div class="two">
         <div><label>Min free mem GB</label><input id="eventMinMem" type="number" value="6" min="1" max="64" step="0.1"></div>
         <div><label>Resource wait sec</label><input id="eventResourceWait" type="number" value="300" min="0" max="3600"></div>
@@ -1540,8 +2096,13 @@ def render_index_html(state: DashboardState) -> str:
       <div>
         <div id="eventSeverityStrip" class="severity-strip"></div>
         <div id="eventSummaryLead" class="summary-subtitle"></div>
+        <div id="eventWorkSessionReportBox" class="summary-subtitle" style="margin-top:8px"></div>
       </div>
-      <div><button class="primary" onclick="openEventSummaryModal()">Summary</button></div>
+      <div class="row">
+        <button class="primary" onclick="generateEventWorkSessionReport()">生成半日报告</button>
+        <button onclick="openEventWorkSessionReport()">打开报告</button>
+        <button onclick="openEventSummaryModal()">Summary</button>
+      </div>
     </div>
     <div class="panel">
       <div class="row" style="justify-content:space-between">
@@ -1650,6 +2211,7 @@ async function refresh() {{
     '<div>running: ' + val(data,'event_listener.counts.running',0) + '</div>' +
     '<div>pending: ' + val(data,'event_listener.counts.pending',0) + '</div>' +
     '<div>workers: ' + esc(settings.workers || '-') + ', batch: ' + esc(settings.batch_size || '-') + ', phases: ' + esc(settings.phases || '-') + '</div>' +
+    '<div>date filter: exact ' + esc(settings.event_date || '-') + ', from ' + esc(settings.event_date_from || '-') + ', to ' + esc(settings.event_date_to || '-') + '</div>' +
     '<div>guard: max load ratio ' + esc(settings.max_load_ratio || '-') + ', min free mem ' + esc(settings.min_free_mem_gb || '-') + ' GB</div>' +
     '<div>output: ' + val(data,'event_listener.output_size','-') + '</div>' +
     '<div class="muted">Changing these values requires Restart if the listener is already running.</div>';
@@ -1661,7 +2223,7 @@ async function refresh() {{
   }}
   await refreshEventJobs();
   renderProcesses(val(data,'server.top_processes',[]));
-  if (selectedRun) await loadRun(selectedRun, false);
+  if (selectedRun) await loadLog(selectedRun);
   else await loadLog('event_listener');
   }} catch (err) {{
     document.getElementById('clock').textContent = 'dashboard refresh failed: ' + err;
@@ -1676,6 +2238,9 @@ function applyEventSettings(settings) {{
     eventPhases: settings.phases,
     eventWorkers: settings.workers,
     eventBatchSize: settings.batch_size,
+    eventDate: settings.event_date,
+    eventDateFrom: settings.event_date_from,
+    eventDateTo: settings.event_date_to,
     eventMaxLoadRatio: settings.max_load_ratio,
     eventMinMem: settings.min_free_mem_gb,
     eventResourceWait: settings.resource_max_wait_seconds,
@@ -1710,6 +2275,8 @@ async function refreshEventJobs() {{
 async function refreshEventIssueSummary() {{
   const data = await getJson('/api/event-listener/issue-summary?limit=500');
   renderEventIssueSummary(data.summary || {{}});
+  const reportData = await getJson('/api/event-listener/work-session-report');
+  renderEventWorkSessionReport(reportData.report || {{}});
 }}
 
 function severityText(counts) {{
@@ -1765,6 +2332,41 @@ function renderEventIssueSummary(summary) {{
       <td>${{row.context_count || 0}}</td>
     </tr>`
   ).join('');
+}}
+
+function renderEventWorkSessionReport(report) {{
+  const box = document.getElementById('eventWorkSessionReportBox');
+  if (!box) return;
+  if (!report || !report.markdown_path) {{
+    box.innerHTML = '半日报告：尚未生成。可点击“生成半日报告”。';
+    return;
+  }}
+  const summary = report.summary || {{}};
+  const window = report.window || {{}};
+  box.innerHTML =
+    '半日报告：' + esc(window.label || '') +
+    '，episode ' + (summary.episode_count || 0) +
+    '，问题 episode ' + (summary.issue_episode_count || 0) +
+    '，<a href="/event-listener/work-session-report.html" target="_blank">查看内容</a>' +
+    '，文件：' + esc(report.markdown_path || '');
+}}
+
+function openEventWorkSessionReport() {{
+  window.open('/event-listener/work-session-report.html', '_blank');
+}}
+
+async function generateEventWorkSessionReport() {{
+  const box = document.getElementById('eventWorkSessionReportBox');
+  if (box) box.textContent = '半日报告：正在生成...';
+  const data = await postJson('/api/event-listener/work-session-report', {{
+    session: 'current'
+  }});
+  if (!data.ok) {{
+    if (box) box.textContent = '半日报告：生成失败 ' + (data.error || '');
+    return;
+  }}
+  renderEventWorkSessionReport(data.report || {{}});
+  openEventWorkSessionReport();
 }}
 
 function renderEventJobs(jobs) {{
@@ -1833,6 +2435,7 @@ async function loadRun(runId, select) {{
   const counts = run.status_counts || {{}};
   const live = run.live_status || run.run_status || {{}};
   const issueEpisodes = run.issue_episodes || [];
+  const report = run.latest_work_session_report || {{}};
   const issueEpisodeRows = issueEpisodes.length ? issueEpisodes.map(ep =>
     `<tr class="run-row"><td>${{esc(ep.episode_name)}}</td><td class="${{cls(ep.final_status)}}">${{esc(ep.final_status)}}</td><td>${{esc(ep.task)}}</td><td>${{esc(ep.robot)}}</td><td>${{ep.issue_count}}</td><td>${{esc((ep.issue_names || []).join(', '))}}</td></tr>`
   ).join('') : '<tr><td colspan="6" class="muted">No issue episodes in this run.</td></tr>';
@@ -1843,11 +2446,53 @@ async function loadRun(runId, select) {{
     `<div>Episodes: ${{run.episode_count || 0}} | Issues: ${{run.finding_count || 0}}</div>` +
     `<div>Pass: ${{counts.pass || 0}} Warning: ${{counts.warning || 0}} Fail: ${{counts.fail || 0}} Review: ${{counts.needs_review || 0}}</div>` +
     `<div>Phase: ${{live.current_phase || '-'}} ${{live.current_phase_processed || 0}}/${{live.current_phase_total || 0}}</div>` +
+    `<h3>中文半日报告</h3>` +
+    `<div class="row">
+      <select id="workSessionSelect" style="width:160px">
+        <option value="previous">最近结束的工作半日</option>
+        <option value="current">当前工作半日</option>
+        <option value="forenoon">今天上午</option>
+        <option value="afternoon">今天下午</option>
+      </select>
+      <button class="primary" onclick="generateWorkSessionReport('${{run.run_id}}')">生成/刷新报告</button>
+      <span id="workSessionReportMsg" class="muted"></span>
+    </div>` +
+    renderWorkSessionReport(report) +
     `<h3>Top Issues</h3>` +
     `<table><tbody>${{(run.top_issues || []).map(i=>`<tr><td>${{i.check_name}}</td><td>${{i.count}}</td></tr>`).join('')}}</tbody></table>` +
     `<h3>Episodes With Issues</h3>` +
     `<table><thead><tr><th>Episode</th><th>Status</th><th>Task</th><th>Robot</th><th>Issues</th><th>Issue Names</th></tr></thead><tbody>${{issueEpisodeRows}}</tbody></table>`;
   await loadLog(runId);
+}}
+
+function renderWorkSessionReport(report) {{
+  if (!report || !report.markdown_path) {{
+    return '<div class="muted" style="margin-top:8px">还没有生成中文半日报告。</div>';
+  }}
+  const summary = report.summary || {{}};
+  const window = report.window || {{}};
+  return `<div style="margin-top:8px">
+    <div><b>最新报告：</b>${{esc(window.label || '')}}，${{esc(window.start || '')}} 至 ${{esc(window.end || '')}}</div>
+    <div>episode: ${{summary.episode_count || 0}} | 问题 episode: ${{summary.issue_episode_count || 0}} | 影响训练: ${{summary.training_blocking_episode_count || 0}} | 核心问题: ${{report.core_issue_count || 0}}</div>
+    <div class="muted">文件：${{esc(report.markdown_path || '')}}</div>
+    <pre class="report-preview">${{esc(report.markdown || '')}}</pre>
+  </div>`;
+}}
+
+async function generateWorkSessionReport(runId) {{
+  const msg = document.getElementById('workSessionReportMsg');
+  if (msg) msg.textContent = '正在生成...';
+  const sessionEl = document.getElementById('workSessionSelect');
+  const data = await postJson('/api/runs/' + encodeURIComponent(runId) + '/work-session-report', {{
+    session: sessionEl ? sessionEl.value : 'previous',
+    include_all_when_empty: true
+  }});
+  if (!data.ok) {{
+    if (msg) msg.textContent = data.error || '生成失败';
+    return;
+  }}
+  if (msg) msg.textContent = '已生成';
+  await loadRun(runId, false);
 }}
 
 async function loadLog(target) {{
@@ -1885,6 +2530,9 @@ async function eventAction(action) {{
     phases: document.getElementById('eventPhases').value,
     workers: Number(document.getElementById('eventWorkers').value),
     event_batch_size: Number(document.getElementById('eventBatchSize').value),
+    event_date: document.getElementById('eventDate').value,
+    event_date_from: document.getElementById('eventDateFrom').value,
+    event_date_to: document.getElementById('eventDateTo').value,
     max_load_ratio: Number(document.getElementById('eventMaxLoadRatio').value),
     min_free_mem_gb: Number(document.getElementById('eventMinMem').value),
     resource_max_wait_seconds: Number(document.getElementById('eventResourceWait').value),

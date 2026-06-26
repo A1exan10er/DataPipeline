@@ -21,6 +21,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import re
 
 
 DEFAULT_QUEUE_NAME = "qa_pipeline.listen_episode_verified"
@@ -142,6 +143,52 @@ def episode_paths_for_target(target: Path) -> list[Path]:
     if not target.exists():
         return [target]
     return sorted(path for path in target.rglob("episode_*") if path.is_dir())
+
+
+def episode_date_from_path(path: Path) -> str:
+    """Return YYYYMMDD inferred from a verified episode path, or empty string."""
+    for part in path.parts:
+        if re.fullmatch(r"\d{8}", part):
+            return part
+    match = re.search(r"episode_\d+_(\d{8})-\d{6}", path.name)
+    return match.group(1) if match else ""
+
+
+def event_date_allowed(path: Path, args: argparse.Namespace) -> bool:
+    date_value = episode_date_from_path(path)
+    event_date = resolve_event_date_filter(args.event_date)
+    event_date_from = resolve_event_date_filter(args.event_date_from)
+    event_date_to = resolve_event_date_filter(args.event_date_to)
+    if event_date and date_value != event_date:
+        return False
+    if event_date_from and (not date_value or date_value < event_date_from):
+        return False
+    if event_date_to and (not date_value or date_value > event_date_to):
+        return False
+    return True
+
+
+def event_date_filter_description(args: argparse.Namespace) -> str:
+    if args.event_date:
+        return f"date={args.event_date}"
+    parts = []
+    if args.event_date_from:
+        parts.append(f"date_from={args.event_date_from}")
+    if args.event_date_to:
+        parts.append(f"date_to={args.event_date_to}")
+    return " ".join(parts) if parts else "disabled"
+
+
+def resolve_event_date_filter(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return ""
+    if normalized == "today":
+        return datetime.now().astimezone().strftime("%Y%m%d")
+    if normalized == "yesterday":
+        timestamp = time.time() - 86400
+        return datetime.fromtimestamp(timestamp).astimezone().strftime("%Y%m%d")
+    return normalized
 
 
 def enqueue_job(
@@ -277,6 +324,50 @@ def fail_exhausted_jobs(job_db: Path, max_attempts: int) -> None:
             """,
             (now, now, max_attempts),
         )
+
+
+def skip_queued_jobs_outside_event_date(job_db: Path, args: argparse.Namespace) -> int:
+    """Mark queued jobs outside the active event date filter as skipped."""
+    if not has_event_date_filter(args):
+        return 0
+    now = utc_now()
+    changed = 0
+    with sqlite3.connect(job_db) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, mounted_path
+            FROM jobs
+            WHERE status IN ('pending', 'retry')
+            """
+        ).fetchall()
+        for row in rows:
+            mounted_path = Path(str(row["mounted_path"] or ""))
+            if event_date_allowed(mounted_path, args):
+                continue
+            date_value = episode_date_from_path(mounted_path) or "<unknown>"
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'skipped', error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    f"outside event date filter: date={date_value} filter={event_date_filter_description(args)}",
+                    now,
+                    int(row["id"]),
+                ),
+            )
+            changed += 1
+    return changed
+
+
+def has_event_date_filter(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "event_date", "")
+        or getattr(args, "event_date_from", "")
+        or getattr(args, "event_date_to", "")
+    )
 
 
 def recover_running_jobs(job_db: Path) -> int:
@@ -623,6 +714,14 @@ async def listen_events(args: argparse.Namespace) -> None:
             except ValueError as exc:
                 print(f"ignored event path: event_id={event_id} error={exc}", flush=True)
                 continue
+            if not event_date_allowed(mounted, args):
+                print(
+                    "ignored event outside date filter: "
+                    f"event_id={event_id} date={episode_date_from_path(mounted) or '<unknown>'} "
+                    f"filter={event_date_filter_description(args)} mounted_path={mounted}",
+                    flush=True,
+                )
+                continue
             inserted = enqueue_job(
                 Path(args.job_db),
                 event_id=event_id if len(raw_paths) == 1 else f"{event_id}:{raw_path}",
@@ -636,6 +735,7 @@ async def listen_events(args: argparse.Namespace) -> None:
     print(f"queue={args.queue_name}", flush=True)
     print(f"routing_key={args.routing_key}", flush=True)
     print(f"job_db={args.job_db}", flush=True)
+    print(f"event_date_filter={event_date_filter_description(args)}", flush=True)
     await bus.subscribe(
         handler=on_event,
         queue_name=args.queue_name,
@@ -657,6 +757,13 @@ async def worker_loop(args: argparse.Namespace) -> None:
             print(f"recovered stale running jobs: {recovered}", flush=True)
     while True:
         fail_exhausted_jobs(Path(args.job_db), args.max_attempts)
+        skipped = skip_queued_jobs_outside_event_date(Path(args.job_db), args)
+        if skipped:
+            print(
+                f"skipped queued jobs outside date filter: {skipped} "
+                f"filter={event_date_filter_description(args)}",
+                flush=True,
+            )
         jobs = claim_next_jobs(Path(args.job_db), args.max_attempts, args.batch_size)
         if not jobs:
             if args.once:
@@ -822,6 +929,9 @@ def add_listener_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--routing-key", default=DEFAULT_ROUTING_KEY)
     parser.add_argument("--event-max-retries", type=int, default=10)
     parser.add_argument("--event-retry-delay-ms", type=int, default=30000)
+    parser.add_argument("--event-date", default="", help="Only enqueue events whose episode path date is this YYYYMMDD.")
+    parser.add_argument("--event-date-from", default="", help="Only enqueue events on or after this YYYYMMDD.")
+    parser.add_argument("--event-date-to", default="", help="Only enqueue events on or before this YYYYMMDD.")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -858,9 +968,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def validate_event_date_filters(args: argparse.Namespace) -> None:
+    for name in ("event_date", "event_date_from", "event_date_to"):
+        value = getattr(args, name, "")
+        if value and value not in {"today", "yesterday"} and not re.fullmatch(r"\d{8}", value):
+            raise SystemExit(f"--{name.replace('_', '-')} must be YYYYMMDD, today, or yesterday")
+    if getattr(args, "event_date", "") and (
+        getattr(args, "event_date_from", "") or getattr(args, "event_date_to", "")
+    ):
+        raise SystemExit("--event-date cannot be combined with --event-date-from/--event-date-to")
+    if getattr(args, "event_date_from", "") and getattr(args, "event_date_to", ""):
+        if args.event_date_from > args.event_date_to:
+            raise SystemExit("--event-date-from must be earlier than or equal to --event-date-to")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     init_job_db(Path(args.job_db))
+    if args.command in {"serve", "listen"}:
+        validate_event_date_filters(args)
     if args.command == "status":
         print_status(Path(args.job_db), args.limit)
         return 0
