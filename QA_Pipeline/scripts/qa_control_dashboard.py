@@ -33,12 +33,15 @@ PROJECT_ROOT = REPO_ROOT.parent
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MANAGER_DIR = PROJECT_ROOT / "outputs" / "dashboard_manager"
 DEFAULT_REGISTRY_DB = DEFAULT_MANAGER_DIR / "runs.db"
+DEFAULT_ISSUE_HISTORY_DB = DEFAULT_MANAGER_DIR / "issue_history.db"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "dashboard_runs"
 DEFAULT_VERIFIED_ROOT = Path("/mnt/nas/database/verified")
 EVENT_CONTROL_SCRIPT = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listener_control.sh"
 EVENT_JOB_DB = PROJECT_ROOT / "outputs" / "event_listener" / "jobs.db"
 ISSUE_TRANSLATIONS_PATH = SCRIPT_DIR / "issue_translations.json"
 _ISSUE_TRANSLATIONS_CACHE: dict[str, str] | None = None
+CONSECUTIVE_FAILURE_STREAK_LENGTH = 5
+BAD_QA_FINAL_STATUSES = {"fail", "needs_review"}
 
 
 class DashboardState:
@@ -46,13 +49,17 @@ class DashboardState:
         self.host = args.host
         self.port = args.port
         self.registry_db = Path(args.registry_db)
+        self.issue_history_db = DEFAULT_ISSUE_HISTORY_DB
         self.output_root = Path(args.output_root)
         self.verified_root = Path(args.verified_root)
         self.qa_python = Path(args.qa_python)
         self.refresh_seconds = max(1.0, float(args.refresh_seconds))
         self.max_discovered_runs = max(0, int(args.max_discovered_runs))
         self.lock = threading.Lock()
+        self.failure_warning_signature: tuple[int, int, str, str] | None = None
+        self.failure_warning_cache: dict[str, Any] = {"count": 0, "warnings": [], "checked_jobs": 0}
         init_registry(self.registry_db)
+        init_issue_history(self.issue_history_db)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,7 +122,7 @@ def make_handler(state: DashboardState):
                     self._send_json({"jobs": event_listener_jobs(limit=limit, issues_only=issues_only)})
                 elif path.startswith("/api/event-listener/jobs/"):
                     job_id = int(path.rsplit("/", 1)[-1])
-                    self._send_json({"job": event_listener_job_detail(job_id)})
+                    self._send_json({"job": event_listener_job_detail(job_id, state.verified_root)})
                 elif path == "/api/server-load":
                     self._send_json(server_load())
                 elif path == "/api/log-tail":
@@ -143,6 +150,8 @@ def make_handler(state: DashboardState):
                     self._send_json(api_event_listener_action("stop", payload))
                 elif path == "/api/event-listener/restart":
                     self._send_json(api_event_listener_action("restart", payload))
+                elif path == "/api/consecutive-failures/resolve":
+                    self._send_json(api_resolve_consecutive_failure(state, payload))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
             except Exception as exc:
@@ -219,12 +228,50 @@ def init_registry(db_path: Path) -> None:
         )
 
 
+def init_issue_history(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS consecutive_failure_streaks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task TEXT NOT NULL,
+                robot TEXT NOT NULL,
+                operator TEXT NOT NULL,
+                episode_start INTEGER NOT NULL,
+                episode_end INTEGER NOT NULL,
+                streak_length INTEGER NOT NULL,
+                issue_types TEXT NOT NULL,
+                detected_at TEXT NOT NULL,
+                resolved_at TEXT,
+                resolution_time_seconds INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_consecutive_failure_unresolved_identity
+            ON consecutive_failure_streaks (
+                task, robot, operator, episode_start, episode_end
+            )
+            WHERE resolved_at IS NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_consecutive_failure_unresolved_detected
+            ON consecutive_failure_streaks (resolved_at, detected_at DESC, id DESC)
+            """
+        )
+
+
 def api_status(state: DashboardState) -> dict[str, Any]:
     sync_registered_run_statuses(state)
     return {
         "generated_at": now_iso(),
         "server": server_load(),
         "event_listener": event_listener_status(),
+        "consecutive_failures": consecutive_failure_warnings(state),
         "runs": list_runs(state, limit=30),
     }
 
@@ -531,7 +578,7 @@ def event_listener_jobs(limit: int = 100, issues_only: bool = False) -> list[dic
     return jobs
 
 
-def event_listener_job_detail(job_id: int) -> dict[str, Any]:
+def event_listener_job_detail(job_id: int, verified_root: Path) -> dict[str, Any]:
     if not EVENT_JOB_DB.exists():
         raise ValueError("event listener job DB does not exist")
     with sqlite3.connect(EVENT_JOB_DB) as conn:
@@ -549,6 +596,7 @@ def event_listener_job_detail(job_id: int) -> dict[str, Any]:
         raise ValueError(f"unknown event job id: {job_id}")
     job = dict(row)
     job["episode_name"] = Path(str(job.get("mounted_path") or "")).name
+    job["nas_internal_path"] = nas_internal_verified_path(str(job.get("mounted_path") or ""), verified_root)
     job["task"] = task_from_episode_path(str(job.get("mounted_path") or ""))
     job["robot"] = robot_from_episode_path(str(job.get("mounted_path") or ""))
     job.update(job_episode_result(job, include_findings=True))
@@ -556,6 +604,424 @@ def event_listener_job_detail(job_id: int) -> dict[str, Any]:
     if output_dir:
         job["log_tail"] = tail_file(output_dir / "pipeline.log", 120)
     return job
+
+
+def consecutive_failure_warnings(state: DashboardState) -> dict[str, Any]:
+    signature = event_job_warning_signature()
+    if signature is None:
+        return {"count": 0, "warnings": [], "checked_jobs": 0}
+    with state.lock:
+        if state.failure_warning_signature == signature:
+            return state.failure_warning_cache
+    warnings = compute_consecutive_failure_warnings(state.issue_history_db)
+    with state.lock:
+        state.failure_warning_signature = signature
+        state.failure_warning_cache = warnings
+    return warnings
+
+
+def event_job_warning_signature() -> tuple[int, int, str, str] | None:
+    if not EVENT_JOB_DB.exists():
+        return None
+    try:
+        with sqlite3.connect(f"file:{EVENT_JOB_DB}?mode=ro", uri=True) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id, "
+                "COALESCE(MAX(updated_at), '') AS max_updated_at FROM jobs"
+            ).fetchone()
+            db_paths = [
+                str(item[0] or "")
+                for item in conn.execute("SELECT DISTINCT db_path FROM jobs WHERE db_path IS NOT NULL")
+            ]
+    except sqlite3.Error:
+        return None
+    db_mtimes = []
+    for db_path in db_paths:
+        try:
+            db_mtimes.append(f"{db_path}:{Path(db_path).stat().st_mtime_ns}")
+        except OSError:
+            db_mtimes.append(f"{db_path}:missing")
+    return (int(row[0] or 0), int(row[1] or 0), str(row[2] or ""), "|".join(sorted(db_mtimes)))
+
+
+def compute_consecutive_failure_warnings(issue_history_db: Path = DEFAULT_ISSUE_HISTORY_DB) -> dict[str, Any]:
+    latest_by_path: dict[str, dict[str, Any]] = {}
+    try:
+        with sqlite3.connect(f"file:{EVENT_JOB_DB}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id, status, mounted_path, db_path, updated_at
+                FROM jobs
+                ORDER BY id
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return {"count": 0, "warnings": [], "checked_jobs": 0}
+
+    for row in rows:
+        job = dict(row)
+        mounted_path = str(job.get("mounted_path") or "")
+        if not mounted_path:
+            continue
+        latest_by_path[mounted_path] = job
+
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for job in latest_by_path.values():
+        mounted_path = str(job.get("mounted_path") or "")
+        episode_number = parse_episode_number(mounted_path)
+        if episode_number is None:
+            continue
+        result = job_episode_result(job)
+        task = str(result.get("task") or task_from_episode_path(mounted_path) or "")
+        robot = str(result.get("robot") or robot_from_episode_path(mounted_path) or "")
+        operator = str(result.get("operator") or operator_from_episode_path(mounted_path) or "")
+        if not task or not robot:
+            continue
+        groups.setdefault((task, robot, operator), []).append(
+            {
+                "episode_number": episode_number,
+                "episode_name": Path(mounted_path).name,
+                "mounted_path": mounted_path,
+                "db_path": str(job.get("db_path") or ""),
+                "job_status": str(job.get("status") or ""),
+                "final_status": str(result.get("final_status") or ""),
+                "updated_at": str(job.get("updated_at") or ""),
+            }
+        )
+
+    detected = []
+    for (task, robot, operator), episodes in groups.items():
+        for streak in consecutive_bad_segments(episodes, CONSECUTIVE_FAILURE_STREAK_LENGTH):
+            detected.append(
+                {
+                    "task": task,
+                    "robot": robot,
+                    "operator": operator,
+                    "start_episode_number": streak[0]["episode_number"],
+                    "end_episode_number": streak[-1]["episode_number"],
+                    "start_episode_name": streak[0]["episode_name"],
+                    "end_episode_name": streak[-1]["episode_name"],
+                    "streak_length": len(streak),
+                    "issue_types": issue_types_for_streak(streak),
+                    "_episodes": streak,
+                    "message": (
+                        f"episode_{streak[0]['episode_number']:04d} ~ "
+                        f"episode_{streak[-1]['episode_number']:04d} 连续{len(streak)}次失败"
+                    ),
+                }
+            )
+    record_consecutive_failure_detections(issue_history_db, detected)
+    active = active_consecutive_failure_warnings(issue_history_db, limit=20)
+    active["checked_jobs"] = len(latest_by_path)
+    return active
+
+
+def issue_types_for_streak(streak: list[dict[str, Any]]) -> list[str]:
+    issue_types: set[str] = set()
+    for episode in streak:
+        db_path = Path(str(episode.get("db_path") or ""))
+        mounted_path = str(episode.get("mounted_path") or "")
+        if not db_path.is_file() or not mounted_path:
+            continue
+        try:
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT check_name
+                    FROM findings
+                    WHERE episode_path = ? AND status != ?
+                    ORDER BY check_name
+                    """,
+                    (mounted_path, "pass"),
+                ).fetchall()
+        except sqlite3.Error:
+            continue
+        issue_types.update(str(row[0]) for row in rows if row[0])
+    return sorted(issue_types)
+
+
+def record_consecutive_failure_detections(db_path: Path, detections: list[dict[str, Any]]) -> None:
+    init_issue_history(db_path)
+    detected_at = now_iso()
+    with sqlite3.connect(db_path) as conn:
+        for item in detections:
+            effective = effective_detection_for_history(conn, item)
+            if effective is None:
+                continue
+            exists = conn.execute(
+                """
+                SELECT 1
+                FROM consecutive_failure_streaks
+                WHERE task = ? AND robot = ? AND operator = ?
+                  AND episode_start = ? AND episode_end = ?
+                LIMIT 1
+                """,
+                (
+                    effective["task"],
+                    effective["robot"],
+                    effective["operator"],
+                    int(effective["start_episode_number"]),
+                    int(effective["end_episode_number"]),
+                ),
+            ).fetchone()
+            if exists:
+                continue
+            conn.execute(
+                """
+                INSERT INTO consecutive_failure_streaks (
+                    task, robot, operator, episode_start, episode_end,
+                    streak_length, issue_types, detected_at, resolved_at,
+                    resolution_time_seconds
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                """,
+                (
+                    effective["task"],
+                    effective["robot"],
+                    effective["operator"],
+                    int(effective["start_episode_number"]),
+                    int(effective["end_episode_number"]),
+                    int(effective["streak_length"]),
+                    json.dumps(effective.get("issue_types") or [], ensure_ascii=False),
+                    detected_at,
+                ),
+            )
+
+
+def effective_detection_for_history(conn: sqlite3.Connection, item: dict[str, Any]) -> dict[str, Any] | None:
+    task = str(item["task"])
+    robot = str(item["robot"])
+    operator = str(item["operator"])
+    segment_start = int(item["start_episode_number"])
+    segment_end = int(item["end_episode_number"])
+    rows = conn.execute(
+        """
+        SELECT id, episode_start, episode_end, issue_types, resolved_at
+        FROM consecutive_failure_streaks
+        WHERE task = ? AND robot = ? AND operator = ?
+          AND episode_start <= ? AND episode_end >= ?
+        ORDER BY episode_start, episode_end, id
+        """,
+        (task, robot, operator, segment_end, segment_start),
+    ).fetchall()
+
+    for row in rows:
+        row_start = int(row[1])
+        row_end = int(row[2])
+        if row[4] is None and row_start == segment_start:
+            if segment_end > row_end:
+                issue_types = sorted(set(json_value(row[3], [])) | set(item.get("issue_types") or []))
+                conn.execute(
+                    """
+                    UPDATE consecutive_failure_streaks
+                    SET episode_end = ?, streak_length = ?, issue_types = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        segment_end,
+                        segment_end - row_start + 1,
+                        json.dumps(issue_types, ensure_ascii=False),
+                        int(row[0]),
+                    ),
+                )
+            return None
+
+    effective_start = segment_start
+    changed = True
+    while changed:
+        changed = False
+        for row in rows:
+            row_start = int(row[1])
+            row_end = int(row[2])
+            if row[4] is not None and row_start <= effective_start <= row_end:
+                effective_start = row_end + 1
+                changed = True
+                break
+
+    if segment_end - effective_start + 1 < CONSECUTIVE_FAILURE_STREAK_LENGTH:
+        return None
+
+    for row in rows:
+        row_start = int(row[1])
+        row_end = int(row[2])
+        if row[4] is None and row_start == effective_start:
+            if segment_end > row_end:
+                effective_episodes = _episodes_in_range(item.get("_episodes") or [], effective_start, segment_end)
+                issue_types = sorted(set(json_value(row[3], [])) | set(issue_types_for_streak(effective_episodes)))
+                conn.execute(
+                    """
+                    UPDATE consecutive_failure_streaks
+                    SET episode_end = ?, streak_length = ?, issue_types = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        segment_end,
+                        segment_end - row_start + 1,
+                        json.dumps(issue_types, ensure_ascii=False),
+                        int(row[0]),
+                    ),
+                )
+            return None
+
+    effective = dict(item)
+    effective["start_episode_number"] = effective_start
+    effective["end_episode_number"] = segment_end
+    effective["streak_length"] = segment_end - effective_start + 1
+    effective_episodes = _episodes_in_range(item.get("_episodes") or [], effective_start, segment_end)
+    effective["issue_types"] = issue_types_for_streak(effective_episodes) if effective_episodes else item.get("issue_types", [])
+    return effective
+
+
+def _episodes_in_range(episodes: list[dict[str, Any]], start: int, end: int) -> list[dict[str, Any]]:
+    return [
+        episode
+        for episode in episodes
+        if start <= int(episode.get("episode_number", -1)) <= end
+    ]
+
+
+def active_consecutive_failure_warnings(db_path: Path, limit: int = 20) -> dict[str, Any]:
+    init_issue_history(db_path)
+    rows: list[sqlite3.Row]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, task, robot, operator, episode_start, episode_end,
+                   streak_length, issue_types, detected_at
+            FROM consecutive_failure_streaks
+            WHERE resolved_at IS NULL
+            ORDER BY detected_at DESC, id DESC
+            """
+        ).fetchall()
+
+    by_combo: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (row["task"], row["robot"], row["operator"])
+        if key in by_combo:
+            continue
+        item = {
+            "id": int(row["id"]),
+            "task": row["task"],
+            "robot": row["robot"],
+            "operator": row["operator"],
+            "start_episode_number": int(row["episode_start"]),
+            "end_episode_number": int(row["episode_end"]),
+            "streak_length": int(row["streak_length"]),
+            "issue_types": json_value(row["issue_types"], []),
+            "detected_at": row["detected_at"],
+            "message": (
+                f"episode_{int(row['episode_start']):04d} ~ "
+                f"episode_{int(row['episode_end']):04d} 连续{int(row['streak_length'])}次失败"
+            ),
+        }
+        by_combo[key] = item
+
+    warnings = list(by_combo.values())
+    total = len(warnings)
+    warnings = warnings[:limit]
+    return {
+        "count": total,
+        "warnings": warnings,
+        "hidden_count": max(0, total - len(warnings)),
+        "limit": limit,
+    }
+
+
+def api_resolve_consecutive_failure(state: DashboardState, payload: dict[str, Any]) -> dict[str, Any]:
+    task = str(payload.get("task") or "")
+    robot = str(payload.get("robot") or "")
+    operator = str(payload.get("operator") or "")
+    episode_start = int(payload.get("episode_start"))
+    episode_end = int(payload.get("episode_end"))
+    resolved = resolve_consecutive_failure(
+        state.issue_history_db,
+        task,
+        robot,
+        operator,
+        episode_start,
+        episode_end,
+    )
+    with state.lock:
+        state.failure_warning_signature = None
+        state.failure_warning_cache = {"count": 0, "warnings": [], "checked_jobs": 0}
+    return {"ok": resolved, "consecutive_failures": consecutive_failure_warnings(state)}
+
+
+def resolve_consecutive_failure(
+    db_path: Path,
+    task: str,
+    robot: str,
+    operator: str,
+    episode_start: int,
+    episode_end: int,
+) -> bool:
+    init_issue_history(db_path)
+    resolved_at = now_iso()
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id, detected_at
+            FROM consecutive_failure_streaks
+            WHERE task = ? AND robot = ? AND operator = ?
+              AND episode_start = ? AND episode_end = ?
+              AND resolved_at IS NULL
+            ORDER BY detected_at DESC, id DESC
+            LIMIT 1
+            """,
+            (task, robot, operator, episode_start, episode_end),
+        ).fetchone()
+        if row is None:
+            return False
+        resolution_seconds = max(0, int(datetime.fromisoformat(resolved_at).timestamp() - datetime.fromisoformat(row[1]).timestamp()))
+        conn.execute(
+            """
+            UPDATE consecutive_failure_streaks
+            SET resolved_at = ?, resolution_time_seconds = ?
+            WHERE id = ?
+            """,
+            (resolved_at, resolution_seconds, int(row[0])),
+        )
+    return True
+
+
+def first_consecutive_bad_streak(episodes: list[dict[str, Any]], length: int) -> list[dict[str, Any]] | None:
+    streaks = consecutive_bad_segments(episodes, length)
+    return streaks[0] if streaks else None
+
+
+def consecutive_bad_segments(episodes: list[dict[str, Any]], length: int) -> list[list[dict[str, Any]]]:
+    streaks = []
+    streak: list[dict[str, Any]] = []
+    previous_number: int | None = None
+    for episode in sorted(episodes, key=lambda item: item["episode_number"]):
+        number = int(episode["episode_number"])
+        if previous_number is None or number != previous_number + 1:
+            if len(streak) >= length:
+                streaks.append(streak)
+            streak = []
+        if is_bad_event_episode(episode):
+            streak.append(episode)
+        else:
+            if len(streak) >= length:
+                streaks.append(streak)
+            streak = []
+        previous_number = number
+    if len(streak) >= length:
+        streaks.append(streak)
+    return streaks
+
+
+def is_bad_event_episode(episode: dict[str, Any]) -> bool:
+    job_status = str(episode.get("job_status") or "").strip().lower().replace("-", "_")
+    final_status = str(episode.get("final_status") or "").strip().lower().replace("-", "_")
+    return job_status == "done" and final_status in BAD_QA_FINAL_STATUSES
+
+
+def parse_episode_number(path_or_name: str) -> int | None:
+    match = re.match(r"episode_(\d+)(?:_|$)", Path(str(path_or_name)).name)
+    return int(match.group(1)) if match else None
 
 
 def event_issue_summary(limit: int = 500) -> dict[str, Any]:
@@ -1169,6 +1635,23 @@ def normalize_verified_path(raw: str, verified_root: Path) -> str:
     raise ValueError("root_path must be under /mnt/nas/database/verified or /database/verified")
 
 
+def nas_internal_verified_path(raw: str, verified_root: Path) -> str:
+    value = raw.strip()
+    if not value:
+        return value
+    prefixes = {
+        "/volume1/database/verified",
+        "/database/verified",
+        "/mnt/nas/database/verified",
+        str(verified_root),
+    }
+    for prefix in sorted((item.rstrip("/") for item in prefixes if item), key=len, reverse=True):
+        if value == prefix or value.startswith(prefix + "/"):
+            rel = value[len(prefix) :].lstrip("/")
+            return "/database/verified" + (f"/{rel}" if rel else "")
+    return value
+
+
 def validate_phases(value: str) -> str:
     stripped = value.strip()
     if not re.fullmatch(r"[1-7](,[1-7])*", stripped):
@@ -1378,6 +1861,23 @@ def render_index_html(state: DashboardState) -> str:
     .issue-summary-head {{ white-space: nowrap; }}
     .issue-summary-empty {{ color: var(--muted); }}
     .issue-check-name {{ cursor: help; text-decoration: underline dotted var(--muted); text-underline-offset: 2px; }}
+    .path-field {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+    .copy-path-btn {{ height: 26px; padding: 0 8px; font-size: 12px; }}
+    .issues-section {{ padding: 12px; }}
+    .issues-section h2 {{ margin-bottom: 10px; }}
+    .failure-warning-panel {{ border: 1px solid #f59e0b; border-radius: 6px; background: #fffbeb; padding: 10px; }}
+    .failure-warning-title {{ font-weight: 700; color: #92400e; margin-bottom: 8px; }}
+    .failure-warning-list {{ max-height: 260px; overflow-y: auto; padding-right: 4px; }}
+    .failure-warning-empty {{ color: var(--muted); }}
+    .failure-warning-item {{ padding: 8px 0; border-top: 1px solid #fde68a; }}
+    .failure-warning-item:first-child {{ border-top: 0; padding-top: 0; }}
+    .failure-warning-task {{ font-weight: 700; overflow-wrap: anywhere; }}
+    .failure-warning-meta {{ color: var(--muted); font-size: 12px; margin-top: 2px; }}
+    .failure-warning-range {{ color: #92400e; font-size: 12px; margin-top: 3px; }}
+    .failure-warning-issues {{ color: var(--muted); font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }}
+    .resolve-streak-btn {{ height: 26px; padding: 0 8px; font-size: 12px; margin-top: 6px; }}
+    .resolve-streak-btn.confirm {{ background: #f59e0b; border-color: #d97706; color: #fff; }}
+    .failure-warning-more {{ color: var(--muted); font-size: 12px; padding-top: 8px; border-top: 1px solid #fde68a; }}
     .event-summary-section {{ margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }}
     .event-summary-overview {{ margin-top: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; }}
     .severity-text {{ font-weight: 700; }}
@@ -1406,6 +1906,13 @@ def render_index_html(state: DashboardState) -> str:
 </header>
 <main>
   <aside>
+    <div class="panel issues-section">
+      <h2>Issues</h2>
+      <div class="failure-warning-panel">
+        <div id="consecutiveFailureTitle" class="failure-warning-title">⚠️ 0 个组合连续失败</div>
+        <div id="consecutiveFailureBody" class="failure-warning-list failure-warning-empty">暂无问题</div>
+      </div>
+    </div>
     <div class="panel">
       <h2>Start Run</h2>
       <label>Mode</label>
@@ -1577,6 +2084,8 @@ let eventJobsCache = [];
 let eventIssueSummaryCache = {{}};
 let eventContextSummarySort = {{key: null, direction: 'asc'}};
 let eventIssueSummarySort = {{key: null, direction: 'asc'}};
+let pendingResolveButton = null;
+let pendingResolveTimer = null;
 
 async function getJson(url) {{
   const r = await fetch(url, {{cache: 'no-store'}});
@@ -1596,6 +2105,20 @@ function esc(s) {{
   return String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
 }}
 
+async function copyEventPath(button) {{
+  const text = button.dataset.copyPath || '';
+  const original = button.textContent;
+  try {{
+    await navigator.clipboard.writeText(text);
+    button.textContent = '已复制';
+  }} catch (error) {{
+    button.textContent = '复制失败';
+  }}
+  window.setTimeout(() => {{
+    button.textContent = original;
+  }}, 1500);
+}}
+
 function localTimestamp(value) {{
   if (!value) return '';
   const date = new Date(value);
@@ -1608,6 +2131,7 @@ function localTimestamp(value) {{
 async function refresh() {{
   const data = await getJson('/api/status');
   document.getElementById('clock').textContent = localTimestamp(data.generated_at);
+  renderConsecutiveFailures(data.consecutive_failures || {{}});
   document.getElementById('load1').textContent = Number(val(data,'server.load.1m',0)).toFixed(2);
   document.getElementById('memUsed').textContent =
     val(data,'server.memory.used_gb','-') + ' / ' + val(data,'server.memory.total_gb','-') + ' GB';
@@ -1627,6 +2151,72 @@ async function refresh() {{
   if (selectedRun) await loadRun(selectedRun, false);
   else await loadLog('event_listener');
 }}
+
+function renderConsecutiveFailures(summary) {{
+  const warnings = summary.warnings || [];
+  document.getElementById('consecutiveFailureTitle').textContent =
+    `⚠️ ${{summary.count || warnings.length || 0}} 个组合连续失败`;
+  const body = document.getElementById('consecutiveFailureBody');
+  if (!warnings.length) {{
+    body.className = 'failure-warning-list failure-warning-empty';
+    body.textContent = '暂无连续失败组合';
+    return;
+  }}
+  body.className = 'failure-warning-list';
+  body.innerHTML = warnings.map(item => {{
+    const operator = item.operator ? ` · ${{esc(item.operator)}}` : '';
+    const issueTypes = (item.issue_types || []).join(', ');
+    return `<div class="failure-warning-item">
+      <div class="failure-warning-task">${{esc(item.task || '-')}}</div>
+      <div class="failure-warning-meta">${{esc(item.robot || '-')}}${{operator}}</div>
+      <div class="failure-warning-range">${{esc(item.message || '')}}</div>
+      <div class="failure-warning-issues">${{esc(issueTypes || 'issue types unavailable')}}</div>
+      <button class="resolve-streak-btn"
+        data-task="${{esc(item.task || '')}}"
+        data-robot="${{esc(item.robot || '')}}"
+        data-operator="${{esc(item.operator || '')}}"
+        data-episode-start="${{item.start_episode_number}}"
+        data-episode-end="${{item.end_episode_number}}"
+        onclick="resolveConsecutiveFailureClick(event, this)">标记已解决</button>
+    </div>`;
+  }}).join('') + (summary.hidden_count ? `<div class="failure-warning-more">+${{summary.hidden_count}} more</div>` : '');
+}}
+
+function resetPendingResolveButton() {{
+  if (pendingResolveTimer) window.clearTimeout(pendingResolveTimer);
+  pendingResolveTimer = null;
+  if (pendingResolveButton) {{
+    pendingResolveButton.classList.remove('confirm');
+    pendingResolveButton.textContent = '标记已解决';
+  }}
+  pendingResolveButton = null;
+}}
+
+async function resolveConsecutiveFailureClick(event, button) {{
+  event.stopPropagation();
+  if (pendingResolveButton !== button) {{
+    resetPendingResolveButton();
+    pendingResolveButton = button;
+    button.classList.add('confirm');
+    button.textContent = '确认解决？';
+    pendingResolveTimer = window.setTimeout(resetPendingResolveButton, 3000);
+    return;
+  }}
+  const payload = {{
+    task: button.dataset.task || '',
+    robot: button.dataset.robot || '',
+    operator: button.dataset.operator || '',
+    episode_start: Number(button.dataset.episodeStart || 0),
+    episode_end: Number(button.dataset.episodeEnd || 0),
+  }};
+  resetPendingResolveButton();
+  const data = await postJson('/api/consecutive-failures/resolve', payload);
+  renderConsecutiveFailures(data.consecutive_failures || {{}});
+}}
+
+document.addEventListener('click', event => {{
+  if (!event.target.closest || !event.target.closest('.resolve-streak-btn')) resetPendingResolveButton();
+}});
 
 function renderRuns(runs) {{
   const body = document.getElementById('runsBody');
@@ -1959,10 +2549,12 @@ async function loadEventJob(jobId, openModal) {{
   const phaseStatus = Object.entries(job.phase_status || {{}}).map(([phase,status]) => `P${{phase}}=${{status}}`).join(', ');
   const topIssues = (job.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ') || 'None';
   const issueSummary = findings.map(f => `${{esc(f.check_name)}}: ${{findingMessageHtml(f)}}`).join('\\n');
+  const mountedPath = job.mounted_path || '';
+  const copyPath = job.nas_internal_path || mountedPath;
   document.getElementById('eventJobDetail').innerHTML =
     `<div class="row"><b>Job ${{job.id}}</b><span class="${{cls(job.status)}}">${{esc(job.status)}}</span><span class="${{cls(job.final_status)}}">${{esc(job.final_status || '-')}}</span></div>` +
     `<div><b>Episode:</b> ${{esc(job.episode_name || '')}}</div>` +
-    `<div><b>Path:</b> ${{esc(job.mounted_path || '')}}</div>` +
+    `<div class="path-field"><b>Path:</b><span>${{esc(mountedPath)}}</span><button class="copy-path-btn" data-copy-path="${{esc(copyPath)}}" onclick="copyEventPath(this)">复制路径</button></div>` +
     `<div><b>Task:</b> ${{esc(job.task || '')}} | <b>Robot:</b> ${{esc(job.robot || '')}} | <b>Operator:</b> ${{esc(job.operator || '')}}</div>` +
     `<div><b>Phase status:</b> ${{esc(phaseStatus || '-')}}</div>` +
     `<div><b>Top issues:</b> ${{topIssues}}</div>` +
