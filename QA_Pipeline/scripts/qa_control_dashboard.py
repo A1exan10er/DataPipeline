@@ -2680,8 +2680,8 @@ def render_index_html(state: DashboardState) -> str:
     </div>
     <div class="panel">
       <div class="row" style="justify-content:space-between">
-        <h2>Event Issue Episodes</h2>
-        <span class="muted">episodes with non-pass findings from event listener</span>
+        <h2>Latest Event Episodes</h2>
+        <span class="muted">latest detected episodes from event listener</span>
       </div>
       <div class="table-scroll wide">
         <table>
@@ -2971,7 +2971,7 @@ function renderRuns(runs) {{
 }}
 
 async function refreshEventJobs() {{
-  const data = await getJson('/api/event-listener/jobs?limit=120&issues_only=1');
+  const data = await getJson('/api/event-listener/jobs?limit=120');
   eventJobsCache = data.jobs || [];
   renderEventJobs(eventJobsCache);
 }}
