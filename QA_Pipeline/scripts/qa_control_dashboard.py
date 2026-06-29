@@ -2829,7 +2829,11 @@ async function copyEventPath(button) {{
   const text = button.dataset.copyPath || '';
   const original = button.textContent;
   try {{
-    await navigator.clipboard.writeText(text);
+    if (navigator.clipboard && window.isSecureContext) {{
+      await navigator.clipboard.writeText(text);
+    }} else {{
+      fallbackCopyText(text);
+    }}
     button.textContent = '已复制';
   }} catch (error) {{
     button.textContent = '复制失败';
@@ -2837,6 +2841,21 @@ async function copyEventPath(button) {{
   window.setTimeout(() => {{
     button.textContent = original;
   }}, 1500);
+}}
+
+function fallbackCopyText(text) {{
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!ok) throw new Error('copy command failed');
 }}
 
 function localTimestamp(value) {{
