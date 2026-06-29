@@ -2430,7 +2430,12 @@ def discovered_run_id(output_dir: Path) -> str:
             return run_dir.name
     except OSError:
         pass
-    return sanitize_id(str(output_dir.relative_to(PROJECT_ROOT / "outputs")).replace("/", "-"))
+    for root in (PROJECT_ROOT / "outputs", REPO_ROOT / "outputs"):
+        try:
+            return sanitize_id(str(output_dir.relative_to(root)).replace("/", "-"))
+        except ValueError:
+            continue
+    return sanitize_id(output_dir.name)
 
 
 def now_iso() -> str:
