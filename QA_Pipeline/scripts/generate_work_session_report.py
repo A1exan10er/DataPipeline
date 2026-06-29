@@ -18,8 +18,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.pipeline.qa_config import load_quality_config  # noqa: E402
+
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "work_session_report.json"
+DEFAULT_RULE_EXPLANATIONS = REPO_ROOT / "configs" / "report_rule_explanations_zh.json"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "reports" / "work_sessions"
 STATUS_ORDER = ("fail", "needs_review", "warning", "pass", "pending", "unknown")
 SEVERITY_ORDER = ("critical", "major", "minor", "info", "unknown")
@@ -36,12 +39,19 @@ class SessionWindow:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     config = load_config(Path(args.config))
+    rule_config = load_rule_explanations(Path(args.rule_explanations))
     db_path = Path(args.db_path)
     if not db_path.exists():
         print(f"Error: database does not exist: {db_path}", file=sys.stderr)
         return 1
     window = resolve_window(args, config)
-    report = build_report(db_path, window, config, include_all_when_empty=args.include_all_when_empty)
+    report = build_report(
+        db_path,
+        window,
+        config,
+        include_all_when_empty=args.include_all_when_empty,
+        rule_config=rule_config,
+    )
     output_dir = write_report(Path(args.output_dir), report, config)
     print(f"Wrote work-session report: {output_dir / '半日质检报告.md'}")
     return 0
@@ -52,6 +62,11 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--db-path", required=True, help="QA SQLite database path.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Report output root.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Chinese report configuration JSON.")
+    parser.add_argument(
+        "--rule-explanations",
+        default=str(DEFAULT_RULE_EXPLANATIONS),
+        help="Chinese detection-rule explanation JSON.",
+    )
     parser.add_argument(
         "--session",
         default="current",
@@ -74,6 +89,13 @@ def load_config(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"config must be a JSON object: {path}")
     return data
+
+
+def load_rule_explanations(path: Path = DEFAULT_RULE_EXPLANATIONS) -> dict[str, Any]:
+    try:
+        return load_config(path)
+    except FileNotFoundError:
+        return {"default": {}, "rules": {}}
 
 
 def resolve_window(args: argparse.Namespace, config: dict[str, Any]) -> SessionWindow:
@@ -143,17 +165,66 @@ def build_report(
     window: SessionWindow,
     config: dict[str, Any],
     include_all_when_empty: bool = False,
+    rule_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     episode_rows, finding_rows = query_window_rows(db_path, window)
     used_fallback = False
     if include_all_when_empty and not episode_rows:
         episode_rows, finding_rows = query_all_rows(db_path)
         used_fallback = True
+    return build_report_from_rows(
+        db_path,
+        window,
+        config,
+        episode_rows,
+        finding_rows,
+        used_fallback=used_fallback,
+        rule_config=rule_config,
+    )
 
+
+def build_cumulative_report(
+    db_path: Path,
+    config: dict[str, Any],
+    label: str = "当前运行累计",
+    start: datetime | None = None,
+    end: datetime | None = None,
+    rule_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    episode_rows, finding_rows = query_all_rows(db_path)
+    now = datetime.now().astimezone()
+    window = SessionWindow("run_all", label, start or _earliest_updated_at(episode_rows) or now, end or now)
+    report = build_report_from_rows(
+        db_path,
+        window,
+        config,
+        episode_rows,
+        finding_rows,
+        used_fallback=False,
+        rule_config=rule_config,
+    )
+    report["metadata"]["cumulative_run_report"] = True
+    return report
+
+
+def build_report_from_rows(
+    db_path: Path,
+    window: SessionWindow,
+    config: dict[str, Any],
+    episode_rows: list[dict[str, Any]],
+    finding_rows: list[dict[str, Any]],
+    used_fallback: bool = False,
+    rule_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     episode_by_path = {row["episode_path"]: row for row in episode_rows}
     findings_by_episode: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for finding in finding_rows:
         findings_by_episode[finding["episode_path"]].append(finding)
+    rule_rows = rule_explanation_rows(
+        sorted({str(finding.get("check_name") or "unknown") for finding in finding_rows}),
+        rule_config or load_rule_explanations(),
+    )
+    rule_by_check = {row["check_name"]: row for row in rule_rows}
 
     core_issues = core_issue_rows(
         finding_rows,
@@ -162,7 +233,17 @@ def build_report(
         total_issue_episodes=len(findings_by_episode),
         total_findings=len(finding_rows),
     )
+    enrich_rule_fields(core_issues, rule_by_check)
     affected_episodes = affected_episode_rows(episode_rows, findings_by_episode, config)
+    operator_issues = operator_issue_rows(
+        episode_rows,
+        findings_by_episode,
+        total_issue_episodes=len(findings_by_episode),
+        total_findings=len(finding_rows),
+        config=config,
+    )
+    operator_issue_episodes = operator_issue_episode_rows(episode_rows, findings_by_episode, config)
+    enrich_rule_fields(operator_issue_episodes, rule_by_check)
     actions = action_rows(core_issues, config)
     status_counts = ordered_counter(Counter(row.get("final_status") or "pending" for row in episode_rows), STATUS_ORDER)
     severity_counts = ordered_counter(Counter(row.get("severity") or "unknown" for row in finding_rows), SEVERITY_ORDER)
@@ -191,13 +272,29 @@ def build_report(
             "status_counts": status_counts,
             "severity_counts": severity_counts,
         },
+        "rule_explanations": rule_rows,
         "core_issues": core_issues,
+        "operator_issues": operator_issues,
+        "operator_issue_episodes": operator_issue_episodes,
         "affected_episodes": affected_episodes,
         "suggested_actions": actions,
         "metadata": {
             "episode_paths_seen": sorted(episode_by_path),
         },
     }
+
+
+def _earliest_updated_at(episode_rows: list[dict[str, Any]]) -> datetime | None:
+    values = []
+    for row in episode_rows:
+        value = str(row.get("last_updated") or "")
+        if not value:
+            continue
+        try:
+            values.append(parse_datetime(value))
+        except ValueError:
+            continue
+    return min(values) if values else None
 
 
 def query_window_rows(db_path: Path, window: SessionWindow) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -264,6 +361,73 @@ def query_findings_for_episodes(conn: sqlite3.Connection, episode_paths: list[st
 
 def chunks(values: list[str], size: int) -> list[list[str]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def rule_explanation_rows(check_names: list[str], rule_config: dict[str, Any]) -> list[dict[str, Any]]:
+    quality_config = load_quality_config()
+    default_rule = dict(rule_config.get("default") or {})
+    configured_rules = rule_config.get("rules") or {}
+    rows = []
+    for check_name in check_names:
+        raw_rule = dict(default_rule)
+        specific = configured_rules.get(check_name) or {}
+        if isinstance(specific, dict):
+            raw_rule.update(specific)
+        threshold_items = [
+            _threshold_text(item, quality_config)
+            for item in raw_rule.get("thresholds", [])
+            if isinstance(item, dict)
+        ]
+        rows.append(
+            {
+                "check_name": check_name,
+                "rule_title_zh": str(raw_rule.get("title_zh") or check_name),
+                "phase": str(raw_rule.get("phase") or ""),
+                "description_zh": str(raw_rule.get("description_zh") or ""),
+                "standard_zh": str(raw_rule.get("standard_zh") or ""),
+                "severity_rule_zh": str(raw_rule.get("severity_zh") or ""),
+                "threshold_summary": "；".join(threshold_items),
+                "evidence_fields": "，".join(str(item) for item in raw_rule.get("evidence_fields", [])),
+            }
+        )
+    rows.sort(key=lambda row: (row["phase"], row["check_name"]))
+    return rows
+
+
+def _threshold_text(item: dict[str, Any], quality_config: dict[str, Any]) -> str:
+    label = str(item.get("label_zh") or item.get("name") or "阈值")
+    if "value" in item:
+        value = item.get("value")
+    else:
+        value = _config_path_value(quality_config, item.get("value_path"))
+    unit = str(item.get("unit") or "")
+    if isinstance(value, list):
+        value_text = ", ".join(str(part) for part in value)
+    else:
+        value_text = str(value)
+    return f"{label}={value_text}{(' ' + unit) if unit else ''}"
+
+
+def _config_path_value(config: dict[str, Any], path_value: Any) -> Any:
+    if not isinstance(path_value, list):
+        return ""
+    current: Any = config
+    for key in path_value:
+        if not isinstance(current, dict) or key not in current:
+            return ""
+        current = current[key]
+    return current
+
+
+def enrich_rule_fields(rows: list[dict[str, Any]], rule_by_check: dict[str, dict[str, Any]]) -> None:
+    for row in rows:
+        rule = rule_by_check.get(str(row.get("check_name") or ""))
+        if not rule:
+            continue
+        row["rule_title_zh"] = rule.get("rule_title_zh", "")
+        row["rule_standard_zh"] = rule.get("standard_zh", "")
+        row["threshold_summary"] = rule.get("threshold_summary", "")
+        row["evidence_fields"] = rule.get("evidence_fields", "")
 
 
 def core_issue_rows(
@@ -381,6 +545,114 @@ def affected_episode_rows(
     return rows
 
 
+def operator_issue_rows(
+    episodes: list[dict[str, Any]],
+    findings_by_episode: dict[str, list[dict[str, Any]]],
+    total_issue_episodes: int,
+    total_findings: int,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    episode_count_by_operator: Counter[str] = Counter()
+    issue_episode_paths_by_operator: dict[str, set[str]] = defaultdict(set)
+    finding_count_by_operator: Counter[str] = Counter()
+    severity_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
+    check_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
+    task_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
+    robot_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
+    blocking_paths_by_operator: dict[str, set[str]] = defaultdict(set)
+
+    for episode in episodes:
+        operator = str(episode.get("operator") or "未填写")
+        episode_path = str(episode.get("episode_path") or "")
+        episode_count_by_operator[operator] += 1
+        episode_findings = findings_by_episode.get(episode_path, [])
+        if not episode_findings:
+            continue
+        issue_episode_paths_by_operator[operator].add(episode_path)
+        task_by_operator[operator].update([str(episode.get("task") or "未填写")])
+        robot_by_operator[operator].update([str(episode.get("robot") or "未填写")])
+        for finding in episode_findings:
+            check_name = str(finding.get("check_name") or "unknown")
+            severity = str(finding.get("severity") or "unknown")
+            finding_count_by_operator[operator] += 1
+            severity_by_operator[operator].update([severity])
+            check_by_operator[operator].update([check_name])
+            if issue_action(check_name, config).get("blocks_training", True):
+                blocking_paths_by_operator[operator].add(episode_path)
+
+    rows = []
+    for operator, episode_count in episode_count_by_operator.items():
+        issue_episode_count = len(issue_episode_paths_by_operator.get(operator, set()))
+        if issue_episode_count <= 0 and finding_count_by_operator[operator] <= 0:
+            continue
+        rows.append(
+            {
+                "operator": operator,
+                "episode_count": episode_count,
+                "issue_episode_count": issue_episode_count,
+                "issue_rate_percent": percent_value(issue_episode_count, episode_count),
+                "issue_episode_share_percent": percent_value(issue_episode_count, total_issue_episodes),
+                "finding_count": finding_count_by_operator[operator],
+                "finding_share_percent": percent_value(finding_count_by_operator[operator], total_findings),
+                "training_blocking_episode_count": len(blocking_paths_by_operator.get(operator, set())),
+                "top_issues": counter_text(check_by_operator[operator], limit=8),
+                "severity_summary": counter_text(severity_by_operator[operator], limit=4),
+                "top_tasks": counter_text(task_by_operator[operator], limit=5),
+                "top_robots": counter_text(robot_by_operator[operator], limit=5),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            -row["training_blocking_episode_count"],
+            -row["issue_episode_count"],
+            -row["finding_count"],
+            row["operator"],
+        )
+    )
+    return rows
+
+
+def operator_issue_episode_rows(
+    episodes: list[dict[str, Any]],
+    findings_by_episode: dict[str, list[dict[str, Any]]],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows = []
+    for episode in episodes:
+        episode_path = str(episode.get("episode_path") or "")
+        episode_findings = findings_by_episode.get(episode_path, [])
+        if not episode_findings:
+            continue
+        findings_by_check: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for finding in episode_findings:
+            findings_by_check[str(finding.get("check_name") or "unknown")].append(finding)
+        for check_name, check_findings in findings_by_check.items():
+            severities = Counter(str(finding.get("severity") or "unknown") for finding in check_findings)
+            messages = sorted({str(finding.get("message") or "") for finding in check_findings if finding.get("message")})
+            action = issue_action(check_name, config)
+            rows.append(
+                {
+                    "operator": str(episode.get("operator") or "未填写"),
+                    "check_name": check_name,
+                    "issue_label": action.get("label") or check_name,
+                    "episode_path": episode_path,
+                    "episode_name": Path(episode_path).name,
+                    "task": episode.get("task") or "",
+                    "date": episode.get("date") or "",
+                    "robot": episode.get("robot") or "",
+                    "controller": episode.get("controller") or "",
+                    "final_status": episode.get("final_status") or "pending",
+                    "finding_count": len(check_findings),
+                    "severity_summary": counter_text(severities, limit=4),
+                    "blocks_training": bool(action.get("blocks_training", True)),
+                    "messages": " | ".join(messages[:5]),
+                    "last_updated": episode.get("last_updated") or "",
+                }
+            )
+    rows.sort(key=lambda row: (row["operator"], row["check_name"], row["episode_path"]))
+    return rows
+
+
 def action_rows(core_issues: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for issue in core_issues:
@@ -463,6 +735,9 @@ def write_report(output_root: Path, report: dict[str, Any], config: dict[str, An
 
     (output_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_csv(output_dir / "核心问题汇总.csv", report["core_issues"])
+    write_csv(output_dir / "检测规则说明.csv", report.get("rule_explanations", []))
+    write_csv(output_dir / "采集人员问题占比.csv", report.get("operator_issues", []))
+    write_csv(output_dir / "采集人员问题episode索引.csv", report.get("operator_issue_episodes", []))
     write_csv(output_dir / "问题episode清单.csv", report["affected_episodes"])
     write_csv(output_dir / "处理建议.csv", report["suggested_actions"])
     (output_dir / "半日质检报告.md").write_text(render_markdown(report, config), encoding="utf-8")
@@ -489,8 +764,9 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
     if window.get("used_all_episode_fallback"):
         fallback_note = "\n> 本时间段内没有按 `last_updated` 命中的 episode；当前报告使用全量数据库生成，便于本地测试。\n"
 
+    title_prefix = "数据质检累计报告" if window.get("key") == "run_all" else "数据质检半日报告"
     lines = [
-        f"# 数据质检半日报告：{parse_datetime(window['start']).strftime('%Y-%m-%d')} {window['label']}",
+        f"# {title_prefix}：{parse_datetime(window['start']).strftime('%Y-%m-%d')} {window['label']}",
         "",
         f"生成时间：{report['generated_at']}",
         f"统计时间：{window['start']} 至 {window['end']}",
@@ -506,9 +782,58 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
         f"- 状态分布：{status_line(status_counts, config)}",
         f"- 严重程度分布：{severity_line(severity_counts, config)}",
         "",
-        "## 二、核心问题",
+        "## 二、采集人员问题占比",
         "",
     ]
+    operator_issues = report.get("operator_issues") or []
+    if operator_issues:
+        for row in operator_issues[:10]:
+            lines.append(
+                f"- {row['operator']}：问题 episode {row['issue_episode_count']}/{row['episode_count']} "
+                f"({row['issue_rate_percent']})；占全部问题 episode {row['issue_episode_share_percent']}；"
+                f"finding {row['finding_count']} 条 ({row['finding_share_percent']})；"
+                f"主要问题：{row['top_issues'] or '未填写'}"
+            )
+    else:
+        lines.append("- 本时段暂无采集人员问题占比。")
+    lines.extend(
+        [
+            "",
+            "可在附件 `采集人员问题episode索引.csv` 中按采集人员、问题类型或 episode 路径筛选具体问题位置。",
+            "",
+            "## 三、检测规则与判定标准",
+            "",
+        ]
+    )
+    rule_rows = report.get("rule_explanations") or []
+    if rule_rows:
+        for row in rule_rows[:12]:
+            lines.extend(
+                [
+                    f"### {row.get('rule_title_zh') or row.get('check_name')}",
+                    "",
+                    f"- 问题类型：`{row.get('check_name', '')}`",
+                    f"- 检测阶段：{row.get('phase') or '未填写'}",
+                    f"- 检测说明：{row.get('description_zh') or '未填写'}",
+                    f"- 判定标准：{row.get('standard_zh') or '未填写'}",
+                    f"- 阈值：{row.get('threshold_summary') or '未填写'}",
+                    f"- 严重程度规则：{row.get('severity_rule_zh') or '未填写'}",
+                    f"- 主要证据字段：{row.get('evidence_fields') or '未填写'}",
+                    "",
+                ]
+            )
+        if len(rule_rows) > 12:
+            lines.append(f"其余 {len(rule_rows) - 12} 条规则见附件 `检测规则说明.csv`。")
+            lines.append("")
+    else:
+        lines.append("本报告暂无需要说明的非通过检测规则。")
+        lines.append("")
+    lines.extend(
+        [
+            "## 四、核心问题",
+            "",
+        ]
+    )
     core_issues = report["core_issues"]
     if core_issues:
         for index, issue in enumerate(core_issues[:10], start=1):
@@ -526,6 +851,7 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
                     f"- 主要任务：{issue['top_tasks'] or '未填写'}",
                     f"- 主要机器人：{issue['top_robots'] or '未填写'}",
                     f"- 主要采集人员：{issue['top_operators'] or '未填写'}",
+                    f"- 判定标准摘要：{issue.get('threshold_summary') or issue.get('rule_standard_zh') or '见 `检测规则说明.csv`'}",
                     f"- 影响判断：{issue['impact']}",
                     f"- 处理建议：{issue['action']}",
                     f"- 建议负责人：{issue['owner']}",
@@ -541,7 +867,7 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
         lines.append("")
 
     actions = report["suggested_actions"]
-    lines.extend(["## 三、处理建议", ""])
+    lines.extend(["## 五、处理建议", ""])
     if actions:
         owner_counts = Counter(action["owner"] for action in actions)
         lines.append(f"- 建议优先处理问题数：{len(actions)} 类")
@@ -556,9 +882,12 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## 四、附件",
+            "## 六、附件",
             "",
             "- `核心问题汇总.csv`",
+            "- `检测规则说明.csv`",
+            "- `采集人员问题占比.csv`",
+            "- `采集人员问题episode索引.csv`",
             "- `问题episode清单.csv`",
             "- `处理建议.csv`",
             "- `report.json`",

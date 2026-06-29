@@ -32,10 +32,13 @@ from generate_work_session_report import (
     DEFAULT_CONFIG as WORK_SESSION_REPORT_CONFIG,
     SEVERITY_ORDER,
     STATUS_ORDER,
+    build_cumulative_report as build_cumulative_work_session_report,
     build_report as build_work_session_report,
     core_issue_rows,
     action_rows,
     affected_episode_rows,
+    operator_issue_episode_rows,
+    operator_issue_rows,
     load_config as load_work_session_report_config,
     ordered_counter,
     query_all_rows,
@@ -565,19 +568,28 @@ def api_generate_work_session_report(
         raise ValueError(f"QA database does not exist for run {run_id}: {db_path}")
 
     config = load_work_session_report_config(WORK_SESSION_REPORT_CONFIG)
-    session = str(payload.get("session") or "previous")
-    args = argparse.Namespace(
-        session=session,
-        start=str(payload.get("start") or "") or None,
-        end=str(payload.get("end") or "") or None,
-    )
-    window = resolve_work_session_window(args, config)
-    report = build_work_session_report(
-        db_path,
-        window,
-        config,
-        include_all_when_empty=bool(payload.get("include_all_when_empty", True)),
-    )
+    session = str(payload.get("session") or "run_all")
+    if session == "run_all":
+        report = build_cumulative_work_session_report(
+            db_path,
+            config,
+            label="当前运行累计",
+            start=parse_event_listener_timestamp(str(run.get("started_at") or "")),
+            end=parse_event_listener_timestamp(str(run.get("finished_at") or "")),
+        )
+    else:
+        args = argparse.Namespace(
+            session=session,
+            start=str(payload.get("start") or "") or None,
+            end=str(payload.get("end") or "") or None,
+        )
+        window = resolve_work_session_window(args, config)
+        report = build_work_session_report(
+            db_path,
+            window,
+            config,
+            include_all_when_empty=bool(payload.get("include_all_when_empty", True)),
+        )
     report_dir = write_work_session_report(output_dir / "reports" / "work_sessions", report, config)
     append_run_event(
         state.registry_db,
@@ -641,6 +653,14 @@ def build_event_work_session_report(window: Any, config: dict[str, Any]) -> dict
         total_findings=len(finding_rows),
     )
     affected_episodes = affected_episode_rows(episode_rows, findings_by_episode, config)
+    operator_issues = operator_issue_rows(
+        episode_rows,
+        findings_by_episode,
+        total_issue_episodes=len(findings_by_episode),
+        total_findings=len(finding_rows),
+        config=config,
+    )
+    operator_issue_episodes = operator_issue_episode_rows(episode_rows, findings_by_episode, config)
     actions = action_rows(core_issues, config)
     status_counts = ordered_counter(Counter(row.get("final_status") or "pending" for row in episode_rows), STATUS_ORDER)
     severity_counts = ordered_counter(Counter(row.get("severity") or "unknown" for row in finding_rows), SEVERITY_ORDER)
@@ -666,6 +686,8 @@ def build_event_work_session_report(window: Any, config: dict[str, Any]) -> dict
             "severity_counts": severity_counts,
         },
         "core_issues": core_issues,
+        "operator_issues": operator_issues,
+        "operator_issue_episodes": operator_issue_episodes,
         "affected_episodes": affected_episodes,
         "suggested_actions": actions,
         "metadata": {
@@ -896,7 +918,7 @@ def render_event_work_session_report_html() -> str:
             <div><b>{int(summary.get("training_blocking_episode_count") or 0)}</b><span>影响训练</span></div>
           </div>
           <p class="muted">报告文件：{esc_html(report.get("markdown_path", ""))}</p>
-          <p class="muted">附件：{esc_html(report.get("core_issues_csv", ""))} | {esc_html(report.get("affected_episodes_csv", ""))} | {esc_html(report.get("actions_csv", ""))}</p>
+          <p class="muted">附件：{esc_html(report.get("core_issues_csv", ""))} | {esc_html(report.get("rule_explanations_csv", ""))} | {esc_html(report.get("operator_issues_csv", ""))} | {esc_html(report.get("operator_issue_episodes_csv", ""))} | {esc_html(report.get("affected_episodes_csv", ""))} | {esc_html(report.get("actions_csv", ""))}</p>
           <pre>{esc_html(report.get("markdown", ""))}</pre>
         </main>
         """
@@ -1646,6 +1668,9 @@ def work_session_report_payload(report_dir: Path) -> dict[str, Any]:
         "markdown_path": str(markdown_path),
         "json_path": str(json_path),
         "core_issues_csv": str(report_dir / "核心问题汇总.csv"),
+        "rule_explanations_csv": str(report_dir / "检测规则说明.csv"),
+        "operator_issues_csv": str(report_dir / "采集人员问题占比.csv"),
+        "operator_issue_episodes_csv": str(report_dir / "采集人员问题episode索引.csv"),
         "affected_episodes_csv": str(report_dir / "问题episode清单.csv"),
         "actions_csv": str(report_dir / "处理建议.csv"),
         "markdown": markdown,
@@ -2446,9 +2471,10 @@ async function loadRun(runId, select) {{
     `<div>Episodes: ${{run.episode_count || 0}} | Issues: ${{run.finding_count || 0}}</div>` +
     `<div>Pass: ${{counts.pass || 0}} Warning: ${{counts.warning || 0}} Fail: ${{counts.fail || 0}} Review: ${{counts.needs_review || 0}}</div>` +
     `<div>Phase: ${{live.current_phase || '-'}} ${{live.current_phase_processed || 0}}/${{live.current_phase_total || 0}}</div>` +
-    `<h3>中文半日报告</h3>` +
+    `<h3>中文质检报告</h3>` +
     `<div class="row">
       <select id="workSessionSelect" style="width:160px">
+        <option value="run_all">当前运行累计报告</option>
         <option value="previous">最近结束的工作半日</option>
         <option value="current">当前工作半日</option>
         <option value="forenoon">今天上午</option>
@@ -2484,7 +2510,7 @@ async function generateWorkSessionReport(runId) {{
   if (msg) msg.textContent = '正在生成...';
   const sessionEl = document.getElementById('workSessionSelect');
   const data = await postJson('/api/runs/' + encodeURIComponent(runId) + '/work-session-report', {{
-    session: sessionEl ? sessionEl.value : 'previous',
+    session: sessionEl ? sessionEl.value : 'run_all',
     include_all_when_empty: true
   }});
   if (!data.ok) {{
