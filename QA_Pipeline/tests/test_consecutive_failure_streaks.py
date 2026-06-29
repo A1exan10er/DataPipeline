@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import http.client
+import json
 import sqlite3
 import sys
 import tempfile
+import threading
+from types import SimpleNamespace
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from QA_Pipeline.scripts import qa_control_dashboard as dashboard
 from QA_Pipeline.scripts.qa_control_dashboard import (
     active_consecutive_failure_warnings,
     consecutive_bad_segments,
     init_issue_history,
     record_consecutive_failure_detections,
+    render_index_html,
     resolve_consecutive_failure,
 )
 
@@ -173,9 +179,62 @@ def run_history_tests() -> None:
         )
 
 
+def run_dashboard_ui_tests() -> None:
+    html = render_index_html(SimpleNamespace(refresh_seconds=5.0))
+    assert_equal("let pendingResolveKey = null;" in html, True, "resolve confirmation uses stable identity")
+    assert_equal("pendingResolveButton" in html, False, "resolve confirmation does not retain stale DOM node")
+    assert_equal("if (!r.ok) throw new Error" in html, True, "POST errors are surfaced")
+    assert_equal("if (!data.ok) throw new Error" in html, True, "unmatched resolve is surfaced")
+
+
+def run_resolve_endpoint_test() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "issue_history.db"
+        missing_jobs_db = Path(tmpdir) / "missing-jobs.db"
+        init_issue_history(db_path)
+        record_consecutive_failure_detections(db_path, [detection(1, 5)])
+        state = SimpleNamespace(
+            issue_history_db=db_path,
+            lock=threading.Lock(),
+            failure_warning_signature=None,
+            failure_warning_cache={"count": 0, "warnings": [], "checked_jobs": 0},
+            failure_warning_last_checked=0.0,
+        )
+        original_event_job_db = dashboard.EVENT_JOB_DB
+        server = dashboard.DashboardHTTPServer(("127.0.0.1", 0), dashboard.make_handler(state))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            dashboard.EVENT_JOB_DB = missing_jobs_db
+            thread.start()
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            body = json.dumps(
+                {
+                    "task": TASK,
+                    "robot": ROBOT,
+                    "operator": OPERATOR,
+                    "episode_start": 1,
+                    "episode_end": 5,
+                }
+            )
+            connection.request("POST", "/api/consecutive-failures/resolve", body, {"Content-Type": "application/json"})
+            response = connection.getresponse()
+            data = json.loads(response.read())
+            connection.close()
+            assert_equal(response.status, 200, "resolve endpoint HTTP status")
+            assert_equal(data["ok"], True, "resolve endpoint reports persisted update")
+            assert_equal(db_ranges(db_path)[0][2] is not None, True, "resolve endpoint sets resolved_at")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            dashboard.EVENT_JOB_DB = original_event_job_db
+
+
 def main() -> None:
     run_segment_tests()
     run_history_tests()
+    run_dashboard_ui_tests()
+    run_resolve_endpoint_test()
 
 
 if __name__ == "__main__":

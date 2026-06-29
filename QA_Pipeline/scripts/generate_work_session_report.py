@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.pipeline.qa_config import load_quality_config  # noqa: E402
+from scripts.pipeline.qa_dcs_notifier import collector_id_from_episode_path  # noqa: E402
 
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "work_session_report.json"
@@ -244,6 +245,7 @@ def build_report_from_rows(
     )
     operator_issue_episodes = operator_issue_episode_rows(episode_rows, findings_by_episode, config)
     enrich_rule_fields(operator_issue_episodes, rule_by_check)
+    device_failures = device_failure_summary_rows(episode_rows, finding_rows)
     actions = action_rows(core_issues, config)
     status_counts = ordered_counter(Counter(row.get("final_status") or "pending" for row in episode_rows), STATUS_ORDER)
     severity_counts = ordered_counter(Counter(row.get("severity") or "unknown" for row in finding_rows), SEVERITY_ORDER)
@@ -276,6 +278,7 @@ def build_report_from_rows(
         "core_issues": core_issues,
         "operator_issues": operator_issues,
         "operator_issue_episodes": operator_issue_episodes,
+        "device_failure_summary": device_failures,
         "affected_episodes": affected_episodes,
         "suggested_actions": actions,
         "metadata": {
@@ -653,6 +656,73 @@ def operator_issue_episode_rows(
     return rows
 
 
+def device_failure_summary_rows(
+    episodes: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Group actionable QA failures by authoritative collector metadata."""
+    report_episode_paths = {str(row.get("episode_path") or "") for row in episodes}
+    collector_cache: dict[str, str] = {}
+    checks_by_collector: dict[str, Counter[str]] = defaultdict(Counter)
+    for finding in findings:
+        status = str(finding.get("status") or "").strip().lower().replace("-", "_")
+        episode_path = str(finding.get("episode_path") or "")
+        if status not in {"fail", "needs_review"} or episode_path not in report_episode_paths:
+            continue
+        collector_id = collector_id_for_episode(episode_path, collector_cache)
+        check_name = str(finding.get("check_name") or "unknown")
+        checks_by_collector[collector_id].update([check_name])
+
+    rows = []
+    for collector_id, check_counts in checks_by_collector.items():
+        total = sum(check_counts.values())
+        ordered_checks = sorted(check_counts.items(), key=lambda item: (-item[1], item[0]))
+        dominant_check_name, dominant_count = ordered_checks[0]
+        dominant_percent = round((dominant_count / total) * 100, 1)
+        rows.append(
+            {
+                "collector_id": collector_id,
+                "finding_count": total,
+                "check_name_counts": [
+                    {
+                        "check_name": check_name,
+                        "finding_count": count,
+                        "percent": round((count / total) * 100, 1),
+                    }
+                    for check_name, count in ordered_checks
+                ],
+                "dominant_check_name": dominant_check_name,
+                "dominant_check_count": dominant_count,
+                "dominant_percent": dominant_percent,
+                "hardware_issue_signal": dominant_percent > 70.0,
+            }
+        )
+    rows.sort(key=lambda row: (-row["finding_count"], row["collector_id"]))
+    return rows
+
+
+def collector_id_for_episode(episode_path: str, cache: dict[str, str] | None = None) -> str:
+    """Read collector_id from metadata, falling back to path only on read failure."""
+    lookup_cache = cache if cache is not None else {}
+    if episode_path in lookup_cache:
+        return lookup_cache[episode_path]
+
+    try:
+        with (Path(episode_path) / "metadata.json").open("r", encoding="utf-8") as file_obj:
+            metadata = json.load(file_obj)
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata.json must contain a JSON object")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        collector_id = collector_id_from_episode_path(episode_path) or "unknown_collector"
+    else:
+        raw_collector_id = metadata.get("collector_id")
+        collector_id = raw_collector_id.strip() if isinstance(raw_collector_id, str) else ""
+        collector_id = collector_id or "unknown_collector"
+
+    lookup_cache[episode_path] = collector_id
+    return collector_id
+
+
 def action_rows(core_issues: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for issue in core_issues:
@@ -782,11 +852,43 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
         f"- 状态分布：{status_line(status_counts, config)}",
         f"- 严重程度分布：{severity_line(severity_counts, config)}",
         "",
-        "## 二、采集人员问题占比",
+        "## 二、设备故障统计",
         "",
-        "说明：本节“主要问题”后括号内数字为该采集人员对应问题类型的 finding 条数；“问题 episode”按 episode 去重统计。",
+        "仅统计状态为 `fail` 或 `needs_review` 的 finding；设备按问题总数降序排列。",
         "",
     ]
+    device_failures = report.get("device_failure_summary") or []
+    if device_failures:
+        for row in device_failures:
+            lines.extend(
+                [
+                    f"### {row['collector_id']}",
+                    "",
+                    f"- 失败/待复查 finding：{row['finding_count']} 条",
+                    "- 问题构成："
+                    + "，".join(
+                        f"`{item['check_name']}` {item['finding_count']} 条 ({item['percent']:.1f}%)"
+                        for item in row["check_name_counts"]
+                    ),
+                ]
+            )
+            if row.get("hardware_issue_signal"):
+                lines.append(
+                    f"- **重点设备风险**：`{row['dominant_check_name']}` 占 "
+                    f"{row['dominant_percent']:.1f}% ({row['dominant_check_count']}/{row['finding_count']})，"
+                    "建议优先检查该设备的硬件或连接状态。"
+                )
+            lines.append("")
+    else:
+        lines.extend(["- 本时段暂无设备级失败或待复查 finding。", ""])
+    lines.extend(
+        [
+            "## 三、采集人员问题占比",
+            "",
+            "说明：本节“主要问题”后括号内数字为该采集人员对应问题类型的 finding 条数；“问题 episode”按 episode 去重统计。",
+            "",
+        ]
+    )
     operator_issues = report.get("operator_issues") or []
     if operator_issues:
         for row in operator_issues[:10]:
@@ -803,7 +905,7 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
             "",
             "可在附件 `采集人员问题episode索引.csv` 中按采集人员、问题类型或 episode 路径筛选具体问题位置。",
             "",
-            "## 三、检测规则与判定标准",
+            "## 四、检测规则与判定标准",
             "",
         ]
     )
@@ -832,7 +934,7 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
         lines.append("")
     lines.extend(
         [
-            "## 四、核心问题",
+            "## 五、核心问题",
             "",
             "说明：本节“主要任务/主要机器人/主要采集人员”后括号内数字为该问题类型下的 finding 条数，不是去重 episode 数；去重 episode 数见“影响 episode 数”。",
             "",
@@ -871,7 +973,7 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
         lines.append("")
 
     actions = report["suggested_actions"]
-    lines.extend(["## 五、处理建议", ""])
+    lines.extend(["## 六、处理建议", ""])
     if actions:
         owner_counts = Counter(action["owner"] for action in actions)
         lines.append(f"- 建议优先处理问题数：{len(actions)} 类")
@@ -886,7 +988,7 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## 六、附件",
+            "## 七、附件",
             "",
             "- `核心问题汇总.csv`",
             "- `检测规则说明.csv`",

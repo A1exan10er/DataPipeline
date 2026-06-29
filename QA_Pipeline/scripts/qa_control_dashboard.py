@@ -39,6 +39,7 @@ from generate_work_session_report import (
     build_cumulative_report as build_cumulative_work_session_report,
     build_report as build_work_session_report,
     core_issue_rows,
+    device_failure_summary_rows,
     action_rows,
     affected_episode_rows,
     operator_issue_episode_rows,
@@ -707,6 +708,7 @@ def build_event_work_session_report(window: Any, config: dict[str, Any]) -> dict
         config=config,
     )
     operator_issue_episodes = operator_issue_episode_rows(episode_rows, findings_by_episode, config)
+    device_failures = device_failure_summary_rows(episode_rows, finding_rows)
     actions = action_rows(core_issues, config)
     status_counts = ordered_counter(Counter(row.get("final_status") or "pending" for row in episode_rows), STATUS_ORDER)
     severity_counts = ordered_counter(Counter(row.get("severity") or "unknown" for row in finding_rows), SEVERITY_ORDER)
@@ -734,6 +736,7 @@ def build_event_work_session_report(window: Any, config: dict[str, Any]) -> dict
         "core_issues": core_issues,
         "operator_issues": operator_issues,
         "operator_issue_episodes": operator_issue_episodes,
+        "device_failure_summary": device_failures,
         "affected_episodes": affected_episodes,
         "suggested_actions": actions,
         "metadata": {
@@ -948,6 +951,7 @@ def render_event_work_session_report_html() -> str:
     else:
         summary = report.get("summary") or {}
         window = report.get("window") or {}
+        device_failure_html = render_device_failure_summary_html(report.get("device_failure_summary") or [])
         body = f"""
         <main>
           <div class="topbar">
@@ -963,6 +967,7 @@ def render_event_work_session_report_html() -> str:
             <div><b>{int(summary.get("finding_count") or 0)}</b><span>finding</span></div>
             <div><b>{int(summary.get("training_blocking_episode_count") or 0)}</b><span>影响训练</span></div>
           </div>
+          {device_failure_html}
           <p class="muted">报告文件：{esc_html(report.get("markdown_path", ""))}</p>
           <p class="muted">附件：{esc_html(report.get("core_issues_csv", ""))} | {esc_html(report.get("rule_explanations_csv", ""))} | {esc_html(report.get("operator_issues_csv", ""))} | {esc_html(report.get("operator_issue_episodes_csv", ""))} | {esc_html(report.get("affected_episodes_csv", ""))} | {esc_html(report.get("actions_csv", ""))}</p>
           <pre>{esc_html(report.get("markdown", ""))}</pre>
@@ -985,12 +990,56 @@ def render_event_work_session_report_html() -> str:
     .metrics div {{ background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 12px; }}
     .metrics b {{ display: block; font-size: 28px; }}
     .metrics span {{ color: #667085; font-size: 12px; }}
+    .device-summary {{ margin: 18px 0; }}
+    .device-summary h2 {{ font-size: 18px; margin: 0 0 10px; }}
+    .device-summary-list {{ display: grid; gap: 8px; }}
+    .device-summary-item {{ background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 12px; }}
+    .device-summary-item.risk {{ border-color: #d92d20; background: #fff7f6; }}
+    .device-summary-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }}
+    .device-summary-head code {{ overflow-wrap: anywhere; }}
+    .device-summary-total {{ font-weight: 700; white-space: nowrap; }}
+    .device-summary-checks {{ margin-top: 7px; color: #475467; font-size: 13px; line-height: 1.6; }}
+    .device-risk {{ margin-top: 7px; color: #b42318; font-size: 13px; font-weight: 700; }}
     pre {{ white-space: pre-wrap; background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 18px; line-height: 1.55; overflow: auto; }}
     @media (max-width: 760px) {{ .topbar, .metrics {{ display: block; }} .metrics div {{ margin-bottom: 10px; }} }}
   </style>
 </head>
 <body>{body}</body>
 </html>"""
+
+
+def render_device_failure_summary_html(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return '<section class="device-summary"><h2>设备故障统计</h2><p class="muted">本时段暂无设备级失败或待复查 finding。</p></section>'
+    items = []
+    for row in rows:
+        check_text = "，".join(
+            f"<code>{esc_html(item.get('check_name', 'unknown'))}</code> "
+            f"{int(item.get('finding_count') or 0)} 条 ({float(item.get('percent') or 0):.1f}%)"
+            for item in row.get("check_name_counts") or []
+        )
+        risk_html = ""
+        risk_class = " risk" if row.get("hardware_issue_signal") else ""
+        if row.get("hardware_issue_signal"):
+            risk_html = (
+                '<div class="device-risk">重点设备风险：'
+                f"{esc_html(row.get('dominant_check_name', 'unknown'))} 占 "
+                f"{float(row.get('dominant_percent') or 0):.1f}%，建议优先检查硬件或连接状态。</div>"
+            )
+        items.append(
+            f'<div class="device-summary-item{risk_class}">'
+            '<div class="device-summary-head">'
+            f"<code>{esc_html(row.get('collector_id', 'unknown_collector'))}</code>"
+            f'<span class="device-summary-total">{int(row.get("finding_count") or 0)} 条</span>'
+            "</div>"
+            f'<div class="device-summary-checks">{check_text}</div>'
+            f"{risk_html}</div>"
+        )
+    return (
+        '<section class="device-summary"><h2>设备故障统计</h2>'
+        '<p class="muted">仅统计 fail / needs_review finding，按设备问题总数降序排列。</p>'
+        f'<div class="device-summary-list">{"".join(items)}</div></section>'
+    )
 
 
 def esc_html(value: Any) -> str:
@@ -2136,6 +2185,7 @@ def work_session_report_payload(report_dir: Path) -> dict[str, Any]:
                 "window": raw.get("window", {}),
                 "summary": raw.get("summary", {}),
                 "core_issue_count": len(raw.get("core_issues") or []),
+                "device_failure_summary": raw.get("device_failure_summary") or [],
             }
     except (OSError, json.JSONDecodeError):
         pass
@@ -2804,7 +2854,7 @@ let eventIssueSummarySort = {{key: null, direction: 'asc'}};
 let refreshInFlight = false;
 let lastHeavyRefresh = 0;
 let eventSettingsInitialized = false;
-let pendingResolveButton = null;
+let pendingResolveKey = null;
 let pendingResolveTimer = null;
 
 async function getJson(url) {{
@@ -2814,7 +2864,9 @@ async function getJson(url) {{
 
 async function postJson(url, body) {{
   const r = await fetch(url, {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(body || {{}})}});
-  return await r.json();
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || `HTTP ${{r.status}}`);
+  return data;
 }}
 
 function cls(status) {{ return 'status-' + String(status || '').replace(/_/g, '-'); }}
@@ -2945,37 +2997,60 @@ function renderConsecutiveFailures(summary) {{
   body.innerHTML = warnings.map(item => {{
     const operator = item.operator ? ` · ${{esc(item.operator)}}` : '';
     const issueTypes = (item.issue_types || []).join(', ');
+    const resolveKey = consecutiveFailureKey(item);
+    const confirming = pendingResolveKey === resolveKey;
     return `<div class="failure-warning-item">
       <div class="failure-warning-task">${{esc(item.task || '-')}}</div>
       <div class="failure-warning-meta">${{esc(item.robot || '-')}}${{operator}}</div>
       <div class="failure-warning-range">${{esc(item.message || '')}}</div>
       <div class="failure-warning-issues">${{esc(issueTypes || 'issue types unavailable')}}</div>
-      <button class="resolve-streak-btn"
+      <button class="resolve-streak-btn${{confirming ? ' confirm' : ''}}"
         data-task="${{esc(item.task || '')}}"
         data-robot="${{esc(item.robot || '')}}"
         data-operator="${{esc(item.operator || '')}}"
         data-episode-start="${{item.start_episode_number}}"
         data-episode-end="${{item.end_episode_number}}"
-        onclick="resolveConsecutiveFailureClick(event, this)">标记已解决</button>
+        onclick="resolveConsecutiveFailureClick(event, this)">${{confirming ? '确认解决？' : '标记已解决'}}</button>
     </div>`;
   }}).join('') + (summary.hidden_count ? `<div class="failure-warning-more">+${{summary.hidden_count}} more</div>` : '');
+}}
+
+function consecutiveFailureKey(item) {{
+  return JSON.stringify([
+    item.task || '',
+    item.robot || '',
+    item.operator || '',
+    Number(item.start_episode_number ?? item.episode_start ?? 0),
+    Number(item.end_episode_number ?? item.episode_end ?? 0),
+  ]);
+}}
+
+function consecutiveFailureButtonKey(button) {{
+  return consecutiveFailureKey({{
+    task: button.dataset.task,
+    robot: button.dataset.robot,
+    operator: button.dataset.operator,
+    episode_start: button.dataset.episodeStart,
+    episode_end: button.dataset.episodeEnd,
+  }});
 }}
 
 function resetPendingResolveButton() {{
   if (pendingResolveTimer) window.clearTimeout(pendingResolveTimer);
   pendingResolveTimer = null;
-  if (pendingResolveButton) {{
-    pendingResolveButton.classList.remove('confirm');
-    pendingResolveButton.textContent = '标记已解决';
-  }}
-  pendingResolveButton = null;
+  pendingResolveKey = null;
+  document.querySelectorAll('.resolve-streak-btn.confirm').forEach(button => {{
+    button.classList.remove('confirm');
+    button.textContent = '标记已解决';
+  }});
 }}
 
 async function resolveConsecutiveFailureClick(event, button) {{
   event.stopPropagation();
-  if (pendingResolveButton !== button) {{
+  const resolveKey = consecutiveFailureButtonKey(button);
+  if (pendingResolveKey !== resolveKey) {{
     resetPendingResolveButton();
-    pendingResolveButton = button;
+    pendingResolveKey = resolveKey;
     button.classList.add('confirm');
     button.textContent = '确认解决？';
     pendingResolveTimer = window.setTimeout(resetPendingResolveButton, 3000);
@@ -2989,8 +3064,15 @@ async function resolveConsecutiveFailureClick(event, button) {{
     episode_end: Number(button.dataset.episodeEnd || 0),
   }};
   resetPendingResolveButton();
-  const data = await postJson('/api/consecutive-failures/resolve', payload);
-  renderConsecutiveFailures(data.consecutive_failures || {{}});
+  try {{
+    const data = await postJson('/api/consecutive-failures/resolve', payload);
+    if (!data.ok) throw new Error('No matching unresolved streak was found');
+    renderConsecutiveFailures(data.consecutive_failures || {{}});
+  }} catch (error) {{
+    console.error('Failed to resolve consecutive-failure streak', error, payload);
+    button.textContent = '解决失败';
+    window.setTimeout(() => {{ button.textContent = '标记已解决'; }}, 2000);
+  }}
 }}
 
 document.addEventListener('click', event => {{
