@@ -182,8 +182,13 @@ def make_handler(state: DashboardState):
                     self._send_json({"lines": log_tail(state, target)})
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
+            except (BrokenPipeError, ConnectionResetError):
+                return
             except Exception as exc:
-                self._send_json({"error": str(exc)}, status=500)
+                try:
+                    self._send_json({"error": str(exc)}, status=500)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
@@ -217,8 +222,13 @@ def make_handler(state: DashboardState):
                     self._send_json(api_resolve_consecutive_failure(state, payload))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
+            except (BrokenPipeError, ConnectionResetError):
+                return
             except Exception as exc:
-                self._send_json({"error": str(exc)}, status=500)
+                try:
+                    self._send_json({"error": str(exc)}, status=500)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
         def _read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0") or "0")
@@ -232,21 +242,27 @@ def make_handler(state: DashboardState):
 
         def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def _send_html(self, html: str) -> None:
             body = html.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
     return Handler
 
