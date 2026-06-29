@@ -1809,6 +1809,12 @@ def job_episode_result(job: dict[str, Any], include_findings: bool = False) -> d
                 result["date"] = episode["date"] or ""
                 result["controller"] = episode["controller"] or ""
                 result["episode_last_updated"] = episode["last_updated"] or ""
+            elif str(job.get("status") or "").lower() == "done":
+                result["qa_result_missing"] = True
+                result["qa_missing_reason"] = (
+                    "Listener job finished, but this episode is not in the QA result DB. "
+                    "It was likely filtered or skipped before QA checks, for example by the quality-label filter."
+                )
             result["issue_count"] = scalar(
                 conn,
                 "SELECT COUNT(*) FROM findings WHERE episode_path = ? AND status != ?",
@@ -3051,6 +3057,9 @@ function eventIssueSummaryHtml(job) {{
   if (job.pipeline_error) {{
     return `<div class="issue-summary status-failed" title="${{esc(job.pipeline_error)}}">Pipeline failed</div>`;
   }}
+  if (job.qa_result_missing) {{
+    return `<div class="issue-summary status-warning" title="${{esc(job.qa_missing_reason || '')}}">Not QA processed</div>`;
+  }}
   const issues = job.top_issues || [];
   if (!issues.length) {{
     return `<div class="issue-summary issue-summary-empty">${{job.issue_count || 0}}</div>`;
@@ -3312,7 +3321,7 @@ function renderEventJobs(jobs) {{
   const body = document.getElementById('eventJobsBody');
   updateEventJobsSortIndicators();
   body.innerHTML = [...jobs].sort(compareEventJobs).map(job => {{
-    const qa = job.final_status || (job.status === 'done' ? 'complete' : '');
+    const qa = job.final_status || (job.qa_result_missing ? 'skipped' : (job.status === 'done' ? 'complete' : ''));
     return `<tr>
       <td>${{job.id}}</td>
       <td class="${{cls(job.status)}}">${{esc(job.status)}}</td>
@@ -3344,6 +3353,7 @@ async function loadEventJob(jobId, openModal) {{
   const topIssues = (job.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ') || 'None';
   const issueSummary = findings.map(f => `${{esc(f.check_name)}}: ${{findingMessageHtml(f)}}`).join('\\n');
   const pipelineError = job.pipeline_error ? `<div><b>Pipeline error:</b> <span class="status-failed">${{esc(job.pipeline_error)}}</span></div>` : '';
+  const qaMissing = job.qa_result_missing ? `<div><b>QA result:</b> <span class="status-warning">${{esc(job.qa_missing_reason || 'Not QA processed.')}}</span></div>` : '';
   const mountedPath = job.mounted_path || '';
   const copyPath = job.nas_internal_path || mountedPath;
   document.getElementById('eventJobDetail').innerHTML =
@@ -3352,6 +3362,7 @@ async function loadEventJob(jobId, openModal) {{
     `<div class="path-field"><b>Path:</b><span>${{esc(mountedPath)}}</span><button class="copy-path-btn" data-copy-path="${{esc(copyPath)}}" onclick="copyEventPath(this)">复制路径</button></div>` +
     `<div><b>Task:</b> ${{esc(job.task || '')}} | <b>Robot:</b> ${{esc(job.robot || '')}} | <b>Operator:</b> ${{esc(job.operator || '')}}</div>` +
     pipelineError +
+    qaMissing +
     `<div><b>Phase status:</b> ${{esc(phaseStatus || '-')}}</div>` +
     `<div><b>Top issues:</b> ${{topIssues}}</div>` +
     `<div><b>Output:</b> ${{esc(job.output_dir || '')}}</div>` +
