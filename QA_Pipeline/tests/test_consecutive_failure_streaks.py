@@ -183,6 +183,9 @@ def run_dashboard_ui_tests() -> None:
     html = render_index_html(SimpleNamespace(refresh_seconds=5.0))
     assert_equal("let pendingResolveKey = null;" in html, True, "resolve confirmation uses stable identity")
     assert_equal("pendingResolveButton" in html, False, "resolve confirmation does not retain stale DOM node")
+    assert_equal("const locallyResolvedFailureKeys = new Set();" in html, True, "resolved identities persist across refresh renders")
+    assert_equal("locallyResolvedFailureKeys.add(resolveKey);" in html, True, "successful resolve updates local state immediately")
+    assert_equal("rawWarnings.filter(item => !locallyResolvedFailureKeys.has" in html, True, "stale refresh cannot restore resolved warning")
     assert_equal("if (!r.ok) throw new Error" in html, True, "POST errors are surfaced")
     assert_equal("if (!data.ok) throw new Error" in html, True, "unmatched resolve is surfaced")
 
@@ -222,6 +225,7 @@ def run_resolve_endpoint_test() -> None:
             connection.close()
             assert_equal(response.status, 200, "resolve endpoint HTTP status")
             assert_equal(data["ok"], True, "resolve endpoint reports persisted update")
+            assert_equal(data["consecutive_failures"]["count"], 0, "resolve endpoint returns updated active count")
             assert_equal(db_ranges(db_path)[0][2] is not None, True, "resolve endpoint sets resolved_at")
         finally:
             server.shutdown()

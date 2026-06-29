@@ -26,7 +26,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 SCRIPT_DIR_FOR_IMPORT = Path(__file__).resolve().parent
 if str(SCRIPT_DIR_FOR_IMPORT) not in sys.path:
@@ -47,6 +47,7 @@ from generate_work_session_report import (
     load_config as load_work_session_report_config,
     ordered_counter,
     query_all_rows,
+    report_directory_name,
     resolve_window as resolve_work_session_window,
     write_report as write_work_session_report,
 )
@@ -151,7 +152,11 @@ def make_handler(state: DashboardState):
                 if path in ("/", "/index.html"):
                     self._send_html(render_index_html(state))
                 elif path == "/event-listener/work-session-report.html":
-                    self._send_html(render_event_work_session_report_html())
+                    query = parse_qs(parsed.query)
+                    self._send_html(render_event_work_session_report_html(query.get("report", [""])[0]))
+                elif path == "/event-listener/device-failure-report.html":
+                    query = parse_qs(parsed.query)
+                    self._send_html(render_event_device_failure_report_html(query.get("report", [""])[0]))
                 elif path == "/api/status":
                     self._send_json(api_status(state))
                 elif path == "/api/runs":
@@ -658,6 +663,11 @@ def api_generate_event_work_session_report(payload: dict[str, Any]) -> dict[str,
     )
     window = resolve_work_session_window(args, config)
     report = build_event_work_session_report(window, config)
+    report_key = report_directory_name(report)
+    report["device_failure_report_url"] = event_report_url(
+        "/event-listener/device-failure-report.html",
+        report_key,
+    )
     report_dir = write_work_session_report(event_work_session_report_root(), report, config)
     cleanup_event_work_session_reports()
     return {"ok": True, "report": work_session_report_payload(report_dir)}
@@ -813,6 +823,21 @@ def latest_event_work_session_report() -> dict[str, Any]:
     return {}
 
 
+def event_work_session_report(report_key: str = "") -> dict[str, Any]:
+    if not report_key:
+        return latest_event_work_session_report()
+    if Path(report_key).name != report_key:
+        return {}
+    report_dir = event_work_session_report_root() / report_key
+    if not report_dir.is_dir():
+        return {}
+    return work_session_report_payload(report_dir)
+
+
+def event_report_url(path: str, report_key: str) -> str:
+    return f"{path}?{urlencode({'report': report_key})}"
+
+
 def cleanup_event_work_session_reports() -> None:
     """Apply event-listener retention policy to generated report folders."""
     settings = event_listener_settings()
@@ -938,8 +963,8 @@ def parse_int_setting(value: Any, default: int) -> int:
         return default
 
 
-def render_event_work_session_report_html() -> str:
-    report = latest_event_work_session_report()
+def render_event_work_session_report_html(report_key: str = "") -> str:
+    report = event_work_session_report(report_key)
     if not report:
         body = """
         <main>
@@ -951,7 +976,14 @@ def render_event_work_session_report_html() -> str:
     else:
         summary = report.get("summary") or {}
         window = report.get("window") or {}
-        device_failure_html = render_device_failure_summary_html(report.get("device_failure_summary") or [])
+        detail_url = event_report_url(
+            "/event-listener/device-failure-report.html",
+            str(report.get("report_key") or ""),
+        )
+        device_failure_html = render_device_failure_summary_html(
+            report.get("device_failure_summary") or [],
+            detail_url,
+        )
         body = f"""
         <main>
           <div class="topbar">
@@ -992,25 +1024,41 @@ def render_event_work_session_report_html() -> str:
     .metrics span {{ color: #667085; font-size: 12px; }}
     .device-summary {{ margin: 18px 0; }}
     .device-summary h2 {{ font-size: 18px; margin: 0 0 10px; }}
-    .device-summary-list {{ display: grid; gap: 8px; }}
-    .device-summary-item {{ background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 12px; }}
-    .device-summary-item.risk {{ border-color: #d92d20; background: #fff7f6; }}
+    .device-summary-list {{ margin: 0; padding-left: 22px; columns: 2; }}
+    .device-summary-list li {{ margin: 6px 18px 6px 0; break-inside: avoid; }}
     .device-summary-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }}
     .device-summary-head code {{ overflow-wrap: anywhere; }}
     .device-summary-total {{ font-weight: 700; white-space: nowrap; }}
-    .device-summary-checks {{ margin-top: 7px; color: #475467; font-size: 13px; line-height: 1.6; }}
-    .device-risk {{ margin-top: 7px; color: #b42318; font-size: 13px; font-weight: 700; }}
+    .device-report-link {{ display: inline-block; margin-top: 10px; font-weight: 700; }}
     pre {{ white-space: pre-wrap; background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 18px; line-height: 1.55; overflow: auto; }}
-    @media (max-width: 760px) {{ .topbar, .metrics {{ display: block; }} .metrics div {{ margin-bottom: 10px; }} }}
+    @media (max-width: 760px) {{ .topbar, .metrics {{ display: block; }} .metrics div {{ margin-bottom: 10px; }} .device-summary-list {{ columns: 1; }} }}
   </style>
 </head>
 <body>{body}</body>
 </html>"""
 
 
-def render_device_failure_summary_html(rows: list[dict[str, Any]]) -> str:
+def render_device_failure_summary_html(rows: list[dict[str, Any]], detail_url: str) -> str:
     if not rows:
-        return '<section class="device-summary"><h2>设备故障统计</h2><p class="muted">本时段暂无设备级失败或待复查 finding。</p></section>'
+        content = '<p class="muted">本时段暂无设备级失败或待复查 finding。</p>'
+    else:
+        items = "".join(
+            f"<li><code>{esc_html(row.get('collector_id', 'unknown_collector'))}</code>："
+            f"<b>{int(row.get('finding_count') or 0)}</b> 条</li>"
+            for row in rows[:10]
+        )
+        more = f'<p class="muted">另有 {len(rows) - 10} 个设备，请查看完整统计。</p>' if len(rows) > 10 else ""
+        content = f'<ol class="device-summary-list">{items}</ol>{more}'
+    return (
+        '<section class="device-summary"><h2>设备故障统计</h2>'
+        f"{content}"
+        f'<a class="device-report-link" href="{esc_html(detail_url)}">设备故障统计</a></section>'
+    )
+
+
+def render_device_failure_detail_html(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return '<p class="muted">本时段暂无设备级失败或待复查 finding。</p>'
     items = []
     for row in rows:
         check_text = "，".join(
@@ -1036,10 +1084,65 @@ def render_device_failure_summary_html(rows: list[dict[str, Any]]) -> str:
             f"{risk_html}</div>"
         )
     return (
-        '<section class="device-summary"><h2>设备故障统计</h2>'
-        '<p class="muted">仅统计 fail / needs_review finding，按设备问题总数降序排列。</p>'
-        f'<div class="device-summary-list">{"".join(items)}</div></section>'
+        '<div class="device-summary-list">'
+        f'{"".join(items)}</div>'
     )
+
+
+def render_event_device_failure_report_html(report_key: str = "") -> str:
+    report = event_work_session_report(report_key)
+    if not report:
+        body = """
+        <main>
+          <h1>设备故障统计</h1>
+          <p class="muted">未找到指定报告。</p>
+          <p><a href="/event-listener/work-session-report.html">返回半日报告</a></p>
+        </main>
+        """
+    else:
+        window = report.get("window") or {}
+        selected_key = str(report.get("report_key") or "")
+        back_url = event_report_url("/event-listener/work-session-report.html", selected_key)
+        detail_html = render_device_failure_detail_html(report.get("device_failure_summary") or [])
+        body = f"""
+        <main>
+          <div class="topbar">
+            <div>
+              <h1>设备故障统计</h1>
+              <p class="muted">{esc_html(window.get("start", ""))} 至 {esc_html(window.get("end", ""))}</p>
+            </div>
+            <a href="{esc_html(back_url)}">返回半日报告</a>
+          </div>
+          <p class="muted">仅统计 fail / needs_review finding，全部设备按问题总数降序排列。</p>
+          {detail_html}
+        </main>
+        """
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>设备故障统计</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1b1f24; }}
+    main {{ max-width: 1120px; margin: 0 auto; padding: 24px; }}
+    h1 {{ margin: 0 0 6px; font-size: 22px; }}
+    a {{ color: #1769aa; text-decoration: none; }}
+    code {{ overflow-wrap: anywhere; }}
+    .muted {{ color: #667085; font-size: 13px; }}
+    .topbar {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 16px; }}
+    .device-summary-list {{ display: grid; gap: 8px; margin-top: 14px; }}
+    .device-summary-item {{ background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 12px; }}
+    .device-summary-item.risk {{ border-color: #d92d20; background: #fff7f6; }}
+    .device-summary-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }}
+    .device-summary-total {{ font-weight: 700; white-space: nowrap; }}
+    .device-summary-checks {{ margin-top: 7px; color: #475467; font-size: 13px; line-height: 1.6; }}
+    .device-risk {{ margin-top: 7px; color: #b42318; font-size: 13px; font-weight: 700; }}
+    @media (max-width: 760px) {{ .topbar {{ display: block; }} }}
+  </style>
+</head>
+<body>{body}</body>
+</html>"""
 
 
 def esc_html(value: Any) -> str:
@@ -1084,7 +1187,7 @@ def api_event_listener_action(action: str, payload: dict[str, Any]) -> dict[str,
         "STABILITY_TIMEOUT",
         "MIN_FREE_MEM_GB",
         "MAX_LOAD_RATIO",
-        "RESOURCE_MAX_WAIT_SECONDS",
+        "RESOURCE_MAXvo_WAIT_SECONDS",
         "RETENTION_DAYS",
         "RETENTION_MAX_RUNS",
         "RETENTION_MAX_GB",
@@ -2190,6 +2293,7 @@ def work_session_report_payload(report_dir: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         pass
     return {
+        "report_key": report_dir.name,
         "report_dir": str(report_dir),
         "markdown_path": str(markdown_path),
         "json_path": str(json_path),
@@ -2856,6 +2960,8 @@ let lastHeavyRefresh = 0;
 let eventSettingsInitialized = false;
 let pendingResolveKey = null;
 let pendingResolveTimer = null;
+let consecutiveFailuresState = {{count: 0, warnings: [], hidden_count: 0}};
+const locallyResolvedFailureKeys = new Set();
 
 async function getJson(url) {{
   const r = await fetch(url, {{cache: 'no-store'}});
@@ -2984,9 +3090,19 @@ function applyEventSettings(settings) {{
 }}
 
 function renderConsecutiveFailures(summary) {{
-  const warnings = summary.warnings || [];
+  const rawWarnings = summary.warnings || [];
+  const warnings = rawWarnings.filter(item => !locallyResolvedFailureKeys.has(consecutiveFailureKey(item)));
+  const removedCount = rawWarnings.length - warnings.length;
+  const count = Math.max(0, Number(summary.count ?? rawWarnings.length) - removedCount);
+  const normalized = {{
+    ...summary,
+    count,
+    warnings,
+    hidden_count: Math.max(0, count - warnings.length),
+  }};
+  consecutiveFailuresState = normalized;
   document.getElementById('consecutiveFailureTitle').textContent =
-    `⚠️ ${{summary.count || warnings.length || 0}} 个组合连续失败`;
+    `⚠️ ${{count}} 个组合连续失败`;
   const body = document.getElementById('consecutiveFailureBody');
   if (!warnings.length) {{
     body.className = 'failure-warning-list failure-warning-empty';
@@ -3012,7 +3128,7 @@ function renderConsecutiveFailures(summary) {{
         data-episode-end="${{item.end_episode_number}}"
         onclick="resolveConsecutiveFailureClick(event, this)">${{confirming ? '确认解决？' : '标记已解决'}}</button>
     </div>`;
-  }}).join('') + (summary.hidden_count ? `<div class="failure-warning-more">+${{summary.hidden_count}} more</div>` : '');
+  }}).join('') + (normalized.hidden_count ? `<div class="failure-warning-more">+${{normalized.hidden_count}} more</div>` : '');
 }}
 
 function consecutiveFailureKey(item) {{
@@ -3067,7 +3183,9 @@ async function resolveConsecutiveFailureClick(event, button) {{
   try {{
     const data = await postJson('/api/consecutive-failures/resolve', payload);
     if (!data.ok) throw new Error('No matching unresolved streak was found');
-    renderConsecutiveFailures(data.consecutive_failures || {{}});
+    locallyResolvedFailureKeys.add(resolveKey);
+    renderConsecutiveFailures(consecutiveFailuresState);
+    renderConsecutiveFailures(data.consecutive_failures || consecutiveFailuresState);
   }} catch (error) {{
     console.error('Failed to resolve consecutive-failure streak', error, payload);
     button.textContent = '解决失败';

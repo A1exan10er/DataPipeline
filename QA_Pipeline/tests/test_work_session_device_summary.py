@@ -20,7 +20,15 @@ from QA_Pipeline.scripts.generate_work_session_report import (
     DEFAULT_CONFIG,
     write_report,
 )
-from QA_Pipeline.scripts.qa_control_dashboard import render_device_failure_summary_html, work_session_report_payload
+from QA_Pipeline.scripts import qa_control_dashboard as dashboard
+from QA_Pipeline.scripts.qa_control_dashboard import (
+    event_work_session_report,
+    render_device_failure_detail_html,
+    render_device_failure_summary_html,
+    render_event_device_failure_report_html,
+    render_event_work_session_report_html,
+    work_session_report_payload,
+)
 
 
 def assert_equal(actual, expected, label: str) -> None:
@@ -138,6 +146,7 @@ def main() -> None:
             rule_config={"default": {}, "rules": {}},
         )
         assert_equal(report["device_failure_summary"][0]["collector_id"], "collector-modified", "report JSON includes device summary")
+        report["device_failure_report_url"] = "/event-listener/device-failure-report.html?report=test-report"
         report_dir = write_report(root / "reports", report, load_config(DEFAULT_CONFIG))
         saved = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
         markdown = (report_dir / "半日质检报告.md").read_text(encoding="utf-8")
@@ -145,9 +154,36 @@ def main() -> None:
         payload = work_session_report_payload(report_dir)
         assert_equal(payload["device_failure_summary"][0]["collector_id"], "collector-modified", "HTML payload includes device summary")
         assert_equal("## 二、设备故障统计" in markdown, True, "Markdown includes device summary section")
-        assert_equal("重点设备风险" in markdown, True, "Markdown highlights dominant device issue")
-        html = render_device_failure_summary_html(report["device_failure_summary"])
-        assert_equal("设备故障统计" in html and "device-summary-item risk" in html, True, "HTML highlights dominant device issue")
+        assert_equal("重点设备风险" in markdown, False, "Markdown omits full device breakdown")
+        assert_equal("[设备故障统计](/event-listener/device-failure-report.html?report=test-report)" in markdown, True, "Markdown links to detail page")
+
+        many_rows = [
+            {
+                **report["device_failure_summary"][0],
+                "collector_id": f"collector-{index:02d}",
+                "finding_count": 20 - index,
+            }
+            for index in range(12)
+        ]
+        summary_html = render_device_failure_summary_html(many_rows, "/detail?report=selected")
+        assert_equal("collector-09" in summary_html, True, "main HTML includes tenth collector")
+        assert_equal("collector-10" in summary_html, False, "main HTML caps collectors at ten")
+        assert_equal("frame_drop_ratio" in summary_html, False, "main HTML omits check breakdown")
+        assert_equal('href="/detail?report=selected"' in summary_html, True, "main HTML links to selected detail report")
+        detail_html = render_device_failure_detail_html(many_rows)
+        assert_equal("collector-11" in detail_html, True, "detail HTML includes every collector")
+        assert_equal("frame_drop_ratio" in detail_html and "device-summary-item risk" in detail_html, True, "detail HTML retains breakdown and risk")
+
+        with patch.object(dashboard, "event_work_session_report_root", return_value=root / "reports"):
+            selected = event_work_session_report(report_dir.name)
+            assert_equal(selected["report_key"], report_dir.name, "report key selects exact report directory")
+            assert_equal(event_work_session_report("../outside"), {}, "report key rejects path traversal")
+            main_page = render_event_work_session_report_html(report_dir.name)
+            detail_page = render_event_device_failure_report_html(report_dir.name)
+            expected_query = dashboard.event_report_url("", report_dir.name).removeprefix("?")
+            assert_equal(expected_query in main_page, True, "main page carries report context to detail URL")
+            assert_equal(expected_query in detail_page, True, "detail page carries report context back")
+            assert_equal("collector-modified" in detail_page, True, "detail page reads selected report JSON")
 
 
 if __name__ == "__main__":

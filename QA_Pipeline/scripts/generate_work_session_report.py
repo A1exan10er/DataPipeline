@@ -795,12 +795,7 @@ def ordered_counter(counter: Counter[str], order: Sequence[str]) -> dict[str, in
 
 
 def write_report(output_root: Path, report: dict[str, Any], config: dict[str, Any]) -> Path:
-    start = parse_datetime(report["window"]["start"])
-    label = report["window"]["label"]
-    dirname = f"{start.strftime('%Y-%m-%d')}_{label}"
-    if report["window"]["key"] == "custom":
-        dirname = f"{start.strftime('%Y-%m-%d_%H%M')}_自定义"
-    output_dir = output_root / dirname
+    output_dir = output_root / report_directory_name(report)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     (output_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -812,6 +807,14 @@ def write_report(output_root: Path, report: dict[str, Any], config: dict[str, An
     write_csv(output_dir / "处理建议.csv", report["suggested_actions"])
     (output_dir / "半日质检报告.md").write_text(render_markdown(report, config), encoding="utf-8")
     return output_dir
+
+
+def report_directory_name(report: dict[str, Any]) -> str:
+    start = parse_datetime(report["window"]["start"])
+    label = report["window"]["label"]
+    if report["window"]["key"] == "custom":
+        return f"{start.strftime('%Y-%m-%d_%H%M')}_自定义"
+    return f"{start.strftime('%Y-%m-%d')}_{label}"
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -859,28 +862,16 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
     ]
     device_failures = report.get("device_failure_summary") or []
     if device_failures:
-        for row in device_failures:
-            lines.extend(
-                [
-                    f"### {row['collector_id']}",
-                    "",
-                    f"- 失败/待复查 finding：{row['finding_count']} 条",
-                    "- 问题构成："
-                    + "，".join(
-                        f"`{item['check_name']}` {item['finding_count']} 条 ({item['percent']:.1f}%)"
-                        for item in row["check_name_counts"]
-                    ),
-                ]
-            )
-            if row.get("hardware_issue_signal"):
-                lines.append(
-                    f"- **重点设备风险**：`{row['dominant_check_name']}` 占 "
-                    f"{row['dominant_percent']:.1f}% ({row['dominant_check_count']}/{row['finding_count']})，"
-                    "建议优先检查该设备的硬件或连接状态。"
-                )
-            lines.append("")
+        for row in device_failures[:10]:
+            lines.append(f"- `{row['collector_id']}`：{row['finding_count']} 条")
+        if len(device_failures) > 10:
+            lines.append(f"- 其余 {len(device_failures) - 10} 个设备见完整设备故障统计页面。")
     else:
-        lines.extend(["- 本时段暂无设备级失败或待复查 finding。", ""])
+        lines.append("- 本时段暂无设备级失败或待复查 finding。")
+    device_report_url = str(report.get("device_failure_report_url") or "")
+    if device_report_url:
+        lines.extend(["", f"[设备故障统计]({device_report_url})"])
+    lines.append("")
     lines.extend(
         [
             "## 三、采集人员问题占比",
