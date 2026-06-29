@@ -90,8 +90,9 @@ class DashboardState:
         self.lock = threading.Lock()
         self.cache_lock = threading.RLock()
         self.cache: dict[str, tuple[float, Any]] = {}
-        self.failure_warning_signature: tuple[int, int, str, str] | None = None
+        self.failure_warning_signature: tuple[int, int, str] | None = None
         self.failure_warning_cache: dict[str, Any] = {"count": 0, "warnings": [], "checked_jobs": 0}
+        self.failure_warning_last_checked = 0.0
         init_registry(self.registry_db)
         init_issue_history(self.issue_history_db)
 
@@ -1207,20 +1208,26 @@ def event_listener_job_detail(job_id: int, verified_root: Path) -> dict[str, Any
 
 
 def consecutive_failure_warnings(state: DashboardState) -> dict[str, Any]:
+    now = time.monotonic()
+    with state.lock:
+        if state.failure_warning_signature and now - state.failure_warning_last_checked < 60.0:
+            return state.failure_warning_cache
     signature = event_job_warning_signature()
     if signature is None:
         return {"count": 0, "warnings": [], "checked_jobs": 0}
     with state.lock:
         if state.failure_warning_signature == signature:
+            state.failure_warning_last_checked = now
             return state.failure_warning_cache
     warnings = compute_consecutive_failure_warnings(state.issue_history_db)
     with state.lock:
         state.failure_warning_signature = signature
         state.failure_warning_cache = warnings
+        state.failure_warning_last_checked = now
     return warnings
 
 
-def event_job_warning_signature() -> tuple[int, int, str, str] | None:
+def event_job_warning_signature() -> tuple[int, int, str] | None:
     if not EVENT_JOB_DB.exists():
         return None
     try:
@@ -1229,19 +1236,9 @@ def event_job_warning_signature() -> tuple[int, int, str, str] | None:
                 "SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id, "
                 "COALESCE(MAX(updated_at), '') AS max_updated_at FROM jobs"
             ).fetchone()
-            db_paths = [
-                str(item[0] or "")
-                for item in conn.execute("SELECT DISTINCT db_path FROM jobs WHERE db_path IS NOT NULL")
-            ]
     except sqlite3.Error:
         return None
-    db_mtimes = []
-    for db_path in db_paths:
-        try:
-            db_mtimes.append(f"{db_path}:{Path(db_path).stat().st_mtime_ns}")
-        except OSError:
-            db_mtimes.append(f"{db_path}:missing")
-    return (int(row[0] or 0), int(row[1] or 0), str(row[2] or ""), "|".join(sorted(db_mtimes)))
+    return (int(row[0] or 0), int(row[1] or 0), str(row[2] or ""))
 
 
 def compute_consecutive_failure_warnings(issue_history_db: Path = DEFAULT_ISSUE_HISTORY_DB) -> dict[str, Any]:
