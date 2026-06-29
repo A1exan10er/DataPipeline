@@ -8,6 +8,28 @@
     "evidence_fields": []
   },
   "rules": {
+    "abnormal_fps_loss": {
+      "title_zh": "视频有效帧率低于预期",
+      "phase": "Phase 3",
+      "description_zh": "检测视频或触觉视频的实际有效帧率是否明显低于该模态的期望帧率。",
+      "standard_zh": "根据时间戳计算 actual_fps，并读取该模态对应的 expected_fps。若 (expected_fps - actual_fps) / expected_fps 大于 loss_fail_ratio，则判定为帧率损失异常。",
+      "severity_zh": "超过 loss_fail_ratio 时记为 major/fail。",
+      "thresholds": [
+        {"label_zh": "帧率损失失败阈值", "value_path": ["phase3_timestamp", "abnormal_fps", "loss_fail_ratio"], "unit": "比例"}
+      ],
+      "evidence_fields": ["modality", "actual_fps", "expected_fps", "deviation_ratio", "threshold"]
+    },
+    "abnormal_fps_gain": {
+      "title_zh": "视频有效帧率高于预期",
+      "phase": "Phase 3",
+      "description_zh": "检测视频或触觉视频的实际有效帧率是否明显高于该模态的期望帧率。",
+      "standard_zh": "根据时间戳计算 actual_fps，并读取该模态对应的 expected_fps。若 (actual_fps - expected_fps) / expected_fps 大于 gain_warning_ratio，则判定为帧率偏高异常。",
+      "severity_zh": "超过 gain_warning_ratio 时记为 minor/warning。",
+      "thresholds": [
+        {"label_zh": "帧率偏高警告阈值", "value_path": ["phase3_timestamp", "abnormal_fps", "gain_warning_ratio"], "unit": "比例"}
+      ],
+      "evidence_fields": ["modality", "actual_fps", "expected_fps", "deviation_ratio", "threshold"]
+    },
     "operator_standstill_leading": {
       "title_zh": "开头静止过长",
       "phase": "Phase 7",

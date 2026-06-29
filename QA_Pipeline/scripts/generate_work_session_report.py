@@ -784,6 +784,8 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
         "",
         "## 二、采集人员问题占比",
         "",
+        "说明：本节“主要问题”后括号内数字为该采集人员对应问题类型的 finding 条数；“问题 episode”按 episode 去重统计。",
+        "",
     ]
     operator_issues = report.get("operator_issues") or []
     if operator_issues:
@@ -832,6 +834,8 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
         [
             "## 四、核心问题",
             "",
+            "说明：本节“主要任务/主要机器人/主要采集人员”后括号内数字为该问题类型下的 finding 条数，不是去重 episode 数；去重 episode 数见“影响 episode 数”。",
+            "",
         ]
     )
     core_issues = report["core_issues"]
@@ -848,9 +852,9 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
                     f"- 影响 episode 占比：{issue.get('episode_percent', '0.0%')}（占本时段全部 episode），{issue.get('issue_episode_percent', '0.0%')}（占本时段问题 episode）",
                     f"- finding 数：{issue['finding_count']}",
                     f"- finding 占比：{issue.get('finding_percent', '0.0%')}（占本时段非通过 finding）",
-                    f"- 主要任务：{issue['top_tasks'] or '未填写'}",
-                    f"- 主要机器人：{issue['top_robots'] or '未填写'}",
-                    f"- 主要采集人员：{issue['top_operators'] or '未填写'}",
+                    f"- 主要任务（按 finding 数）：{issue['top_tasks'] or '未填写'}",
+                    f"- 主要机器人（按 finding 数）：{issue['top_robots'] or '未填写'}",
+                    f"- 主要采集人员（按 finding 数）：{issue['top_operators'] or '未填写'}",
                     f"- 判定标准摘要：{issue.get('threshold_summary') or issue.get('rule_standard_zh') or '见 `检测规则说明.csv`'}",
                     f"- 影响判断：{issue['impact']}",
                     f"- 处理建议：{issue['action']}",

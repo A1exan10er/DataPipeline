@@ -28,6 +28,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+SCRIPT_DIR_FOR_IMPORT = Path(__file__).resolve().parent
+if str(SCRIPT_DIR_FOR_IMPORT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR_FOR_IMPORT))
+
 from generate_work_session_report import (
     DEFAULT_CONFIG as WORK_SESSION_REPORT_CONFIG,
     SEVERITY_ORDER,
@@ -49,13 +53,19 @@ from generate_work_session_report import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = REPO_ROOT.parent
+SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MANAGER_DIR = PROJECT_ROOT / "outputs" / "dashboard_manager"
 DEFAULT_REGISTRY_DB = DEFAULT_MANAGER_DIR / "runs.db"
+DEFAULT_ISSUE_HISTORY_DB = DEFAULT_MANAGER_DIR / "issue_history.db"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "dashboard_runs"
 DEFAULT_VERIFIED_ROOT = Path("/mnt/nas/database/verified")
 EVENT_CONTROL_SCRIPT = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listener_control.sh"
 EVENT_JOB_DB = PROJECT_ROOT / "outputs" / "event_listener" / "jobs.db"
 RETENTION_MANIFEST = "retention_cleanup.jsonl"
+ISSUE_TRANSLATIONS_PATH = SCRIPT_DIR / "issue_translations.json"
+_ISSUE_TRANSLATIONS_CACHE: dict[str, str] | None = None
+CONSECUTIVE_FAILURE_STREAK_LENGTH = 5
+BAD_QA_FINAL_STATUSES = {"fail", "needs_review"}
 
 
 class DashboardHTTPServer(ThreadingHTTPServer):
@@ -68,6 +78,7 @@ class DashboardState:
         self.host = args.host
         self.port = args.port
         self.registry_db = Path(args.registry_db)
+        self.issue_history_db = DEFAULT_ISSUE_HISTORY_DB
         self.output_root = Path(args.output_root)
         self.verified_root = Path(args.verified_root)
         self.qa_python = Path(args.qa_python)
@@ -79,7 +90,10 @@ class DashboardState:
         self.lock = threading.Lock()
         self.cache_lock = threading.RLock()
         self.cache: dict[str, tuple[float, Any]] = {}
+        self.failure_warning_signature: tuple[int, int, str, str] | None = None
+        self.failure_warning_cache: dict[str, Any] = {"count": 0, "warnings": [], "checked_jobs": 0}
         init_registry(self.registry_db)
+        init_issue_history(self.issue_history_db)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -125,7 +139,7 @@ def make_handler(state: DashboardState):
     class Handler(BaseHTTPRequestHandler):
         server_version = "QAControlDashboard/1.0"
 
-        def log_message(self, message_format: str, *args: object) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             return
 
         def do_GET(self) -> None:
@@ -139,42 +153,26 @@ def make_handler(state: DashboardState):
                 elif path == "/api/status":
                     self._send_json(api_status(state))
                 elif path == "/api/runs":
-                    self._send_json({"runs": cached_value(state, "runs:all", 30.0, lambda: list_runs(state))})
+                    self._send_json({"runs": list_runs(state)})
                 elif path.startswith("/api/runs/"):
                     run_id = path.rsplit("/", 1)[-1]
                     self._send_json(api_run_detail(state, run_id))
                 elif path == "/api/event-listener/status":
-                    self._send_json(
-                        cached_value(state, "event_listener_status_api", 10.0, api_event_listener_status)
-                    )
+                    self._send_json(api_event_listener_status())
                 elif path == "/api/event-listener/issue-summary":
                     query = parse_qs(parsed.query)
                     limit = int(query.get("limit", ["500"])[0] or "500")
-                    self._send_json(
-                        cached_value(
-                            state,
-                            f"event_issue_summary:{limit}",
-                            45.0,
-                            lambda: {"summary": event_issue_summary(limit=limit)},
-                        )
-                    )
+                    self._send_json({"summary": event_issue_summary(limit=limit)})
                 elif path == "/api/event-listener/work-session-report":
                     self._send_json({"report": latest_event_work_session_report()})
                 elif path == "/api/event-listener/jobs":
                     query = parse_qs(parsed.query)
                     limit = int(query.get("limit", ["100"])[0] or "100")
                     issues_only = query.get("issues_only", ["0"])[0] in {"1", "true", "yes"}
-                    self._send_json(
-                        cached_value(
-                            state,
-                            f"event_listener_jobs:{limit}:{int(issues_only)}",
-                            15.0,
-                            lambda: {"jobs": event_listener_jobs(limit=limit, issues_only=issues_only)},
-                        )
-                    )
+                    self._send_json({"jobs": event_listener_jobs(limit=limit, issues_only=issues_only)})
                 elif path.startswith("/api/event-listener/jobs/"):
                     job_id = int(path.rsplit("/", 1)[-1])
-                    self._send_json({"job": event_listener_job_detail(job_id)})
+                    self._send_json({"job": event_listener_job_detail(job_id, state.verified_root)})
                 elif path == "/api/server-load":
                     self._send_json(server_load())
                 elif path == "/api/log-tail":
@@ -183,13 +181,8 @@ def make_handler(state: DashboardState):
                     self._send_json({"lines": log_tail(state, target)})
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
-            except (BrokenPipeError, ConnectionResetError):
-                return
             except Exception as exc:
-                try:
-                    self._send_json({"error": str(exc)}, status=500)
-                except (BrokenPipeError, ConnectionResetError):
-                    return
+                self._send_json({"error": str(exc)}, status=500)
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
@@ -219,15 +212,12 @@ def make_handler(state: DashboardState):
                 elif path == "/api/event-listener/work-session-report":
                     clear_cache(state)
                     self._send_json(api_generate_event_work_session_report(payload))
+                elif path == "/api/consecutive-failures/resolve":
+                    self._send_json(api_resolve_consecutive_failure(state, payload))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
-            except (BrokenPipeError, ConnectionResetError):
-                return
             except Exception as exc:
-                try:
-                    self._send_json({"error": str(exc)}, status=500)
-                except (BrokenPipeError, ConnectionResetError):
-                    return
+                self._send_json({"error": str(exc)}, status=500)
 
         def _read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0") or "0")
@@ -300,6 +290,43 @@ def init_registry(db_path: Path) -> None:
         )
 
 
+def init_issue_history(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS consecutive_failure_streaks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task TEXT NOT NULL,
+                robot TEXT NOT NULL,
+                operator TEXT NOT NULL,
+                episode_start INTEGER NOT NULL,
+                episode_end INTEGER NOT NULL,
+                streak_length INTEGER NOT NULL,
+                issue_types TEXT NOT NULL,
+                detected_at TEXT NOT NULL,
+                resolved_at TEXT,
+                resolution_time_seconds INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_consecutive_failure_unresolved_identity
+            ON consecutive_failure_streaks (
+                task, robot, operator, episode_start, episode_end
+            )
+            WHERE resolved_at IS NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_consecutive_failure_unresolved_detected
+            ON consecutive_failure_streaks (resolved_at, detected_at DESC, id DESC)
+            """
+        )
+
+
 def cached_value(state: DashboardState, key: str, ttl_seconds: float, producer) -> Any:
     now = time.monotonic()
     with state.cache_lock:
@@ -316,6 +343,7 @@ def clear_cache(state: DashboardState) -> None:
         state.cache.clear()
 
 
+
 def api_status(state: DashboardState) -> dict[str, Any]:
     def produce() -> dict[str, Any]:
         sync_registered_run_statuses(state)
@@ -323,6 +351,7 @@ def api_status(state: DashboardState) -> dict[str, Any]:
             "generated_at": now_iso(),
             "server": server_load(),
             "event_listener": event_listener_status(),
+            "consecutive_failures": consecutive_failure_warnings(state),
             "runs": list_runs(state, limit=30),
         }
 
@@ -1149,7 +1178,7 @@ def event_listener_jobs(limit: int = 100, issues_only: bool = False) -> list[dic
     return jobs
 
 
-def event_listener_job_detail(job_id: int) -> dict[str, Any]:
+def event_listener_job_detail(job_id: int, verified_root: Path) -> dict[str, Any]:
     if not EVENT_JOB_DB.exists():
         raise ValueError("event listener job DB does not exist")
     with sqlite3.connect(EVENT_JOB_DB) as conn:
@@ -1167,6 +1196,7 @@ def event_listener_job_detail(job_id: int) -> dict[str, Any]:
         raise ValueError(f"unknown event job id: {job_id}")
     job = dict(row)
     job["episode_name"] = Path(str(job.get("mounted_path") or "")).name
+    job["nas_internal_path"] = nas_internal_verified_path(str(job.get("mounted_path") or ""), verified_root)
     job["task"] = task_from_episode_path(str(job.get("mounted_path") or ""))
     job["robot"] = robot_from_episode_path(str(job.get("mounted_path") or ""))
     job.update(job_episode_result(job, include_findings=True))
@@ -1174,6 +1204,424 @@ def event_listener_job_detail(job_id: int) -> dict[str, Any]:
     if output_dir:
         job["log_tail"] = tail_file(output_dir / "pipeline.log", 120)
     return job
+
+
+def consecutive_failure_warnings(state: DashboardState) -> dict[str, Any]:
+    signature = event_job_warning_signature()
+    if signature is None:
+        return {"count": 0, "warnings": [], "checked_jobs": 0}
+    with state.lock:
+        if state.failure_warning_signature == signature:
+            return state.failure_warning_cache
+    warnings = compute_consecutive_failure_warnings(state.issue_history_db)
+    with state.lock:
+        state.failure_warning_signature = signature
+        state.failure_warning_cache = warnings
+    return warnings
+
+
+def event_job_warning_signature() -> tuple[int, int, str, str] | None:
+    if not EVENT_JOB_DB.exists():
+        return None
+    try:
+        with sqlite3.connect(f"file:{EVENT_JOB_DB}?mode=ro", uri=True) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id, "
+                "COALESCE(MAX(updated_at), '') AS max_updated_at FROM jobs"
+            ).fetchone()
+            db_paths = [
+                str(item[0] or "")
+                for item in conn.execute("SELECT DISTINCT db_path FROM jobs WHERE db_path IS NOT NULL")
+            ]
+    except sqlite3.Error:
+        return None
+    db_mtimes = []
+    for db_path in db_paths:
+        try:
+            db_mtimes.append(f"{db_path}:{Path(db_path).stat().st_mtime_ns}")
+        except OSError:
+            db_mtimes.append(f"{db_path}:missing")
+    return (int(row[0] or 0), int(row[1] or 0), str(row[2] or ""), "|".join(sorted(db_mtimes)))
+
+
+def compute_consecutive_failure_warnings(issue_history_db: Path = DEFAULT_ISSUE_HISTORY_DB) -> dict[str, Any]:
+    latest_by_path: dict[str, dict[str, Any]] = {}
+    try:
+        with sqlite3.connect(f"file:{EVENT_JOB_DB}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id, status, mounted_path, db_path, updated_at
+                FROM jobs
+                ORDER BY id
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return {"count": 0, "warnings": [], "checked_jobs": 0}
+
+    for row in rows:
+        job = dict(row)
+        mounted_path = str(job.get("mounted_path") or "")
+        if not mounted_path:
+            continue
+        latest_by_path[mounted_path] = job
+
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for job in latest_by_path.values():
+        mounted_path = str(job.get("mounted_path") or "")
+        episode_number = parse_episode_number(mounted_path)
+        if episode_number is None:
+            continue
+        result = job_episode_result(job)
+        task = str(result.get("task") or task_from_episode_path(mounted_path) or "")
+        robot = str(result.get("robot") or robot_from_episode_path(mounted_path) or "")
+        operator = str(result.get("operator") or operator_from_episode_path(mounted_path) or "")
+        if not task or not robot:
+            continue
+        groups.setdefault((task, robot, operator), []).append(
+            {
+                "episode_number": episode_number,
+                "episode_name": Path(mounted_path).name,
+                "mounted_path": mounted_path,
+                "db_path": str(job.get("db_path") or ""),
+                "job_status": str(job.get("status") or ""),
+                "final_status": str(result.get("final_status") or ""),
+                "updated_at": str(job.get("updated_at") or ""),
+            }
+        )
+
+    detected = []
+    for (task, robot, operator), episodes in groups.items():
+        for streak in consecutive_bad_segments(episodes, CONSECUTIVE_FAILURE_STREAK_LENGTH):
+            detected.append(
+                {
+                    "task": task,
+                    "robot": robot,
+                    "operator": operator,
+                    "start_episode_number": streak[0]["episode_number"],
+                    "end_episode_number": streak[-1]["episode_number"],
+                    "start_episode_name": streak[0]["episode_name"],
+                    "end_episode_name": streak[-1]["episode_name"],
+                    "streak_length": len(streak),
+                    "issue_types": issue_types_for_streak(streak),
+                    "_episodes": streak,
+                    "message": (
+                        f"episode_{streak[0]['episode_number']:04d} ~ "
+                        f"episode_{streak[-1]['episode_number']:04d} 连续{len(streak)}次失败"
+                    ),
+                }
+            )
+    record_consecutive_failure_detections(issue_history_db, detected)
+    active = active_consecutive_failure_warnings(issue_history_db, limit=20)
+    active["checked_jobs"] = len(latest_by_path)
+    return active
+
+
+def issue_types_for_streak(streak: list[dict[str, Any]]) -> list[str]:
+    issue_types: set[str] = set()
+    for episode in streak:
+        db_path = Path(str(episode.get("db_path") or ""))
+        mounted_path = str(episode.get("mounted_path") or "")
+        if not db_path.is_file() or not mounted_path:
+            continue
+        try:
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT check_name
+                    FROM findings
+                    WHERE episode_path = ? AND status != ?
+                    ORDER BY check_name
+                    """,
+                    (mounted_path, "pass"),
+                ).fetchall()
+        except sqlite3.Error:
+            continue
+        issue_types.update(str(row[0]) for row in rows if row[0])
+    return sorted(issue_types)
+
+
+def record_consecutive_failure_detections(db_path: Path, detections: list[dict[str, Any]]) -> None:
+    init_issue_history(db_path)
+    detected_at = now_iso()
+    with sqlite3.connect(db_path) as conn:
+        for item in detections:
+            effective = effective_detection_for_history(conn, item)
+            if effective is None:
+                continue
+            exists = conn.execute(
+                """
+                SELECT 1
+                FROM consecutive_failure_streaks
+                WHERE task = ? AND robot = ? AND operator = ?
+                  AND episode_start = ? AND episode_end = ?
+                LIMIT 1
+                """,
+                (
+                    effective["task"],
+                    effective["robot"],
+                    effective["operator"],
+                    int(effective["start_episode_number"]),
+                    int(effective["end_episode_number"]),
+                ),
+            ).fetchone()
+            if exists:
+                continue
+            conn.execute(
+                """
+                INSERT INTO consecutive_failure_streaks (
+                    task, robot, operator, episode_start, episode_end,
+                    streak_length, issue_types, detected_at, resolved_at,
+                    resolution_time_seconds
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                """,
+                (
+                    effective["task"],
+                    effective["robot"],
+                    effective["operator"],
+                    int(effective["start_episode_number"]),
+                    int(effective["end_episode_number"]),
+                    int(effective["streak_length"]),
+                    json.dumps(effective.get("issue_types") or [], ensure_ascii=False),
+                    detected_at,
+                ),
+            )
+
+
+def effective_detection_for_history(conn: sqlite3.Connection, item: dict[str, Any]) -> dict[str, Any] | None:
+    task = str(item["task"])
+    robot = str(item["robot"])
+    operator = str(item["operator"])
+    segment_start = int(item["start_episode_number"])
+    segment_end = int(item["end_episode_number"])
+    rows = conn.execute(
+        """
+        SELECT id, episode_start, episode_end, issue_types, resolved_at
+        FROM consecutive_failure_streaks
+        WHERE task = ? AND robot = ? AND operator = ?
+          AND episode_start <= ? AND episode_end >= ?
+        ORDER BY episode_start, episode_end, id
+        """,
+        (task, robot, operator, segment_end, segment_start),
+    ).fetchall()
+
+    for row in rows:
+        row_start = int(row[1])
+        row_end = int(row[2])
+        if row[4] is None and row_start == segment_start:
+            if segment_end > row_end:
+                issue_types = sorted(set(json_value(row[3], [])) | set(item.get("issue_types") or []))
+                conn.execute(
+                    """
+                    UPDATE consecutive_failure_streaks
+                    SET episode_end = ?, streak_length = ?, issue_types = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        segment_end,
+                        segment_end - row_start + 1,
+                        json.dumps(issue_types, ensure_ascii=False),
+                        int(row[0]),
+                    ),
+                )
+            return None
+
+    effective_start = segment_start
+    changed = True
+    while changed:
+        changed = False
+        for row in rows:
+            row_start = int(row[1])
+            row_end = int(row[2])
+            if row[4] is not None and row_start <= effective_start <= row_end:
+                effective_start = row_end + 1
+                changed = True
+                break
+
+    if segment_end - effective_start + 1 < CONSECUTIVE_FAILURE_STREAK_LENGTH:
+        return None
+
+    for row in rows:
+        row_start = int(row[1])
+        row_end = int(row[2])
+        if row[4] is None and row_start == effective_start:
+            if segment_end > row_end:
+                effective_episodes = _episodes_in_range(item.get("_episodes") or [], effective_start, segment_end)
+                issue_types = sorted(set(json_value(row[3], [])) | set(issue_types_for_streak(effective_episodes)))
+                conn.execute(
+                    """
+                    UPDATE consecutive_failure_streaks
+                    SET episode_end = ?, streak_length = ?, issue_types = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        segment_end,
+                        segment_end - row_start + 1,
+                        json.dumps(issue_types, ensure_ascii=False),
+                        int(row[0]),
+                    ),
+                )
+            return None
+
+    effective = dict(item)
+    effective["start_episode_number"] = effective_start
+    effective["end_episode_number"] = segment_end
+    effective["streak_length"] = segment_end - effective_start + 1
+    effective_episodes = _episodes_in_range(item.get("_episodes") or [], effective_start, segment_end)
+    effective["issue_types"] = issue_types_for_streak(effective_episodes) if effective_episodes else item.get("issue_types", [])
+    return effective
+
+
+def _episodes_in_range(episodes: list[dict[str, Any]], start: int, end: int) -> list[dict[str, Any]]:
+    return [
+        episode
+        for episode in episodes
+        if start <= int(episode.get("episode_number", -1)) <= end
+    ]
+
+
+def active_consecutive_failure_warnings(db_path: Path, limit: int = 20) -> dict[str, Any]:
+    init_issue_history(db_path)
+    rows: list[sqlite3.Row]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, task, robot, operator, episode_start, episode_end,
+                   streak_length, issue_types, detected_at
+            FROM consecutive_failure_streaks
+            WHERE resolved_at IS NULL
+            ORDER BY detected_at DESC, id DESC
+            """
+        ).fetchall()
+
+    by_combo: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (row["task"], row["robot"], row["operator"])
+        if key in by_combo:
+            continue
+        item = {
+            "id": int(row["id"]),
+            "task": row["task"],
+            "robot": row["robot"],
+            "operator": row["operator"],
+            "start_episode_number": int(row["episode_start"]),
+            "end_episode_number": int(row["episode_end"]),
+            "streak_length": int(row["streak_length"]),
+            "issue_types": json_value(row["issue_types"], []),
+            "detected_at": row["detected_at"],
+            "message": (
+                f"episode_{int(row['episode_start']):04d} ~ "
+                f"episode_{int(row['episode_end']):04d} 连续{int(row['streak_length'])}次失败"
+            ),
+        }
+        by_combo[key] = item
+
+    warnings = list(by_combo.values())
+    total = len(warnings)
+    warnings = warnings[:limit]
+    return {
+        "count": total,
+        "warnings": warnings,
+        "hidden_count": max(0, total - len(warnings)),
+        "limit": limit,
+    }
+
+
+def api_resolve_consecutive_failure(state: DashboardState, payload: dict[str, Any]) -> dict[str, Any]:
+    task = str(payload.get("task") or "")
+    robot = str(payload.get("robot") or "")
+    operator = str(payload.get("operator") or "")
+    episode_start = int(payload.get("episode_start"))
+    episode_end = int(payload.get("episode_end"))
+    resolved = resolve_consecutive_failure(
+        state.issue_history_db,
+        task,
+        robot,
+        operator,
+        episode_start,
+        episode_end,
+    )
+    with state.lock:
+        state.failure_warning_signature = None
+        state.failure_warning_cache = {"count": 0, "warnings": [], "checked_jobs": 0}
+    return {"ok": resolved, "consecutive_failures": consecutive_failure_warnings(state)}
+
+
+def resolve_consecutive_failure(
+    db_path: Path,
+    task: str,
+    robot: str,
+    operator: str,
+    episode_start: int,
+    episode_end: int,
+) -> bool:
+    init_issue_history(db_path)
+    resolved_at = now_iso()
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id, detected_at
+            FROM consecutive_failure_streaks
+            WHERE task = ? AND robot = ? AND operator = ?
+              AND episode_start = ? AND episode_end = ?
+              AND resolved_at IS NULL
+            ORDER BY detected_at DESC, id DESC
+            LIMIT 1
+            """,
+            (task, robot, operator, episode_start, episode_end),
+        ).fetchone()
+        if row is None:
+            return False
+        resolution_seconds = max(0, int(datetime.fromisoformat(resolved_at).timestamp() - datetime.fromisoformat(row[1]).timestamp()))
+        conn.execute(
+            """
+            UPDATE consecutive_failure_streaks
+            SET resolved_at = ?, resolution_time_seconds = ?
+            WHERE id = ?
+            """,
+            (resolved_at, resolution_seconds, int(row[0])),
+        )
+    return True
+
+
+def first_consecutive_bad_streak(episodes: list[dict[str, Any]], length: int) -> list[dict[str, Any]] | None:
+    streaks = consecutive_bad_segments(episodes, length)
+    return streaks[0] if streaks else None
+
+
+def consecutive_bad_segments(episodes: list[dict[str, Any]], length: int) -> list[list[dict[str, Any]]]:
+    streaks = []
+    streak: list[dict[str, Any]] = []
+    previous_number: int | None = None
+    for episode in sorted(episodes, key=lambda item: item["episode_number"]):
+        number = int(episode["episode_number"])
+        if previous_number is None or number != previous_number + 1:
+            if len(streak) >= length:
+                streaks.append(streak)
+            streak = []
+        if is_bad_event_episode(episode):
+            streak.append(episode)
+        else:
+            if len(streak) >= length:
+                streaks.append(streak)
+            streak = []
+        previous_number = number
+    if len(streak) >= length:
+        streaks.append(streak)
+    return streaks
+
+
+def is_bad_event_episode(episode: dict[str, Any]) -> bool:
+    job_status = str(episode.get("job_status") or "").strip().lower().replace("-", "_")
+    final_status = str(episode.get("final_status") or "").strip().lower().replace("-", "_")
+    return job_status == "done" and final_status in BAD_QA_FINAL_STATUSES
+
+
+def parse_episode_number(path_or_name: str) -> int | None:
+    match = re.match(r"episode_(\d+)(?:_|$)", Path(str(path_or_name)).name)
+    return int(match.group(1)) if match else None
 
 
 def event_issue_summary(limit: int = 500) -> dict[str, Any]:
@@ -1350,20 +1798,26 @@ def job_episode_result(job: dict[str, Any], include_findings: bool = False) -> d
                 "SELECT COUNT(*) FROM findings WHERE episode_path = ? AND status != ?",
                 (episode_path, "pass"),
             )
-            result["top_issues"] = [
-                {"check_name": str(name), "count": int(count)}
-                for name, count in conn.execute(
-                    """
-                    SELECT check_name, COUNT(*) AS count
-                    FROM findings
-                    WHERE episode_path = ? AND status != ?
-                    GROUP BY check_name
-                    ORDER BY count DESC, check_name
-                    LIMIT 10
-                    """,
-                    (episode_path, "pass"),
-                )
-            ]
+            top_issue_groups: dict[str, dict[str, Any]] = {}
+            for check_name, details_raw in conn.execute(
+                """
+                SELECT check_name, details
+                FROM findings
+                WHERE episode_path = ? AND status != ?
+                ORDER BY id
+                """,
+                (episode_path, "pass"),
+            ):
+                name = str(check_name)
+                group = top_issue_groups.setdefault(name, {"check_name": name, "count": 0, "fields": []})
+                group["count"] += 1
+                for field in finding_detail_fields(json_value(details_raw, {})):
+                    if field not in group["fields"]:
+                        group["fields"].append(field)
+            result["top_issues"] = sorted(
+                top_issue_groups.values(),
+                key=lambda item: (-int(item["count"]), str(item["check_name"])),
+            )[:10]
             if include_findings:
                 findings = conn.execute(
                     """
@@ -1758,6 +2212,21 @@ def json_value(raw: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def finding_detail_fields(details: Any) -> list[str]:
+    if not isinstance(details, dict):
+        return []
+    fields: list[str] = []
+    for key in ("modality", "field", "sensor", "channel"):
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            fields.append(value)
+    for key in ("modalities", "fields", "sensors", "channels"):
+        value = details.get(key)
+        if isinstance(value, list):
+            fields.extend(str(item) for item in value if str(item))
+    return fields
+
+
 def write_run_script(path: Path, command: list[str], log_path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -1787,13 +2256,16 @@ def start_tmux(session: str, command: str) -> None:
 def tmux_session_running(session: str) -> bool:
     if not session:
         return False
-    completed = subprocess.run(
-        ["tmux", "has-session", "-t", session],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return completed.returncode == 0
+    try:
+        completed = subprocess.run(
+            ["tmux", "has-session", "-t", session],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return completed.returncode == 0
+    except FileNotFoundError:
+        return False
 
 
 def normalize_verified_path(raw: str, verified_root: Path) -> str:
@@ -1808,6 +2280,23 @@ def normalize_verified_path(raw: str, verified_root: Path) -> str:
     if value.startswith("/mnt/nas/database/verified"):
         return str(Path(value).resolve(strict=False))
     raise ValueError("root_path must be under /mnt/nas/database/verified or /database/verified")
+
+
+def nas_internal_verified_path(raw: str, verified_root: Path) -> str:
+    value = raw.strip()
+    if not value:
+        return value
+    prefixes = {
+        "/volume1/database/verified",
+        "/database/verified",
+        "/mnt/nas/database/verified",
+        str(verified_root),
+    }
+    for prefix in sorted((item.rstrip("/") for item in prefixes if item), key=len, reverse=True):
+        if value == prefix or value.startswith(prefix + "/"):
+            rel = value[len(prefix) :].lstrip("/")
+            return "/database/verified" + (f"/{rel}" if rel else "")
+    return value
 
 
 def validate_phases(value: str) -> str:
@@ -1889,7 +2378,25 @@ def directory_size(path: Path, max_files: int | None = None) -> str:
     return human_bytes(total)
 
 
-def disk_payload(usage: Any | None) -> dict[str, Any]:
+def issue_translations() -> dict[str, str]:
+    global _ISSUE_TRANSLATIONS_CACHE
+    if _ISSUE_TRANSLATIONS_CACHE is not None:
+        return _ISSUE_TRANSLATIONS_CACHE
+    try:
+        raw = json.loads(ISSUE_TRANSLATIONS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Warning: could not load issue translations from {ISSUE_TRANSLATIONS_PATH}: {exc}", flush=True)
+        _ISSUE_TRANSLATIONS_CACHE = {}
+        return _ISSUE_TRANSLATIONS_CACHE
+    if not isinstance(raw, dict):
+        print(f"Warning: issue translations file must contain a JSON object: {ISSUE_TRANSLATIONS_PATH}", flush=True)
+        _ISSUE_TRANSLATIONS_CACHE = {}
+        return _ISSUE_TRANSLATIONS_CACHE
+    _ISSUE_TRANSLATIONS_CACHE = {str(key): str(value) for key, value in raw.items()}
+    return _ISSUE_TRANSLATIONS_CACHE
+
+
+def disk_payload(usage: shutil._ntuple_diskusage | None) -> dict[str, Any]:
     if usage is None:
         return {}
     return {
@@ -1923,15 +2430,7 @@ def discovered_run_id(output_dir: Path) -> str:
             return run_dir.name
     except OSError:
         pass
-    for root in (PROJECT_ROOT / "outputs", REPO_ROOT / "outputs", PROJECT_ROOT):
-        try:
-            relative = str(output_dir.relative_to(root)).replace("/", "-")
-            if relative in {"", "."}:
-                return sanitize_id(f"{root.parent.name}-{root.name}")
-            return sanitize_id(relative)
-        except ValueError:
-            continue
-    return sanitize_id(output_dir.name)
+    return sanitize_id(str(output_dir.relative_to(PROJECT_ROOT / "outputs")).replace("/", "-"))
 
 
 def now_iso() -> str:
@@ -1954,6 +2453,7 @@ def human_bytes(value: int) -> str:
 
 def render_index_html(state: DashboardState) -> str:
     refresh = int(state.refresh_seconds * 1000)
+    issue_translations_json = json.dumps(issue_translations(), ensure_ascii=False, sort_keys=True)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2006,6 +2506,11 @@ def render_index_html(state: DashboardState) -> str:
     table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
     th, td {{ border-bottom: 1px solid var(--line); padding: 7px 6px; text-align: left; vertical-align: top; }}
     th {{ color: var(--muted); font-weight: 600; }}
+    .table-scroll {{ max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+    .table-scroll table {{ min-width: 760px; }}
+    .table-scroll.wide table {{ min-width: 1040px; }}
+    .task-cell {{ max-width: 150px; width: 150px; white-space: normal; overflow-wrap: normal; word-break: normal; }}
+    .numeric-cell {{ text-align: right; font-variant-numeric: tabular-nums; }}
     tr.run-row {{ cursor: pointer; }}
     tr.run-row:hover {{ background: #f1f5f9; }}
     .link-btn {{ height: 28px; padding: 0 7px; font-size: 12px; }}
@@ -2013,6 +2518,39 @@ def render_index_html(state: DashboardState) -> str:
     .status-fail, .status-failed {{ color: var(--danger); font-weight: 700; }}
     .status-running {{ color: var(--accent); font-weight: 700; }}
     .status-warning, .status-pending {{ color: var(--warn); font-weight: 700; }}
+    .issue-summary {{ min-width: 260px; max-width: 720px; white-space: normal; }}
+    .issue-summary-line {{ line-height: 1.35; overflow-wrap: anywhere; word-break: break-word; }}
+    .issue-summary-head {{ white-space: nowrap; }}
+    .issue-summary-empty {{ color: var(--muted); }}
+    .issue-check-name {{ cursor: help; text-decoration: underline dotted var(--muted); text-underline-offset: 2px; }}
+    .path-field {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+    .copy-path-btn {{ height: 26px; padding: 0 8px; font-size: 12px; }}
+    .issues-section {{ padding: 12px; }}
+    .issues-section h2 {{ margin-bottom: 10px; }}
+    .failure-warning-panel {{ border: 1px solid #f59e0b; border-radius: 6px; background: #fffbeb; padding: 10px; }}
+    .failure-warning-title {{ font-weight: 700; color: #92400e; margin-bottom: 8px; }}
+    .failure-warning-list {{ max-height: 260px; overflow-y: auto; padding-right: 4px; }}
+    .failure-warning-empty {{ color: var(--muted); }}
+    .failure-warning-item {{ padding: 8px 0; border-top: 1px solid #fde68a; }}
+    .failure-warning-item:first-child {{ border-top: 0; padding-top: 0; }}
+    .failure-warning-task {{ font-weight: 700; overflow-wrap: anywhere; }}
+    .failure-warning-meta {{ color: var(--muted); font-size: 12px; margin-top: 2px; }}
+    .failure-warning-range {{ color: #92400e; font-size: 12px; margin-top: 3px; }}
+    .failure-warning-issues {{ color: var(--muted); font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }}
+    .resolve-streak-btn {{ height: 26px; padding: 0 8px; font-size: 12px; margin-top: 6px; }}
+    .resolve-streak-btn.confirm {{ background: #f59e0b; border-color: #d97706; color: #fff; }}
+    .report-preview {{ max-height: 460px; overflow: auto; white-space: pre-wrap; }}
+    .failure-warning-more {{ color: var(--muted); font-size: 12px; padding-top: 8px; border-top: 1px solid #fde68a; }}
+    .event-summary-section {{ margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }}
+    .event-summary-overview {{ margin-top: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; }}
+    .severity-text {{ font-weight: 700; }}
+    .severity-text.status-critical, .severity-text.status-fatal {{ color: var(--danger); }}
+    .severity-text.status-major, .severity-text.status-fail, .severity-text.status-high {{ color: var(--warn); }}
+    .severity-text.status-minor, .severity-text.status-warning, .severity-text.status-medium {{ color: var(--accent); }}
+    #checkNameTooltip {{ position: fixed; z-index: 50; display: none; max-width: 340px; padding: 7px 9px; border-radius: 5px; background: #101828; color: #fff; font-size: 12px; line-height: 1.4; box-shadow: 0 8px 20px rgba(15, 23, 42, 0.25); pointer-events: none; }}
+    th.sortable {{ cursor: pointer; user-select: none; white-space: nowrap; }}
+    th.sortable:hover {{ color: var(--text); }}
+    .sort-arrow {{ display: inline-block; width: 1em; margin-left: 3px; color: var(--accent); }}
     pre {{ background: #101828; color: #e5e7eb; padding: 12px; border-radius: 6px; overflow: auto; max-height: 360px; }}
     .two {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
     .modal-backdrop {{ position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); display: none; align-items: center; justify-content: center; padding: 24px; z-index: 20; }}
@@ -2021,7 +2559,6 @@ def render_index_html(state: DashboardState) -> str:
     .modal.wide {{ width: min(1280px, 96vw); }}
     .modal-header {{ position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
     .modal-body {{ padding: 12px; }}
-    .report-preview {{ max-height: 460px; overflow: auto; white-space: pre-wrap; }}
     @media (max-width: 1000px) {{ main {{ grid-template-columns: 1fr; }} aside {{ border-right: 0; border-bottom: 1px solid var(--line); }} .grid, .two, .summary-card {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
@@ -2032,6 +2569,13 @@ def render_index_html(state: DashboardState) -> str:
 </header>
 <main>
   <aside>
+    <div class="panel issues-section">
+      <h2>Issues</h2>
+      <div class="failure-warning-panel">
+        <div id="consecutiveFailureTitle" class="failure-warning-title">⚠️ 0 个组合连续失败</div>
+        <div id="consecutiveFailureBody" class="failure-warning-list failure-warning-empty">暂无问题</div>
+      </div>
+    </div>
     <div class="panel">
       <h2>Start Run</h2>
       <label>Mode</label>
@@ -2134,14 +2678,26 @@ def render_index_html(state: DashboardState) -> str:
         <h2>Event Issue Episodes</h2>
         <span class="muted">episodes with non-pass findings from event listener</span>
       </div>
-      <table>
-        <thead><tr><th>ID</th><th>Status</th><th>QA</th><th>Task</th><th>Robot</th><th>Episode</th><th>Issues</th><th>Updated</th><th></th></tr></thead>
-        <tbody id="eventJobsBody"></tbody>
-      </table>
+      <div class="table-scroll wide">
+        <table>
+          <thead><tr>
+            <th class="sortable" onclick="setEventJobsSort('id')">ID<span id="eventSort-id" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('status')">Status<span id="eventSort-status" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('qa')">QA<span id="eventSort-qa" class="sort-arrow"></span></th>
+            <th class="sortable task-cell" onclick="setEventJobsSort('task')">Task<span id="eventSort-task" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('robot')">Robot<span id="eventSort-robot" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('episode')">Episode<span id="eventSort-episode" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('issues')">Issues<span id="eventSort-issues" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventJobsSort('updated')">Updated<span id="eventSort-updated" class="sort-arrow"></span></th>
+            <th></th>
+          </tr></thead>
+          <tbody id="eventJobsBody"></tbody>
+        </table>
+      </div>
     </div>
     <div class="panel">
       <h2>Runs</h2>
-      <table><thead><tr><th>Run</th><th>Mode</th><th>Status</th><th>Episodes</th><th>Issues</th><th>Updated</th><th></th></tr></thead><tbody id="runsBody"></tbody></table>
+      <div class="table-scroll"><table><thead><tr><th>Run</th><th>Mode</th><th>Status</th><th>Episodes</th><th>Issues</th><th>Updated</th><th></th></tr></thead><tbody id="runsBody"></tbody></table></div>
     </div>
     <div class="panel">
       <h2>Run Detail</h2>
@@ -2149,7 +2705,7 @@ def render_index_html(state: DashboardState) -> str:
     </div>
     <div class="panel">
       <h2>Server Processes</h2>
-      <table><thead><tr><th>PID</th><th>CPU</th><th>Mem</th><th>RSS MB</th><th>Command</th></tr></thead><tbody id="procBody"></tbody></table>
+      <div class="table-scroll"><table><thead><tr><th>PID</th><th>CPU</th><th>Mem</th><th>RSS MB</th><th>Command</th></tr></thead><tbody id="procBody"></tbody></table></div>
     </div>
     <div class="panel">
       <h2>Log</h2>
@@ -2176,27 +2732,53 @@ def render_index_html(state: DashboardState) -> str:
       <button onclick="closeEventSummaryModal()" class="link-btn">Close</button>
     </div>
     <div class="modal-body">
-      <div id="eventSummaryModalSeverity" class="severity-strip" style="margin-bottom:12px"></div>
-      <h3>By Task, Device, Collector</h3>
-      <table>
-        <thead><tr><th>Task</th><th>Device</th><th>Collector</th><th>Episodes</th><th>Findings</th><th>Severity</th><th>Top Issues</th></tr></thead>
-        <tbody id="eventContextSummaryBody"></tbody>
-      </table>
-      <h3>By Issue Type</h3>
-      <table>
-        <thead><tr><th>Issue</th><th>Severity</th><th>Findings</th><th>Episodes</th><th>Task/device/collector groups</th></tr></thead>
-        <tbody id="eventIssueSummaryBody"></tbody>
-      </table>
+      <div id="eventSummaryModalSeverity" class="severity-strip event-summary-overview"></div>
+      <div class="event-summary-section">
+        <h3>By Task, Device, Collector</h3>
+        <div class="table-scroll wide"><table>
+          <thead><tr>
+            <th class="sortable task-cell" onclick="setEventContextSummarySort('task')">Task<span id="eventContextSort-task" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventContextSummarySort('robot')">Device<span id="eventContextSort-robot" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventContextSummarySort('operator')">Collector<span id="eventContextSort-operator" class="sort-arrow"></span></th>
+            <th class="sortable numeric-cell" onclick="setEventContextSummarySort('episodes')">Episodes<span id="eventContextSort-episodes" class="sort-arrow"></span></th>
+            <th class="sortable numeric-cell" onclick="setEventContextSummarySort('findings')">Findings<span id="eventContextSort-findings" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventContextSummarySort('severity')">Severity<span id="eventContextSort-severity" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventContextSummarySort('issues')">Top Issues<span id="eventContextSort-issues" class="sort-arrow"></span></th>
+          </tr></thead>
+          <tbody id="eventContextSummaryBody"></tbody>
+        </table></div>
+      </div>
+      <div class="event-summary-section">
+        <h3>By Issue Type</h3>
+        <div class="table-scroll"><table>
+          <thead><tr>
+            <th class="sortable" onclick="setEventIssueSummarySort('issue')">Issue<span id="eventIssueSort-issue" class="sort-arrow"></span></th>
+            <th class="sortable" onclick="setEventIssueSummarySort('severity')">Severity<span id="eventIssueSort-severity" class="sort-arrow"></span></th>
+            <th class="sortable numeric-cell" onclick="setEventIssueSummarySort('findings')">Findings<span id="eventIssueSort-findings" class="sort-arrow"></span></th>
+            <th class="sortable numeric-cell" onclick="setEventIssueSummarySort('episodes')">Episodes<span id="eventIssueSort-episodes" class="sort-arrow"></span></th>
+            <th class="sortable numeric-cell" onclick="setEventIssueSummarySort('contexts')">Task/device/collector groups<span id="eventIssueSort-contexts" class="sort-arrow"></span></th>
+          </tr></thead>
+          <tbody id="eventIssueSummaryBody"></tbody>
+        </table></div>
+      </div>
     </div>
   </div>
 </div>
+<div id="checkNameTooltip" role="tooltip"></div>
 <script>
 const refreshMs = {refresh};
 let selectedRun = null;
 let selectedEventJob = null;
+let eventJobsSort = {{key: 'id', direction: 'asc'}};
+let eventJobsCache = [];
+let eventIssueSummaryCache = {{}};
+let eventContextSummarySort = {{key: null, direction: 'asc'}};
+let eventIssueSummarySort = {{key: null, direction: 'asc'}};
 let refreshInFlight = false;
 let lastHeavyRefresh = 0;
 let eventSettingsInitialized = false;
+let pendingResolveButton = null;
+let pendingResolveTimer = null;
 
 async function getJson(url) {{
   const r = await fetch(url, {{cache: 'no-store'}});
@@ -2216,40 +2798,64 @@ function esc(s) {{
   return String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
 }}
 
+async function copyEventPath(button) {{
+  const text = button.dataset.copyPath || '';
+  const original = button.textContent;
+  try {{
+    await navigator.clipboard.writeText(text);
+    button.textContent = '已复制';
+  }} catch (error) {{
+    button.textContent = '复制失败';
+  }}
+  window.setTimeout(() => {{
+    button.textContent = original;
+  }}, 1500);
+}}
+
+function localTimestamp(value) {{
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const pad = number => String(number).padStart(2, '0');
+  return `${{date.getFullYear()}}-${{pad(date.getMonth() + 1)}}-${{pad(date.getDate())}} ` +
+    `${{pad(date.getHours())}}:${{pad(date.getMinutes())}}:${{pad(date.getSeconds())}}`;
+}}
+
 async function refresh() {{
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {{
-  const data = await getJson('/api/status');
-  document.getElementById('clock').textContent = data.generated_at || '';
-  document.getElementById('load1').textContent = Number(val(data,'server.load.1m',0)).toFixed(2);
-  document.getElementById('memUsed').textContent =
-    val(data,'server.memory.used_gb','-') + ' / ' + val(data,'server.memory.total_gb','-') + ' GB';
-  document.getElementById('memAvail').textContent =
-    'remaining ' + val(data,'server.memory.available_gb','-') + ' GB, swap used ' + val(data,'server.memory.swap_used_gb','-') + ' GB';
-  document.getElementById('eventPending').textContent = val(data,'event_listener.counts.pending',0);
-  document.getElementById('eventDone').textContent = val(data,'event_listener.counts.done',0);
-  const settings = val(data, 'event_listener.settings', {{}});
-  applyEventSettings(settings);
-  document.getElementById('eventBox').innerHTML =
-    '<div>tmux: <b>' + (val(data,'event_listener.tmux_running',false) ? 'running' : 'stopped') + '</b></div>' +
-    '<div>running: ' + val(data,'event_listener.counts.running',0) + '</div>' +
-    '<div>pending: ' + val(data,'event_listener.counts.pending',0) + '</div>' +
-    '<div>workers: ' + esc(settings.workers || '-') + ', batch: ' + esc(settings.batch_size || '-') + ', phases: ' + esc(settings.phases || '-') + '</div>' +
-    '<div>date filter: exact ' + esc(settings.event_date || '-') + ', from ' + esc(settings.event_date_from || '-') + ', to ' + esc(settings.event_date_to || '-') + '</div>' +
-    '<div>guard: max load ratio ' + esc(settings.max_load_ratio || '-') + ', min free mem ' + esc(settings.min_free_mem_gb || '-') + ' GB</div>' +
-    '<div>output: ' + val(data,'event_listener.output_size','-') + '</div>' +
-    '<div class="muted">Changing these values requires Restart if the listener is already running.</div>';
-  renderRuns(data.runs || []);
-  const now = Date.now();
-  if (now - lastHeavyRefresh > Math.max(30000, refreshMs * 4)) {{
-    lastHeavyRefresh = now;
-    await refreshEventIssueSummary();
-  }}
-  await refreshEventJobs();
-  renderProcesses(val(data,'server.top_processes',[]));
-  if (selectedRun) await loadLog(selectedRun);
-  else await loadLog('event_listener');
+    const data = await getJson('/api/status');
+    document.getElementById('clock').textContent = localTimestamp(data.generated_at);
+    renderConsecutiveFailures(data.consecutive_failures || {{}});
+    document.getElementById('load1').textContent = Number(val(data,'server.load.1m',0)).toFixed(2);
+    document.getElementById('memUsed').textContent =
+      val(data,'server.memory.used_gb','-') + ' / ' + val(data,'server.memory.total_gb','-') + ' GB';
+    document.getElementById('memAvail').textContent =
+      'remaining ' + val(data,'server.memory.available_gb','-') + ' GB, swap used ' + val(data,'server.memory.swap_used_gb','-') + ' GB';
+    document.getElementById('eventPending').textContent = val(data,'event_listener.counts.pending',0);
+    document.getElementById('eventDone').textContent = val(data,'event_listener.counts.done',0);
+    const settings = val(data, 'event_listener.settings', {{}});
+    applyEventSettings(settings);
+    document.getElementById('eventBox').innerHTML =
+      '<div>tmux: <b>' + (val(data,'event_listener.tmux_running',false) ? 'running' : 'stopped') + '</b></div>' +
+      '<div>running: ' + val(data,'event_listener.counts.running',0) + '</div>' +
+      '<div>pending: ' + val(data,'event_listener.counts.pending',0) + '</div>' +
+      '<div>workers: ' + esc(settings.workers || '-') + ', batch: ' + esc(settings.batch_size || '-') + ', phases: ' + esc(settings.phases || '-') + '</div>' +
+      '<div>date filter: exact ' + esc(settings.event_date || '-') + ', from ' + esc(settings.event_date_from || '-') + ', to ' + esc(settings.event_date_to || '-') + '</div>' +
+      '<div>guard: max load ratio ' + esc(settings.max_load_ratio || '-') + ', min free mem ' + esc(settings.min_free_mem_gb || '-') + ' GB</div>' +
+      '<div>output: ' + val(data,'event_listener.output_size','-') + '</div>' +
+      '<div class="muted">Changing these values requires Restart if the listener is already running.</div>';
+    renderRuns(data.runs || []);
+    const now = Date.now();
+    if (now - lastHeavyRefresh > Math.max(30000, refreshMs * 4)) {{
+      lastHeavyRefresh = now;
+      await refreshEventIssueSummary();
+    }}
+    await refreshEventJobs();
+    renderProcesses(val(data,'server.top_processes',[]));
+    if (selectedRun) await loadLog(selectedRun);
+    else await loadLog('event_listener');
   }} catch (err) {{
     document.getElementById('clock').textContent = 'dashboard refresh failed: ' + err;
   }} finally {{
@@ -2273,10 +2879,77 @@ function applyEventSettings(settings) {{
     eventStabilityTimeout: settings.stability_timeout
   }};
   for (const [id, value] of Object.entries(mapping)) {{
-    if (value !== undefined && value !== null && value !== '') document.getElementById(id).value = value;
+    const el = document.getElementById(id);
+    if (el && value !== undefined && value !== null && value !== '') el.value = value;
   }}
   eventSettingsInitialized = true;
 }}
+
+function renderConsecutiveFailures(summary) {{
+  const warnings = summary.warnings || [];
+  document.getElementById('consecutiveFailureTitle').textContent =
+    `⚠️ ${{summary.count || warnings.length || 0}} 个组合连续失败`;
+  const body = document.getElementById('consecutiveFailureBody');
+  if (!warnings.length) {{
+    body.className = 'failure-warning-list failure-warning-empty';
+    body.textContent = '暂无连续失败组合';
+    return;
+  }}
+  body.className = 'failure-warning-list';
+  body.innerHTML = warnings.map(item => {{
+    const operator = item.operator ? ` · ${{esc(item.operator)}}` : '';
+    const issueTypes = (item.issue_types || []).join(', ');
+    return `<div class="failure-warning-item">
+      <div class="failure-warning-task">${{esc(item.task || '-')}}</div>
+      <div class="failure-warning-meta">${{esc(item.robot || '-')}}${{operator}}</div>
+      <div class="failure-warning-range">${{esc(item.message || '')}}</div>
+      <div class="failure-warning-issues">${{esc(issueTypes || 'issue types unavailable')}}</div>
+      <button class="resolve-streak-btn"
+        data-task="${{esc(item.task || '')}}"
+        data-robot="${{esc(item.robot || '')}}"
+        data-operator="${{esc(item.operator || '')}}"
+        data-episode-start="${{item.start_episode_number}}"
+        data-episode-end="${{item.end_episode_number}}"
+        onclick="resolveConsecutiveFailureClick(event, this)">标记已解决</button>
+    </div>`;
+  }}).join('') + (summary.hidden_count ? `<div class="failure-warning-more">+${{summary.hidden_count}} more</div>` : '');
+}}
+
+function resetPendingResolveButton() {{
+  if (pendingResolveTimer) window.clearTimeout(pendingResolveTimer);
+  pendingResolveTimer = null;
+  if (pendingResolveButton) {{
+    pendingResolveButton.classList.remove('confirm');
+    pendingResolveButton.textContent = '标记已解决';
+  }}
+  pendingResolveButton = null;
+}}
+
+async function resolveConsecutiveFailureClick(event, button) {{
+  event.stopPropagation();
+  if (pendingResolveButton !== button) {{
+    resetPendingResolveButton();
+    pendingResolveButton = button;
+    button.classList.add('confirm');
+    button.textContent = '确认解决？';
+    pendingResolveTimer = window.setTimeout(resetPendingResolveButton, 3000);
+    return;
+  }}
+  const payload = {{
+    task: button.dataset.task || '',
+    robot: button.dataset.robot || '',
+    operator: button.dataset.operator || '',
+    episode_start: Number(button.dataset.episodeStart || 0),
+    episode_end: Number(button.dataset.episodeEnd || 0),
+  }};
+  resetPendingResolveButton();
+  const data = await postJson('/api/consecutive-failures/resolve', payload);
+  renderConsecutiveFailures(data.consecutive_failures || {{}});
+}}
+
+document.addEventListener('click', event => {{
+  if (!event.target.closest || !event.target.closest('.resolve-streak-btn')) resetPendingResolveButton();
+}});
 
 function renderRuns(runs) {{
   const body = document.getElementById('runsBody');
@@ -2286,7 +2959,7 @@ function renderRuns(runs) {{
       <td>${{run.run_id}}</td><td>${{run.mode || ''}}</td>
       <td class="${{cls(run.status || val(run,'live_status.status',''))}}">${{run.status || val(run,'live_status.status','')}}</td>
       <td>${{run.episode_count || 0}}</td><td>${{run.finding_count || 0}}</td>
-      <td>${{run.updated_at || ''}}</td>
+      <td>${{localTimestamp(run.updated_at)}}</td>
       <td><button onclick="event.stopPropagation(); stopRun('${{run.run_id}}')">Stop</button></td>
     </tr>`;
   }}).join('');
@@ -2294,7 +2967,8 @@ function renderRuns(runs) {{
 
 async function refreshEventJobs() {{
   const data = await getJson('/api/event-listener/jobs?limit=120&issues_only=1');
-  renderEventJobs(data.jobs || []);
+  eventJobsCache = data.jobs || [];
+  renderEventJobs(eventJobsCache);
 }}
 
 async function refreshEventIssueSummary() {{
@@ -2313,6 +2987,216 @@ function severityBadge(name, count) {{
   return `<span class="severity-chip ${{cls(name)}}">${{esc(name)}} ${{count}}</span>`;
 }}
 
+const CHECK_NAME_TOOLTIPS = {issue_translations_json};
+let checkNameTooltipTimer = null;
+
+function checkNameTooltipHtml(checkName) {{
+  const name = String(checkName || '');
+  const tooltip = CHECK_NAME_TOOLTIPS[name] || '暂无说明';
+  return `<span class="issue-check-name" data-tooltip="${{esc(tooltip)}}">${{esc(name)}}</span>`;
+}}
+
+function wrapTaskTextHtml(value) {{
+  return esc(value || '').replace(/([_/-])/g, '$1<wbr>');
+}}
+
+function hideCheckNameTooltip() {{
+  if (checkNameTooltipTimer) {{
+    clearTimeout(checkNameTooltipTimer);
+    checkNameTooltipTimer = null;
+  }}
+  const tooltip = document.getElementById('checkNameTooltip');
+  if (tooltip) tooltip.style.display = 'none';
+}}
+
+function positionCheckNameTooltip(target, tooltip) {{
+  const rect = target.getBoundingClientRect();
+  tooltip.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - tooltip.offsetWidth - 12)) + 'px';
+  tooltip.style.top = Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - tooltip.offsetHeight - 12)) + 'px';
+}}
+
+function showCheckNameTooltip(target) {{
+  hideCheckNameTooltip();
+  checkNameTooltipTimer = setTimeout(() => {{
+    const tooltip = document.getElementById('checkNameTooltip');
+    if (!tooltip) return;
+    tooltip.textContent = target.dataset.tooltip || '暂无说明';
+    tooltip.style.display = 'block';
+    positionCheckNameTooltip(target, tooltip);
+  }}, 120);
+}}
+
+function eventIssueSummaryHtml(job) {{
+  const issues = job.top_issues || [];
+  if (!issues.length) {{
+    return `<div class="issue-summary issue-summary-empty">${{job.issue_count || 0}}</div>`;
+  }}
+  const issueText = issues.map(issue =>
+    `<span class="issue-summary-head">${{checkNameTooltipHtml(issue.check_name)}} (${{issue.count || 0}})</span>`
+  ).join(', ');
+  return `<div class="issue-summary">${{job.issue_count || 0}}: ${{issueText}}</div>`;
+}}
+
+function findingDetailFields(details) {{
+  if (!details || typeof details !== 'object') return [];
+  const fields = [];
+  ['modality', 'field', 'sensor', 'channel'].forEach(key => {{
+    const value = details[key];
+    if (typeof value === 'string' && value) fields.push(value);
+  }});
+  ['modalities', 'fields', 'sensors', 'channels'].forEach(key => {{
+    const value = details[key];
+    if (Array.isArray(value)) value.forEach(item => {{
+      if (item !== null && item !== undefined && String(item)) fields.push(String(item));
+    }});
+  }});
+  return [...new Set(fields)];
+}}
+
+function findingMessageHtml(finding) {{
+  const fields = findingDetailFields(finding.details);
+  const prefix = fields.length ? `[${{fields.map(field => esc(field)).join(', ')}}] ` : '';
+  return prefix + esc(finding.message || '');
+}}
+
+function eventJobSortValue(job, key) {{
+  if (key === 'id') return Number(job.id || 0);
+  if (key === 'issues') return Number(job.issue_count || 0);
+  if (key === 'updated') {{
+    const timestamp = Date.parse(job.updated_at || '');
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  }}
+  if (key === 'qa') return String(job.final_status || (job.status === 'done' ? 'complete' : '') || '').toLowerCase();
+  if (key === 'episode') return String(job.episode_name || '').toLowerCase();
+  return String(job[key] || '').toLowerCase();
+}}
+
+function compareEventJobs(left, right) {{
+  const leftValue = eventJobSortValue(left, eventJobsSort.key);
+  const rightValue = eventJobSortValue(right, eventJobsSort.key);
+  let result = 0;
+  if (typeof leftValue === 'number' && typeof rightValue === 'number') {{
+    result = leftValue - rightValue;
+  }} else {{
+    result = String(leftValue).localeCompare(String(rightValue), undefined, {{numeric: true, sensitivity: 'base'}});
+  }}
+  if (result === 0) result = Number(left.id || 0) - Number(right.id || 0);
+  return eventJobsSort.direction === 'asc' ? result : -result;
+}}
+
+function setEventJobsSort(key) {{
+  if (eventJobsSort.key === key) {{
+    eventJobsSort.direction = eventJobsSort.direction === 'asc' ? 'desc' : 'asc';
+  }} else {{
+    eventJobsSort = {{key, direction: 'asc'}};
+  }}
+  renderEventJobs(eventJobsCache);
+}}
+
+function updateEventJobsSortIndicators() {{
+  ['id', 'status', 'qa', 'task', 'robot', 'episode', 'issues', 'updated'].forEach(key => {{
+    const marker = document.getElementById('eventSort-' + key);
+    if (marker) marker.textContent = eventJobsSort.key === key ? (eventJobsSort.direction === 'asc' ? '▲' : '▼') : '';
+  }});
+}}
+
+function severitySortRank(severity) {{
+  const ranks = {{
+    critical: 6,
+    fatal: 6,
+    fail: 5,
+    major: 5,
+    high: 5,
+    warning: 4,
+    minor: 4,
+    medium: 4,
+    low: 3,
+    info: 2,
+    pass: 2,
+    unknown: 1
+  }};
+  return ranks[String(severity || '').toLowerCase()] || 1;
+}}
+
+function maxSeveritySortRank(counts) {{
+  return Math.max(0, ...Object.keys(counts || {{}}).map(severitySortRank));
+}}
+
+function topIssuesSortText(issues) {{
+  return (issues || []).map(issue => `${{issue.check_name || ''}}(${{issue.count || 0}})`).join(', ').toLowerCase();
+}}
+
+function compareSummaryValues(leftValue, rightValue) {{
+  if (typeof leftValue === 'number' && typeof rightValue === 'number') {{
+    return leftValue - rightValue;
+  }}
+  return String(leftValue).localeCompare(String(rightValue), undefined, {{numeric: true, sensitivity: 'base'}});
+}}
+
+function eventContextSummarySortValue(row, key) {{
+  if (key === 'episodes') return Number(row.episode_count || 0);
+  if (key === 'findings') return Number(row.finding_count || 0);
+  if (key === 'severity') return maxSeveritySortRank(row.severity_counts);
+  if (key === 'issues') return topIssuesSortText(row.top_issues);
+  return String(row[key] || '').toLowerCase();
+}}
+
+function eventIssueSummarySortValue(row, key) {{
+  if (key === 'findings') return Number(row.finding_count || 0);
+  if (key === 'episodes') return Number(row.episode_count || 0);
+  if (key === 'contexts') return Number(row.context_count || 0);
+  if (key === 'severity') return severitySortRank(row.severity);
+  if (key === 'issue') return String(row.check_name || '').toLowerCase();
+  return String(row[key] || '').toLowerCase();
+}}
+
+function compareEventContextSummaryRows(left, right) {{
+  if (!eventContextSummarySort.key) return 0;
+  const result = compareSummaryValues(
+    eventContextSummarySortValue(left, eventContextSummarySort.key),
+    eventContextSummarySortValue(right, eventContextSummarySort.key)
+  );
+  return eventContextSummarySort.direction === 'asc' ? result : -result;
+}}
+
+function compareEventIssueSummaryRows(left, right) {{
+  if (!eventIssueSummarySort.key) return 0;
+  const result = compareSummaryValues(
+    eventIssueSummarySortValue(left, eventIssueSummarySort.key),
+    eventIssueSummarySortValue(right, eventIssueSummarySort.key)
+  );
+  return eventIssueSummarySort.direction === 'asc' ? result : -result;
+}}
+
+function setEventContextSummarySort(key) {{
+  if (eventContextSummarySort.key === key) {{
+    eventContextSummarySort.direction = eventContextSummarySort.direction === 'asc' ? 'desc' : 'asc';
+  }} else {{
+    eventContextSummarySort = {{key, direction: 'asc'}};
+  }}
+  renderEventSummaryTables(eventIssueSummaryCache);
+}}
+
+function setEventIssueSummarySort(key) {{
+  if (eventIssueSummarySort.key === key) {{
+    eventIssueSummarySort.direction = eventIssueSummarySort.direction === 'asc' ? 'desc' : 'asc';
+  }} else {{
+    eventIssueSummarySort = {{key, direction: 'asc'}};
+  }}
+  renderEventSummaryTables(eventIssueSummaryCache);
+}}
+
+function updateEventSummarySortIndicators() {{
+  ['task', 'robot', 'operator', 'episodes', 'findings', 'severity', 'issues'].forEach(key => {{
+    const marker = document.getElementById('eventContextSort-' + key);
+    if (marker) marker.textContent = eventContextSummarySort.key === key ? (eventContextSummarySort.direction === 'asc' ? '▲' : '▼') : '';
+  }});
+  ['issue', 'severity', 'findings', 'episodes', 'contexts'].forEach(key => {{
+    const marker = document.getElementById('eventIssueSort-' + key);
+    if (marker) marker.textContent = eventIssueSummarySort.key === key ? (eventIssueSummarySort.direction === 'asc' ? '▲' : '▼') : '';
+  }});
+}}
+
 function openEventSummaryModal() {{
   document.getElementById('eventSummaryModal').classList.add('open');
 }}
@@ -2323,6 +3207,7 @@ function closeEventSummaryModal(event) {{
 }}
 
 function renderEventIssueSummary(summary) {{
+  eventIssueSummaryCache = summary || {{}};
   const meta = `${{summary.issue_episode_count || 0}} issue episodes, ${{summary.finding_count || 0}} findings from ${{summary.job_count || 0}} recent jobs`;
   document.getElementById('eventSummaryCount').textContent = summary.issue_episode_count || 0;
   document.getElementById('eventIssueSummaryMeta').textContent = meta;
@@ -2336,25 +3221,30 @@ function renderEventIssueSummary(summary) {{
   document.getElementById('eventSummaryLead').textContent = lead
     ? `Top group: ${{lead.task || '-'}} / ${{lead.robot || '-'}} / ${{lead.operator || '-'}} with ${{lead.finding_count || 0}} findings`
     : 'No grouped issue context available yet.';
-  document.getElementById('eventContextSummaryBody').innerHTML = (summary.by_context || []).map(row => {{
-    const issues = (row.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ');
+  renderEventSummaryTables(summary);
+}}
+
+function renderEventSummaryTables(summary) {{
+  updateEventSummarySortIndicators();
+  document.getElementById('eventContextSummaryBody').innerHTML = [...(summary.by_context || [])].sort(compareEventContextSummaryRows).map(row => {{
+    const issues = (row.top_issues || []).map(i => `${{esc(i.check_name)}} (${{i.count}})`).join(', ');
     return `<tr>
-      <td>${{esc(row.task || '')}}</td>
+      <td class="task-cell">${{wrapTaskTextHtml(row.task || '')}}</td>
       <td>${{esc(row.robot || '')}}</td>
       <td>${{esc(row.operator || '')}}</td>
-      <td>${{row.episode_count || 0}}</td>
-      <td>${{row.finding_count || 0}}</td>
+      <td class="numeric-cell">${{row.episode_count || 0}}</td>
+      <td class="numeric-cell">${{row.finding_count || 0}}</td>
       <td>${{severityText(row.severity_counts)}}</td>
       <td>${{issues || '-'}}</td>
     </tr>`;
   }}).join('');
-  document.getElementById('eventIssueSummaryBody').innerHTML = (summary.by_issue || []).map(row =>
+  document.getElementById('eventIssueSummaryBody').innerHTML = [...(summary.by_issue || [])].sort(compareEventIssueSummaryRows).map(row =>
     `<tr>
       <td>${{esc(row.check_name || '')}}</td>
-      <td class="${{cls(row.severity)}}">${{esc(row.severity || '')}}</td>
-      <td>${{row.finding_count || 0}}</td>
-      <td>${{row.episode_count || 0}}</td>
-      <td>${{row.context_count || 0}}</td>
+      <td class="severity-text ${{cls(row.severity)}}">${{esc(row.severity || '')}}</td>
+      <td class="numeric-cell">${{row.finding_count || 0}}</td>
+      <td class="numeric-cell">${{row.episode_count || 0}}</td>
+      <td class="numeric-cell">${{row.context_count || 0}}</td>
     </tr>`
   ).join('');
 }}
@@ -2396,18 +3286,18 @@ async function generateEventWorkSessionReport() {{
 
 function renderEventJobs(jobs) {{
   const body = document.getElementById('eventJobsBody');
-  body.innerHTML = jobs.map(job => {{
+  updateEventJobsSortIndicators();
+  body.innerHTML = [...jobs].sort(compareEventJobs).map(job => {{
     const qa = job.final_status || (job.status === 'done' ? 'complete' : '');
-    const issues = (job.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ');
     return `<tr>
       <td>${{job.id}}</td>
       <td class="${{cls(job.status)}}">${{esc(job.status)}}</td>
       <td class="${{cls(qa)}}">${{esc(qa || '-')}}</td>
-      <td>${{esc(job.task || '')}}</td>
+      <td class="task-cell">${{wrapTaskTextHtml(job.task || '')}}</td>
       <td>${{esc(job.robot || '')}}</td>
       <td title="${{esc(job.mounted_path || '')}}">${{esc(job.episode_name || '')}}</td>
-      <td>${{job.issue_count || 0}} ${{issues ? '- ' + issues : ''}}</td>
-      <td>${{esc(job.updated_at || '')}}</td>
+      <td>${{eventIssueSummaryHtml(job)}}</td>
+      <td>${{localTimestamp(job.updated_at)}}</td>
       <td><button class="link-btn" onclick="loadEventJob(${{job.id}}, true)">Details</button></td>
     </tr>`;
   }}).join('');
@@ -2424,22 +3314,24 @@ async function loadEventJob(jobId, openModal) {{
   const job = data.job || {{}};
   const findings = job.findings || [];
   const issueRows = findings.length ? findings.map(f =>
-    `<tr><td>${{f.phase}}</td><td>${{esc(f.check_name)}}</td><td>${{esc(f.severity)}}</td><td class="${{cls(f.status)}}">${{esc(f.status)}}</td><td>${{esc(f.message)}}</td></tr>`
+    `<tr><td>${{f.phase}}</td><td>${{esc(f.check_name)}}</td><td>${{esc(f.severity)}}</td><td class="${{cls(f.status)}}">${{esc(f.status)}}</td><td>${{findingMessageHtml(f)}}</td></tr>`
   ).join('') : '<tr><td colspan="5" class="muted">No non-pass findings.</td></tr>';
   const phaseStatus = Object.entries(job.phase_status || {{}}).map(([phase,status]) => `P${{phase}}=${{status}}`).join(', ');
   const topIssues = (job.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ') || 'None';
-  const issueSummary = findings.map(f => `${{esc(f.check_name)}}: ${{esc(f.message)}}`).join('\\n');
+  const issueSummary = findings.map(f => `${{esc(f.check_name)}}: ${{findingMessageHtml(f)}}`).join('\\n');
+  const mountedPath = job.mounted_path || '';
+  const copyPath = job.nas_internal_path || mountedPath;
   document.getElementById('eventJobDetail').innerHTML =
     `<div class="row"><b>Job ${{job.id}}</b><span class="${{cls(job.status)}}">${{esc(job.status)}}</span><span class="${{cls(job.final_status)}}">${{esc(job.final_status || '-')}}</span></div>` +
     `<div><b>Episode:</b> ${{esc(job.episode_name || '')}}</div>` +
-    `<div><b>Path:</b> ${{esc(job.mounted_path || '')}}</div>` +
+    `<div class="path-field"><b>Path:</b><span>${{esc(mountedPath)}}</span><button class="copy-path-btn" data-copy-path="${{esc(copyPath)}}" onclick="copyEventPath(this)">复制路径</button></div>` +
     `<div><b>Task:</b> ${{esc(job.task || '')}} | <b>Robot:</b> ${{esc(job.robot || '')}} | <b>Operator:</b> ${{esc(job.operator || '')}}</div>` +
     `<div><b>Phase status:</b> ${{esc(phaseStatus || '-')}}</div>` +
     `<div><b>Top issues:</b> ${{topIssues}}</div>` +
     `<div><b>Output:</b> ${{esc(job.output_dir || '')}}</div>` +
     `<h3>Issue Summary</h3><pre>${{issueSummary || 'No non-pass findings.'}}</pre>` +
     `<h3>Episode Issues</h3>` +
-    `<table><thead><tr><th>Phase</th><th>Check</th><th>Severity</th><th>Status</th><th>Message</th></tr></thead><tbody>${{issueRows}}</tbody></table>`;
+    `<div class="table-scroll"><table><thead><tr><th>Phase</th><th>Check</th><th>Severity</th><th>Status</th><th>Message</th></tr></thead><tbody>${{issueRows}}</tbody></table></div>`;
   if (openModal) {{
     selectedEventJob = jobId;
     document.getElementById('eventJobModal').classList.add('open');
@@ -2462,7 +3354,7 @@ async function loadRun(runId, select) {{
   const issueEpisodes = run.issue_episodes || [];
   const report = run.latest_work_session_report || {{}};
   const issueEpisodeRows = issueEpisodes.length ? issueEpisodes.map(ep =>
-    `<tr class="run-row"><td>${{esc(ep.episode_name)}}</td><td class="${{cls(ep.final_status)}}">${{esc(ep.final_status)}}</td><td>${{esc(ep.task)}}</td><td>${{esc(ep.robot)}}</td><td>${{ep.issue_count}}</td><td>${{esc((ep.issue_names || []).join(', '))}}</td></tr>`
+    `<tr class="run-row"><td>${{esc(ep.episode_name)}}</td><td class="${{cls(ep.final_status)}}">${{esc(ep.final_status)}}</td><td class="task-cell">${{wrapTaskTextHtml(ep.task)}}</td><td>${{esc(ep.robot)}}</td><td>${{ep.issue_count}}</td><td>${{esc((ep.issue_names || []).join(', '))}}</td></tr>`
   ).join('') : '<tr><td colspan="6" class="muted">No issue episodes in this run.</td></tr>';
   document.getElementById('runDetail').innerHTML =
     `<div class="row"><b>${{run.run_id}}</b><span class="${{cls(run.status)}}">${{run.status}}</span></div>` +
@@ -2485,9 +3377,9 @@ async function loadRun(runId, select) {{
     </div>` +
     renderWorkSessionReport(report) +
     `<h3>Top Issues</h3>` +
-    `<table><tbody>${{(run.top_issues || []).map(i=>`<tr><td>${{i.check_name}}</td><td>${{i.count}}</td></tr>`).join('')}}</tbody></table>` +
+    `<div class="table-scroll"><table><tbody>${{(run.top_issues || []).map(i=>`<tr><td>${{i.check_name}}</td><td>${{i.count}}</td></tr>`).join('')}}</tbody></table></div>` +
     `<h3>Episodes With Issues</h3>` +
-    `<table><thead><tr><th>Episode</th><th>Status</th><th>Task</th><th>Robot</th><th>Issues</th><th>Issue Names</th></tr></thead><tbody>${{issueEpisodeRows}}</tbody></table>`;
+    `<div class="table-scroll wide"><table><thead><tr><th>Episode</th><th>Status</th><th class="task-cell">Task</th><th>Robot</th><th>Issues</th><th>Issue Names</th></tr></thead><tbody>${{issueEpisodeRows}}</tbody></table></div>`;
   await loadLog(runId);
 }}
 
@@ -2572,6 +3464,15 @@ async function eventAction(action) {{
 
 refresh();
 setInterval(refresh, refreshMs);
+document.addEventListener('mouseover', event => {{
+  const target = event.target.closest?.('.issue-check-name');
+  if (target) showCheckNameTooltip(target);
+}});
+document.addEventListener('mouseout', event => {{
+  const target = event.target.closest?.('.issue-check-name');
+  if (target && !target.contains(event.relatedTarget)) hideCheckNameTooltip();
+}});
+document.addEventListener('scroll', hideCheckNameTooltip, true);
 </script>
 </body>
 </html>"""

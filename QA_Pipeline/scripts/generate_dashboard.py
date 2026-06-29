@@ -205,8 +205,10 @@ def _finding_rows(db_path: Path, limit: int | None = None) -> list[dict[str, Any
             params,
         ).fetchall()
     rows = list(reversed(rows)) if limit is not None else rows
-    return [
-        {
+    findings = []
+    for row in rows:
+        details = _json_value(row["details"], {})
+        findings.append({
             "id": row["id"],
             "episode_path": row["episode_path"],
             "episode_name": Path(row["episode_path"]).name,
@@ -220,10 +222,10 @@ def _finding_rows(db_path: Path, limit: int | None = None) -> list[dict[str, Any
             "severity": row["severity"],
             "status": row["status"],
             "message": row["message"],
-            "details": _json_value(row["details"], {}),
-        }
-        for row in rows
-    ]
+            "details": details,
+            "modality": _finding_modality(details),
+        })
+    return findings
 
 
 def _summary_from_db(db_path: Path) -> dict[str, Any]:
@@ -320,14 +322,13 @@ def _issue_counts_by_episode(db_path: Path, episode_paths: list[str]) -> dict[st
 
 
 def _top_issue_names(findings: list[dict[str, Any]], limit: int) -> str:
-    counts = Counter(finding["check_name"] for finding in findings)
-    return "; ".join(name for name, _ in counts.most_common(limit))
+    return _format_issue_summary(findings, limit)
 
 
 def _top_issue_names_by_episode(db_path: Path, episode_paths: list[str], limit: int) -> dict[str, str]:
     if not episode_paths:
         return {}
-    grouped: dict[str, Counter[str]] = defaultdict(Counter)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     chunk_size = 500
     with sqlite3.connect(db_path) as conn:
         for start in range(0, len(episode_paths), chunk_size):
@@ -335,19 +336,56 @@ def _top_issue_names_by_episode(db_path: Path, episode_paths: list[str], limit: 
             placeholders = ",".join("?" for _ in chunk)
             rows = conn.execute(
                 f"""
-                SELECT episode_path, check_name, COUNT(*) AS count
+                SELECT episode_path, check_name, details
                 FROM findings
                 WHERE status != ? AND episode_path IN ({placeholders})
-                GROUP BY episode_path, check_name
+                ORDER BY episode_path, id
                 """,
                 ("pass", *chunk),
             ).fetchall()
-            for episode_path, check_name, count in rows:
-                grouped[episode_path][check_name] = count
+            for episode_path, check_name, details_json in rows:
+                details = _json_value(details_json, {})
+                grouped[episode_path].append({
+                    "check_name": check_name,
+                    "details": details,
+                    "modality": _finding_modality(details),
+                })
     return {
-        episode_path: "; ".join(name for name, _ in counts.most_common(limit))
-        for episode_path, counts in grouped.items()
+        episode_path: _format_issue_summary(findings, limit)
+        for episode_path, findings in grouped.items()
     }
+
+
+def _format_issue_summary(findings: list[dict[str, Any]], limit: int) -> str:
+    counts = Counter(finding["check_name"] for finding in findings)
+    modalities_by_check: dict[str, list[str]] = defaultdict(list)
+    seen_modalities: dict[str, set[str]] = defaultdict(set)
+    for finding in findings:
+        check_name = finding["check_name"]
+        details = finding.get("details", {})
+        modality = finding.get("modality") or _finding_modality(details)
+        if not modality:
+            continue
+        if modality in seen_modalities[check_name]:
+            continue
+        seen_modalities[check_name].add(modality)
+        modalities_by_check[check_name].append(modality)
+
+    parts = []
+    for check_name, count in counts.most_common(limit):
+        part = f"{check_name} ({count})"
+        modalities = modalities_by_check.get(check_name, [])
+        if modalities:
+            part += ": " + ", ".join(modalities)
+        parts.append(part)
+    return "\n".join(parts)
+
+
+def _finding_modality(details: Any) -> str:
+    if not isinstance(details, dict):
+        return ""
+    modality = details.get("modality")
+    return modality if isinstance(modality, str) else ""
 
 
 def _robot_duration_summary(db_path: Path) -> list[dict[str, Any]]:
@@ -543,6 +581,25 @@ def _render_html(payload: dict[str, Any]) -> str:
       border-radius: 8px;
       background: #fff;
     }}
+    .episode-table {{
+      table-layout: fixed;
+      min-width: 1040px;
+    }}
+    .episode-col-status {{ width: 92px; }}
+    .episode-col-episode {{ width: 260px; }}
+    .episode-col-task {{ width: 190px; }}
+    .episode-col-robot {{ width: 105px; }}
+    .episode-col-operator {{ width: 110px; }}
+    .episode-col-issues {{ width: 76px; }}
+    .episode-cell, .task-cell {{
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }}
+    .episode-name {{
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }}
     .pill {{
       display: inline-flex;
       align-items: center;
@@ -581,6 +638,19 @@ def _render_html(payload: dict[str, Any]) -> str:
     }}
     .path {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; word-break: break-all; }}
     .details {{ color: var(--muted); max-width: 420px; word-break: break-word; }}
+    .issue-summary {{
+      display: grid;
+      gap: 4px;
+      min-width: 220px;
+      max-width: 620px;
+      white-space: normal;
+      overflow: visible;
+    }}
+    .issue-summary-line {{
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }}
     .tabs {{ display: flex; gap: 6px; margin-top: 14px; }}
     button {{
       height: 34px;
@@ -646,7 +716,16 @@ def _render_html(payload: dict[str, Any]) -> str:
       </div>
       <div class="subtle" id="episodeCount"></div>
       <div class="table-wrap">
-        <table>
+        <table class="episode-table">
+          <colgroup>
+            <col class="episode-col-status">
+            <col class="episode-col-episode">
+            <col class="episode-col-task">
+            <col class="episode-col-robot">
+            <col class="episode-col-operator">
+            <col class="episode-col-issues">
+            <col>
+          </colgroup>
           <thead><tr><th>Status</th><th>Episode</th><th>Task</th><th>Robot</th><th>Operator</th><th>Issues</th><th>Top Issue Names</th></tr></thead>
           <tbody id="episodeRows"></tbody>
         </table>
@@ -694,6 +773,10 @@ def _render_html(payload: dict[str, Any]) -> str:
     }}
     function statusPill(status) {{
       return `<span class="pill ${{esc(status)}}">${{esc(STATUS_LABELS[status] || status)}}</span>`;
+    }}
+    function issueSummaryHtml(summary) {{
+      const lines = String(summary || "").split("\\n").filter(Boolean);
+      return `<div class="issue-summary">${{lines.map(line => `<div class="issue-summary-line">${{esc(line)}}</div>`).join("")}}</div>`;
     }}
     function renderMetrics() {{
       const s = DATA.summary.status_counts;
@@ -853,12 +936,12 @@ def _render_html(payload: dict[str, Any]) -> str:
       document.getElementById("episodeRows").innerHTML = rows.slice(0, MAX_ROWS).map(e => `
         <tr>
           <td>${{statusPill(e.final_status)}}</td>
-          <td><div>${{esc(e.episode_name)}}</div><div class="path">${{esc(e.episode_path)}}</div></td>
-          <td>${{esc(e.task)}}</td>
+          <td class="episode-cell"><div class="episode-name">${{esc(e.episode_name)}}</div><div class="path">${{esc(e.episode_path)}}</div></td>
+          <td class="task-cell">${{esc(e.task)}}</td>
           <td>${{esc(e.robot)}}</td>
           <td>${{esc(e.operator)}}</td>
           <td><strong>${{e.issue_count}}</strong></td>
-          <td>${{esc(e.top_issues)}}</td>
+          <td>${{issueSummaryHtml(e.top_issues)}}</td>
         </tr>`).join("");
     }}
     function renderIssues() {{
