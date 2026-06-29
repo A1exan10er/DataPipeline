@@ -1785,6 +1785,9 @@ def job_episode_result(job: dict[str, Any], include_findings: bool = False) -> d
     db_path = Path(str(job.get("db_path") or ""))
     episode_path = str(job.get("mounted_path") or "")
     if not db_path.is_file() or not episode_path:
+        if str(job.get("status") or "").lower() == "failed":
+            result["pipeline_error"] = str(job.get("error") or "QA pipeline failed before a result database was created.")
+            result["result_missing"] = True
         return result
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
@@ -3045,6 +3048,9 @@ function showCheckNameTooltip(target) {{
 }}
 
 function eventIssueSummaryHtml(job) {{
+  if (job.pipeline_error) {{
+    return `<div class="issue-summary status-failed" title="${{esc(job.pipeline_error)}}">Pipeline failed</div>`;
+  }}
   const issues = job.top_issues || [];
   if (!issues.length) {{
     return `<div class="issue-summary issue-summary-empty">${{job.issue_count || 0}}</div>`;
@@ -3337,6 +3343,7 @@ async function loadEventJob(jobId, openModal) {{
   const phaseStatus = Object.entries(job.phase_status || {{}}).map(([phase,status]) => `P${{phase}}=${{status}}`).join(', ');
   const topIssues = (job.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ') || 'None';
   const issueSummary = findings.map(f => `${{esc(f.check_name)}}: ${{findingMessageHtml(f)}}`).join('\\n');
+  const pipelineError = job.pipeline_error ? `<div><b>Pipeline error:</b> <span class="status-failed">${{esc(job.pipeline_error)}}</span></div>` : '';
   const mountedPath = job.mounted_path || '';
   const copyPath = job.nas_internal_path || mountedPath;
   document.getElementById('eventJobDetail').innerHTML =
@@ -3344,6 +3351,7 @@ async function loadEventJob(jobId, openModal) {{
     `<div><b>Episode:</b> ${{esc(job.episode_name || '')}}</div>` +
     `<div class="path-field"><b>Path:</b><span>${{esc(mountedPath)}}</span><button class="copy-path-btn" data-copy-path="${{esc(copyPath)}}" onclick="copyEventPath(this)">复制路径</button></div>` +
     `<div><b>Task:</b> ${{esc(job.task || '')}} | <b>Robot:</b> ${{esc(job.robot || '')}} | <b>Operator:</b> ${{esc(job.operator || '')}}</div>` +
+    pipelineError +
     `<div><b>Phase status:</b> ${{esc(phaseStatus || '-')}}</div>` +
     `<div><b>Top issues:</b> ${{topIssues}}</div>` +
     `<div><b>Output:</b> ${{esc(job.output_dir || '')}}</div>` +
