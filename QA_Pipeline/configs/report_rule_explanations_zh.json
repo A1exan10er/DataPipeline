@@ -1,0 +1,129 @@
+{
+  "default": {
+    "title_zh": "未配置中文规则说明",
+    "phase": "",
+    "description_zh": "该问题类型尚未配置中文检测规则说明，请查看 finding details 或对应 phase 代码确认判定逻辑。",
+    "standard_zh": "暂无结构化规则说明。",
+    "severity_zh": "以 finding 中记录的 severity/status 为准。",
+    "evidence_fields": []
+  },
+  "rules": {
+    "abnormal_fps_loss": {
+      "title_zh": "视频有效帧率低于预期",
+      "phase": "Phase 3",
+      "description_zh": "检测视频或触觉视频的实际有效帧率是否明显低于该模态的期望帧率。",
+      "standard_zh": "根据时间戳计算 actual_fps，并读取该模态对应的 expected_fps。若 (expected_fps - actual_fps) / expected_fps 大于 loss_fail_ratio，则判定为帧率损失异常。",
+      "severity_zh": "超过 loss_fail_ratio 时记为 major/fail。",
+      "thresholds": [
+        {"label_zh": "帧率损失失败阈值", "value_path": ["phase3_timestamp", "abnormal_fps", "loss_fail_ratio"], "unit": "比例"}
+      ],
+      "evidence_fields": ["modality", "actual_fps", "expected_fps", "deviation_ratio", "threshold"]
+    },
+    "abnormal_fps_gain": {
+      "title_zh": "视频有效帧率高于预期",
+      "phase": "Phase 3",
+      "description_zh": "检测视频或触觉视频的实际有效帧率是否明显高于该模态的期望帧率。",
+      "standard_zh": "根据时间戳计算 actual_fps，并读取该模态对应的 expected_fps。若 (actual_fps - expected_fps) / expected_fps 大于 gain_warning_ratio，则判定为帧率偏高异常。",
+      "severity_zh": "超过 gain_warning_ratio 时记为 minor/warning。",
+      "thresholds": [
+        {"label_zh": "帧率偏高警告阈值", "value_path": ["phase3_timestamp", "abnormal_fps", "gain_warning_ratio"], "unit": "比例"}
+      ],
+      "evidence_fields": ["modality", "actual_fps", "expected_fps", "deviation_ratio", "threshold"]
+    },
+    "operator_standstill_leading": {
+      "title_zh": "开头静止过长",
+      "phase": "Phase 7",
+      "description_zh": "检测 episode 开头阶段是否存在采集人员长时间未产生有效运动的情况。",
+      "standard_zh": "从配置的运动源中读取时间序列；若连续相邻帧所有运动列变化量均小于 motion_delta_threshold，则认为该段为静止。位于 episode 开头 edge_tolerance_ms 范围内的静止段归为开头静止。静止持续时间超过 stillness_buffer_ms 后才作为异常静止段记录。",
+      "severity_zh": "静止段时长达到 warn_segment_ms 记为 warning；达到 review_segment_ms 记为 needs_review；达到 fail_segment_ms 记为 fail。",
+      "thresholds": [
+        {"label_zh": "运动变化阈值", "value_path": ["phase7_standstill", "motion_delta_threshold"], "unit": "数据单位/帧"},
+        {"label_zh": "允许静止缓冲", "value_path": ["phase7_standstill", "stillness_buffer_ms"], "unit": "ms"},
+        {"label_zh": "开头/结尾判定容忍", "value_path": ["phase7_standstill", "edge_tolerance_ms"], "unit": "ms"},
+        {"label_zh": "警告静止段阈值", "value_path": ["phase7_standstill", "warn_segment_ms"], "unit": "ms"},
+        {"label_zh": "复查静止段阈值", "value_path": ["phase7_standstill", "review_segment_ms"], "unit": "ms"},
+        {"label_zh": "失败静止段阈值", "value_path": ["phase7_standstill", "fail_segment_ms"], "unit": "ms"}
+      ],
+      "evidence_fields": ["source_modality", "stop_start_ms", "stop_end_ms", "duration_ms", "excess_ms", "location"]
+    },
+    "operator_standstill_middle": {
+      "title_zh": "中段静止过长",
+      "phase": "Phase 7",
+      "description_zh": "检测 episode 中间阶段是否存在采集人员长时间未产生有效运动的情况。",
+      "standard_zh": "从配置的运动源中读取时间序列；若连续相邻帧所有运动列变化量均小于 motion_delta_threshold，则认为该段为静止。既不靠近开头也不靠近结尾的静止段归为中段静止。静止持续时间超过 stillness_buffer_ms 后才作为异常静止段记录。",
+      "severity_zh": "静止段时长达到 warn_segment_ms 记为 warning；达到 review_segment_ms 记为 needs_review；达到 fail_segment_ms 记为 fail。",
+      "thresholds": [
+        {"label_zh": "运动变化阈值", "value_path": ["phase7_standstill", "motion_delta_threshold"], "unit": "数据单位/帧"},
+        {"label_zh": "允许静止缓冲", "value_path": ["phase7_standstill", "stillness_buffer_ms"], "unit": "ms"},
+        {"label_zh": "开头/结尾判定容忍", "value_path": ["phase7_standstill", "edge_tolerance_ms"], "unit": "ms"},
+        {"label_zh": "警告静止段阈值", "value_path": ["phase7_standstill", "warn_segment_ms"], "unit": "ms"},
+        {"label_zh": "复查静止段阈值", "value_path": ["phase7_standstill", "review_segment_ms"], "unit": "ms"},
+        {"label_zh": "失败静止段阈值", "value_path": ["phase7_standstill", "fail_segment_ms"], "unit": "ms"}
+      ],
+      "evidence_fields": ["source_modality", "stop_start_ms", "stop_end_ms", "duration_ms", "excess_ms", "location"]
+    },
+    "operator_standstill_trailing": {
+      "title_zh": "结尾静止过长",
+      "phase": "Phase 7",
+      "description_zh": "检测 episode 结尾阶段是否存在采集人员长时间未产生有效运动的情况。",
+      "standard_zh": "从配置的运动源中读取时间序列；若连续相邻帧所有运动列变化量均小于 motion_delta_threshold，则认为该段为静止。位于 episode 结尾 edge_tolerance_ms 范围内的静止段归为结尾静止。静止持续时间超过 stillness_buffer_ms 后才作为异常静止段记录。",
+      "severity_zh": "静止段时长达到 warn_segment_ms 记为 warning；达到 review_segment_ms 记为 needs_review；达到 fail_segment_ms 记为 fail。",
+      "thresholds": [
+        {"label_zh": "运动变化阈值", "value_path": ["phase7_standstill", "motion_delta_threshold"], "unit": "数据单位/帧"},
+        {"label_zh": "允许静止缓冲", "value_path": ["phase7_standstill", "stillness_buffer_ms"], "unit": "ms"},
+        {"label_zh": "开头/结尾判定容忍", "value_path": ["phase7_standstill", "edge_tolerance_ms"], "unit": "ms"},
+        {"label_zh": "警告静止段阈值", "value_path": ["phase7_standstill", "warn_segment_ms"], "unit": "ms"},
+        {"label_zh": "复查静止段阈值", "value_path": ["phase7_standstill", "review_segment_ms"], "unit": "ms"},
+        {"label_zh": "失败静止段阈值", "value_path": ["phase7_standstill", "fail_segment_ms"], "unit": "ms"}
+      ],
+      "evidence_fields": ["source_modality", "stop_start_ms", "stop_end_ms", "duration_ms", "excess_ms", "location"]
+    },
+    "operator_standstill_excessive": {
+      "title_zh": "总静止占比过高",
+      "phase": "Phase 7",
+      "description_zh": "检测 episode 中超过允许缓冲后的静止时间是否占 episode 总时长过高。",
+      "standard_zh": "先检测所有超过 stillness_buffer_ms 的静止段；每段只将超过缓冲部分计入 excess_ms。total_excess_ms / episode_duration_ms 得到 excess_ratio，并与配置阈值比较。",
+      "severity_zh": "excess_ratio 达到 review_excess_ratio 记为 needs_review；达到 fail_excess_ratio 记为 fail。",
+      "thresholds": [
+        {"label_zh": "允许静止缓冲", "value_path": ["phase7_standstill", "stillness_buffer_ms"], "unit": "ms"},
+        {"label_zh": "复查静止占比阈值", "value_path": ["phase7_standstill", "review_excess_ratio"], "unit": "比例"},
+        {"label_zh": "失败静止占比阈值", "value_path": ["phase7_standstill", "fail_excess_ratio"], "unit": "比例"}
+      ],
+      "evidence_fields": ["episode_duration_ms", "segment_count", "total_excess_ms", "excess_ratio", "review_excess_ratio", "fail_excess_ratio"]
+    },
+    "operator_standstill_motion_too_short": {
+      "title_zh": "有效运动时长过短",
+      "phase": "Phase 7",
+      "description_zh": "检测扣除静止段后的有效运动时长是否过短，避免几乎全程静止的 episode 进入训练数据。",
+      "standard_zh": "计算 useful_motion_ms = episode_duration_ms - 所有静止段 duration_ms。当存在静止段且 useful_motion_ms 小于 min_useful_motion_ms 时判定为有效运动过短。",
+      "severity_zh": "命中该规则时记为 critical/fail。",
+      "thresholds": [
+        {"label_zh": "最小有效运动时长", "value_path": ["phase7_standstill", "min_useful_motion_ms"], "unit": "ms"},
+        {"label_zh": "允许静止缓冲", "value_path": ["phase7_standstill", "stillness_buffer_ms"], "unit": "ms"}
+      ],
+      "evidence_fields": ["episode_duration_ms", "useful_motion_ms", "segment_count", "segments"]
+    },
+    "standstill_motion_source_missing": {
+      "title_zh": "缺少可用运动源",
+      "phase": "Phase 7",
+      "description_zh": "Phase 7 未找到可用于判断静止的运动数据源。",
+      "standard_zh": "按 source_modalities 顺序查找各模态下的 data.csv，并要求包含 timestamp_ms 和至少一个非 gripper 的运动列。全部缺失或不可用时报告该问题。",
+      "severity_zh": "当前为 minor/warning。",
+      "thresholds": [
+        {"label_zh": "候选运动源", "value_path": ["phase7_standstill", "source_modalities"], "unit": ""}
+      ],
+      "evidence_fields": ["message"]
+    },
+    "standstill_motion_source_invalid": {
+      "title_zh": "运动源时间序列无效",
+      "phase": "Phase 7",
+      "description_zh": "找到了运动源文件，但时间戳数据不足或不能形成有效递增时间序列。",
+      "standard_zh": "可用时间戳少于 2 行，或 episode duration 小于等于 0 时判定为无效。",
+      "severity_zh": "当前为 major/needs_review。",
+      "thresholds": [
+        {"label_zh": "最少有效时间戳行数", "value": 2, "unit": "行"}
+      ],
+      "evidence_fields": ["source_modality", "row_count"]
+    }
+  }
+}

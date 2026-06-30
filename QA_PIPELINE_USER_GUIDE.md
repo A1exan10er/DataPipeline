@@ -1,6 +1,6 @@
 # QA Pipeline User Guide
 
-Last updated: 2026-06-15
+Last updated: 2026-06-30
 
 ## Purpose
 
@@ -271,6 +271,84 @@ The dashboard shows:
 - issue counts by phase;
 - a filterable episode table;
 - a filterable exact issue table.
+
+## Server Control Dashboard
+
+For long-running server use, start the central control dashboard:
+
+```bash
+python3 QA_Pipeline/scripts/qa_control_dashboard.py \
+  --host 0.0.0.0 \
+  --port 4131
+```
+
+Open:
+
+```text
+http://<server-ip>:4131
+```
+
+This is different from `live_dashboard.py`. `live_dashboard.py` serves one
+output directory. `qa_control_dashboard.py` is a server control surface that can:
+
+- start date-range or task-folder runs from the browser;
+- set `date_from`, `date_to`, `phases`, `workers`, `batch_size`, and quality
+  label filtering;
+- show run status, phase progress, logs, and issue episodes;
+- start, stop, and restart the event listener with date filters;
+- generate or refresh Chinese work-session reports;
+- show device failure summaries and consecutive-failure warnings.
+
+In Run Detail, `中文质检报告` can generate:
+
+- `当前运行累计报告`: a cumulative report over the current run DB, useful while
+  a multi-day run is still in progress;
+- half-day reports for current/previous work sessions.
+
+Report outputs include:
+
+```text
+半日质检报告.md
+report.json
+核心问题汇总.csv
+问题episode清单.csv
+采集人员问题占比.csv
+采集人员问题episode索引.csv
+检测规则说明.csv
+处理建议.csv
+```
+
+Counts shown as `umi(88)` or `pengshasha(21)` are finding counts, not unique
+episode counts. Unique episode counts are shown as affected episode counts or
+operator issue episode counts.
+
+The dashboard button `查看检测规则说明` opens a popup with Chinese rule details:
+rule title, phase, detection logic, thresholds, severity rule, and evidence
+fields. The source configuration is:
+
+```text
+QA_Pipeline/configs/report_rule_explanations_zh.json
+```
+
+The Issues panel detects consecutive-failure combinations using:
+
+```text
+task + robot + operator + date
+```
+
+The date comes from the QA DB when available, otherwise from the episode path.
+This prevents the same episode number range on a later date from being hidden
+by a previously resolved warning.
+
+Reviewers click `标记已解决`, then `确认解决？`. The second click immediately
+hides that combination in the browser and persists the resolution for the same
+`task + robot + operator + date`. If a new consecutive failure happens later,
+including on a new date with the same episode numbers, it is detected and shown
+again.
+
+Device failure summaries count only `fail` and `needs_review` findings and
+group them by collector/device. A collector whose failures are dominated by one
+check name is marked as a priority device risk.
 
 ## Live Status While Running
 
@@ -644,6 +722,111 @@ Current central config includes:
 aloha gripper range: 0.0 to 0.1 m
 arx5 gripper range: 0.0 to 0.082 m
 ```
+
+## Phase 6: UMI Processing
+
+File:
+
+```text
+QA_Pipeline/scripts/pipeline/phase6_umi.py
+```
+
+Purpose:
+
+Run UMI-specific validation and processing. This phase is only meaningful for
+UMI episodes; non-UMI episodes are skipped with pass/info findings.
+
+Run:
+
+```bash
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --phases 6 \
+  --db-path outputs/qa_umi/qa.db \
+  --output-dir outputs/qa_umi
+```
+
+What it does:
+
+- identifies UMI episodes from metadata, episode name tokens, task names, and
+  path context;
+- calls the UMI tooling under `DataProcessUMI`;
+- performs raw-data assessment and trajectory preprocessing;
+- exports world-frame data for downstream UMI workflows;
+- writes processed artifacts under the configured UMI output directory instead
+  of modifying the original NAS episode.
+
+Important notes:
+
+- Phase 6 may open videos, copy or transform episode data, and use FFmpeg, so it
+  is slower than the metadata/timestamp phases.
+- It does not run inside the normal multiprocessing path; it currently handles
+  UMI episodes sequentially even if `--workers` is set.
+- It is usually best to run Phases 1-5 or 1-7 first, then run Phase 6 only on
+  UMI data that still needs processing.
+
+Main not-pass cases include missing UMI inputs, invalid or failed UMI
+trajectories, processing exceptions, and failed UMI-specific validation.
+
+## Phase 7: Standstill / Operator Idle Detection
+
+File:
+
+```text
+QA_Pipeline/scripts/pipeline/phase7_standstill.py
+```
+
+Purpose:
+
+Detect episodes where the operator stopped for too long at the beginning,
+middle, or end of the recording.
+
+Run:
+
+```bash
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --phases 7 \
+  --db-path outputs/qa_phase7/qa.db \
+  --output-dir outputs/qa_phase7
+```
+
+Motion source priority:
+
+```text
+observation.state.joint_position
+actions.joint_position
+observation.state.eef_pose
+actions.eef_pose
+action.eef_pose
+```
+
+Method:
+
+- compare consecutive motion rows;
+- ignore gripper columns for motion detection;
+- treat a time interval as still when all selected motion columns change by
+  less than `motion_delta_threshold`;
+- allow stillness up to `stillness_buffer_ms`;
+- classify longer still segments as `leading`, `middle`, or `trailing`;
+- also check total excess stillness ratio and minimum useful motion duration.
+
+Main not-pass cases:
+
+| Check | Meaning | Status effect |
+| --- | --- | --- |
+| `operator_standstill_leading` | Excessive stillness near the beginning | warning / needs_review / fail by duration |
+| `operator_standstill_middle` | Excessive stillness in the middle | warning / needs_review / fail by duration |
+| `operator_standstill_trailing` | Excessive stillness near the end | warning / needs_review / fail by duration |
+| `operator_standstill_excessive` | Total excess stillness ratio too high | needs_review / fail |
+| `operator_standstill_motion_too_short` | Useful non-still motion is below minimum | fail |
+| `standstill_motion_source_missing` | No configured motion source found | warning |
+| `standstill_motion_source_invalid` | Motion source exists but timestamps/rows are invalid | needs_review |
+
+Phase 7 is report-only. It writes findings to SQLite and reports, but it does
+not trim video or rewrite CSV files. Thresholds live under `phase7_standstill`
+in `QA_Pipeline/configs/quality_rules.json` and are surfaced in Chinese
+work-session reports through `检测规则说明.csv` and the dashboard rule popup.
 
 ## Standstill Trim Planner
 

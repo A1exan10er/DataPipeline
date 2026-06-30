@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from scripts.pipeline.qa_dcs_notifier import DcsIssueNotifier
 from scripts.pipeline.qa_core import EpisodeState
 
 
@@ -71,6 +72,7 @@ class RunMonitor:
         self.status_counts: Counter[str] = Counter()
         self.latest_issue: dict[str, Any] | None = None
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.dcs_notifier = DcsIssueNotifier(self.run_dir, self.run_id)
         self._initialize_files()
 
     def start(self, states: list[EpisodeState]) -> None:
@@ -216,6 +218,7 @@ class RunMonitor:
             for event in events:
                 jsonl_obj.write(json.dumps(event, ensure_ascii=False) + "\n")
                 writer.writerow(_issue_csv_row(event))
+        self.dcs_notifier.notify_many(events)
 
     def _append_phase_event(self, event: dict[str, Any]) -> None:
         event = {

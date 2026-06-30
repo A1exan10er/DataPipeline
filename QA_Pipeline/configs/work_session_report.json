@@ -1,0 +1,183 @@
+{
+  "work_sessions": {
+    "forenoon": {
+      "label": "上午",
+      "start": "09:00",
+      "end": "12:00"
+    },
+    "afternoon": {
+      "label": "下午",
+      "start": "13:30",
+      "end": "18:00"
+    }
+  },
+  "severity_labels": {
+    "critical": "致命",
+    "major": "严重",
+    "minor": "一般",
+    "info": "提示",
+    "unknown": "未知"
+  },
+  "status_labels": {
+    "pass": "通过",
+    "warning": "警告",
+    "fail": "失败",
+    "needs_review": "需要复查",
+    "pending": "待处理",
+    "unknown": "未知"
+  },
+  "default_action": {
+    "category": "未分类问题",
+    "owner": "QA负责人",
+    "action": "查看问题详情，确认是否需要补充规则或安排对应团队处理。",
+    "impact": "影响范围需要人工判断。",
+    "automation": "人工复查",
+    "blocks_training": true
+  },
+  "issue_actions": {
+    "metadata_exists": {
+      "label": "metadata.json 缺失",
+      "category": "元数据",
+      "owner": "采集团队",
+      "action": "补全或重新生成 metadata.json，修复前不要进入后续处理。",
+      "impact": "任务、机器人、操作者等关键信息无法可靠追踪。",
+      "automation": "人工修复",
+      "blocks_training": true
+    },
+    "metadata_valid_json": {
+      "label": "metadata.json 格式错误",
+      "category": "元数据",
+      "owner": "采集团队",
+      "action": "修复 metadata.json 的 JSON 格式后重新运行质检。",
+      "impact": "元数据无法读取，后续统计和筛选不可靠。",
+      "automation": "人工修复",
+      "blocks_training": true
+    },
+    "frame_drop_ratio": {
+      "label": "视频帧丢失比例过高",
+      "category": "视频/时间同步",
+      "owner": "设备维护人员",
+      "action": "检查相机链路、采集负载和时间戳稳定性；相关 episode 先进入待复查或隔离列表。",
+      "impact": "可能影响视频与状态序列对齐，不建议直接进入训练集。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "frequency_group_outlier": {
+      "label": "采集频率与同组数据差异过大",
+      "category": "时间戳/频率",
+      "owner": "QA负责人",
+      "action": "按任务、机器人、采集人员分组查看异常频率，确认是采集配置差异还是异常数据；异常 episode 先复查。",
+      "impact": "同组数据频率不一致会影响批量训练采样和跨模态对齐。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "frequency_deviation": {
+      "label": "采集频率偏离配置",
+      "category": "时间戳/频率",
+      "owner": "工具链负责人",
+      "action": "检查对应模态的实际频率和配置频率，确认是否需要修正配置或隔离异常 episode。",
+      "impact": "频率偏离会影响重采样、对齐和训练输入稳定性。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "consecutive_drops_outlier": {
+      "label": "连续丢帧异常",
+      "category": "视频/时间同步",
+      "owner": "设备维护人员",
+      "action": "检查相机链路和采集端负载，重点复查连续丢帧集中的任务、机器人和采集人员。",
+      "impact": "连续丢帧会造成局部时序缺口，影响动作片段质量。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "modality_alignment_end": {
+      "label": "模态结尾对齐异常",
+      "category": "多模态对齐",
+      "owner": "工具链负责人",
+      "action": "检查各模态结束帧数和时间戳，确认是否需要裁剪、重对齐或隔离。",
+      "impact": "多模态结尾不一致会影响训练样本切片和回放。",
+      "automation": "工具链处理后重跑",
+      "blocks_training": true
+    },
+    "duration_absolute_too_short": {
+      "label": "episode 绝对时长过短",
+      "category": "采集质量",
+      "owner": "采集团队",
+      "action": "确认是否误触发、提前停止或无效采集；无效 episode 建议隔离。",
+      "impact": "数据片段过短，通常不适合作为训练样本。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "duration_task_outlier": {
+      "label": "episode 时长相对任务异常",
+      "category": "采集质量",
+      "owner": "采集团队",
+      "action": "对比同任务正常时长，确认是否存在无效动作、提前结束或采集流程差异。",
+      "impact": "同任务时长异常可能代表动作未完成或采集流程不一致。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "duration_under_5s": {
+      "label": "episode 时长低于 5 秒",
+      "category": "采集质量",
+      "owner": "采集团队",
+      "action": "优先确认是否为误采或空片段；通常建议直接隔离。",
+      "impact": "极短 episode 基本无法提供完整任务过程。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "abnormal_fps_loss": {
+      "label": "视频有效帧率异常",
+      "category": "视频/时间同步",
+      "owner": "设备维护人员",
+      "action": "检查采集端帧率配置、相机性能和系统负载；必要时重采或隔离异常 episode。",
+      "impact": "帧率异常会降低数据时序质量。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "video_black_frames": {
+      "label": "视频存在黑帧",
+      "category": "视频质量",
+      "owner": "采集团队",
+      "action": "检查相机曝光、遮挡、连接状态；严重黑帧 episode 建议隔离。",
+      "impact": "图像信息缺失，可能影响视觉模型训练。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "video_white_frames": {
+      "label": "视频存在白帧",
+      "category": "视频质量",
+      "owner": "采集团队",
+      "action": "检查相机曝光和光照环境；严重白帧 episode 建议隔离。",
+      "impact": "图像过曝，可能影响视觉模型训练。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "timestamp_monotonic": {
+      "label": "时间戳不递增",
+      "category": "时间戳",
+      "owner": "工具链负责人",
+      "action": "检查对应模态时间戳生成逻辑，修复后重新运行 Phase 3。",
+      "impact": "时间顺序异常会影响对齐、重放和训练采样。",
+      "automation": "工具链修复后重跑",
+      "blocks_training": true
+    },
+    "duration_too_short": {
+      "label": "episode 时长过短",
+      "category": "采集质量",
+      "owner": "采集团队",
+      "action": "确认是否为误触发或无效采集；无效 episode 建议隔离。",
+      "impact": "数据片段过短，通常不适合作为训练样本。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "hidden_directory_skipped": {
+      "label": "隐藏目录已跳过",
+      "category": "目录结构",
+      "owner": "QA负责人",
+      "action": "确认隐藏目录是否应纳入质检；如不需要，可忽略。",
+      "impact": "该目录未进入本次 episode 质检范围。",
+      "automation": "人工确认",
+      "blocks_training": false
+    }
+  }
+}

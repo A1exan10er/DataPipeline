@@ -20,12 +20,37 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
+
+SCRIPT_DIR_FOR_IMPORT = Path(__file__).resolve().parent
+if str(SCRIPT_DIR_FOR_IMPORT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR_FOR_IMPORT))
+
+from generate_work_session_report import (
+    DEFAULT_CONFIG as WORK_SESSION_REPORT_CONFIG,
+    SEVERITY_ORDER,
+    STATUS_ORDER,
+    build_cumulative_report as build_cumulative_work_session_report,
+    build_report as build_work_session_report,
+    core_issue_rows,
+    device_failure_summary_rows,
+    action_rows,
+    affected_episode_rows,
+    operator_issue_episode_rows,
+    operator_issue_rows,
+    load_config as load_work_session_report_config,
+    ordered_counter,
+    query_all_rows,
+    report_directory_name,
+    resolve_window as resolve_work_session_window,
+    write_report as write_work_session_report,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -38,10 +63,16 @@ DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "dashboard_runs"
 DEFAULT_VERIFIED_ROOT = Path("/mnt/nas/database/verified")
 EVENT_CONTROL_SCRIPT = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listener_control.sh"
 EVENT_JOB_DB = PROJECT_ROOT / "outputs" / "event_listener" / "jobs.db"
+RETENTION_MANIFEST = "retention_cleanup.jsonl"
 ISSUE_TRANSLATIONS_PATH = SCRIPT_DIR / "issue_translations.json"
 _ISSUE_TRANSLATIONS_CACHE: dict[str, str] | None = None
 CONSECUTIVE_FAILURE_STREAK_LENGTH = 5
 BAD_QA_FINAL_STATUSES = {"fail", "needs_review"}
+
+
+class DashboardHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 
 
 class DashboardState:
@@ -55,9 +86,15 @@ class DashboardState:
         self.qa_python = Path(args.qa_python)
         self.refresh_seconds = max(1.0, float(args.refresh_seconds))
         self.max_discovered_runs = max(0, int(args.max_discovered_runs))
+        self.auto_work_session_reports = not args.disable_auto_work_session_reports
+        self.work_session_report_interval_seconds = max(60, int(args.work_session_report_interval_seconds))
+        self.work_session_report_last_run = 0.0
         self.lock = threading.Lock()
-        self.failure_warning_signature: tuple[int, int, str, str] | None = None
+        self.cache_lock = threading.RLock()
+        self.cache: dict[str, tuple[float, Any]] = {}
+        self.failure_warning_signature: tuple[int, int, str] | None = None
         self.failure_warning_cache: dict[str, Any] = {"count": 0, "warnings": [], "checked_jobs": 0}
+        self.failure_warning_last_checked = 0.0
         init_registry(self.registry_db)
         init_issue_history(self.issue_history_db)
 
@@ -65,7 +102,8 @@ class DashboardState:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     state = DashboardState(args)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
+    start_work_session_report_scheduler(state)
+    server = DashboardHTTPServer((args.host, args.port), make_handler(state))
     print(f"QA control dashboard: http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
@@ -86,6 +124,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--qa-python", default="datapipeline-env/bin/python")
     parser.add_argument("--refresh-seconds", type=float, default=5.0)
     parser.add_argument("--max-discovered-runs", type=int, default=200)
+    parser.add_argument(
+        "--disable-auto-work-session-reports",
+        action="store_true",
+        help="Disable automatic event-listener Chinese work-session report generation.",
+    )
+    parser.add_argument(
+        "--work-session-report-interval-seconds",
+        type=int,
+        default=600,
+        help="Automatic event-listener work-session report refresh interval. Default: 600.",
+    )
     return parser.parse_args(argv)
 
 
@@ -102,6 +151,12 @@ def make_handler(state: DashboardState):
             try:
                 if path in ("/", "/index.html"):
                     self._send_html(render_index_html(state))
+                elif path == "/event-listener/work-session-report.html":
+                    query = parse_qs(parsed.query)
+                    self._send_html(render_event_work_session_report_html(query.get("report", [""])[0]))
+                elif path == "/event-listener/device-failure-report.html":
+                    query = parse_qs(parsed.query)
+                    self._send_html(render_event_device_failure_report_html(query.get("report", [""])[0]))
                 elif path == "/api/status":
                     self._send_json(api_status(state))
                 elif path == "/api/runs":
@@ -115,6 +170,8 @@ def make_handler(state: DashboardState):
                     query = parse_qs(parsed.query)
                     limit = int(query.get("limit", ["500"])[0] or "500")
                     self._send_json({"summary": event_issue_summary(limit=limit)})
+                elif path == "/api/event-listener/work-session-report":
+                    self._send_json({"report": latest_event_work_session_report()})
                 elif path == "/api/event-listener/jobs":
                     query = parse_qs(parsed.query)
                     limit = int(query.get("limit", ["100"])[0] or "100")
@@ -131,8 +188,13 @@ def make_handler(state: DashboardState):
                     self._send_json({"lines": log_tail(state, target)})
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
+            except (BrokenPipeError, ConnectionResetError):
+                return
             except Exception as exc:
-                self._send_json({"error": str(exc)}, status=500)
+                try:
+                    self._send_json({"error": str(exc)}, status=500)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
@@ -140,22 +202,39 @@ def make_handler(state: DashboardState):
             try:
                 payload = self._read_json()
                 if path == "/api/start":
+                    clear_cache(state)
                     self._send_json(api_start_run(state, payload))
+                elif path.startswith("/api/runs/") and path.endswith("/work-session-report"):
+                    run_id = path.split("/")[-2]
+                    clear_cache(state)
+                    self._send_json(api_generate_work_session_report(state, run_id, payload))
                 elif path.startswith("/api/stop/"):
                     run_id = path.rsplit("/", 1)[-1]
+                    clear_cache(state)
                     self._send_json(api_stop_run(state, run_id))
                 elif path == "/api/event-listener/start":
+                    clear_cache(state)
                     self._send_json(api_event_listener_action("start", payload))
                 elif path == "/api/event-listener/stop":
+                    clear_cache(state)
                     self._send_json(api_event_listener_action("stop", payload))
                 elif path == "/api/event-listener/restart":
+                    clear_cache(state)
                     self._send_json(api_event_listener_action("restart", payload))
+                elif path == "/api/event-listener/work-session-report":
+                    clear_cache(state)
+                    self._send_json(api_generate_event_work_session_report(payload))
                 elif path == "/api/consecutive-failures/resolve":
                     self._send_json(api_resolve_consecutive_failure(state, payload))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
+            except (BrokenPipeError, ConnectionResetError):
+                return
             except Exception as exc:
-                self._send_json({"error": str(exc)}, status=500)
+                try:
+                    self._send_json({"error": str(exc)}, status=500)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
         def _read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0") or "0")
@@ -169,21 +248,27 @@ def make_handler(state: DashboardState):
 
         def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def _send_html(self, html: str) -> None:
             body = html.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
     return Handler
 
@@ -238,6 +323,7 @@ def init_issue_history(db_path: Path) -> None:
                 task TEXT NOT NULL,
                 robot TEXT NOT NULL,
                 operator TEXT NOT NULL,
+                context_date TEXT NOT NULL DEFAULT '',
                 episode_start INTEGER NOT NULL,
                 episode_end INTEGER NOT NULL,
                 streak_length INTEGER NOT NULL,
@@ -248,11 +334,17 @@ def init_issue_history(db_path: Path) -> None:
             )
             """
         )
+        try:
+            conn.execute("ALTER TABLE consecutive_failure_streaks ADD COLUMN context_date TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+        conn.execute("DROP INDEX IF EXISTS idx_consecutive_failure_unresolved_identity")
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_consecutive_failure_unresolved_identity
             ON consecutive_failure_streaks (
-                task, robot, operator, episode_start, episode_end
+                task, robot, operator, context_date, episode_start, episode_end
             )
             WHERE resolved_at IS NULL
             """
@@ -265,15 +357,35 @@ def init_issue_history(db_path: Path) -> None:
         )
 
 
+def cached_value(state: DashboardState, key: str, ttl_seconds: float, producer) -> Any:
+    now = time.monotonic()
+    with state.cache_lock:
+        cached = state.cache.get(key)
+        if cached and now - cached[0] < ttl_seconds:
+            return cached[1]
+        value = producer()
+        state.cache[key] = (now, value)
+        return value
+
+
+def clear_cache(state: DashboardState) -> None:
+    with state.cache_lock:
+        state.cache.clear()
+
+
+
 def api_status(state: DashboardState) -> dict[str, Any]:
-    sync_registered_run_statuses(state)
-    return {
-        "generated_at": now_iso(),
-        "server": server_load(),
-        "event_listener": event_listener_status(),
-        "consecutive_failures": consecutive_failure_warnings(state),
-        "runs": list_runs(state, limit=30),
-    }
+    def produce() -> dict[str, Any]:
+        sync_registered_run_statuses(state)
+        return {
+            "generated_at": now_iso(),
+            "server": server_load(),
+            "event_listener": event_listener_status(),
+            "consecutive_failures": consecutive_failure_warnings(state),
+            "runs": list_runs(state, limit=30),
+        }
+
+    return cached_value(state, "api_status", max(3.0, state.refresh_seconds), produce)
 
 
 def list_runs(state: DashboardState, limit: int | None = None) -> list[dict[str, Any]]:
@@ -308,21 +420,29 @@ def registered_runs(registry_db: Path) -> list[dict[str, Any]]:
 
 
 def discover_output_runs(state: DashboardState) -> list[dict[str, Any]]:
-    outputs = PROJECT_ROOT / "outputs"
-    if not outputs.is_dir() or state.max_discovered_runs <= 0:
+    if state.max_discovered_runs <= 0:
         return []
     candidates = []
-    for db_path in outputs.rglob("qa.db"):
-        rel = db_path.relative_to(outputs)
-        if len(rel.parts) > 5:
+    for outputs in (PROJECT_ROOT / "outputs", REPO_ROOT / "outputs"):
+        if not outputs.is_dir():
             continue
-        output_dir = db_path.parent
-        stat = safe_stat(db_path)
-        candidates.append((stat[0], db_path, output_dir))
+        for db_path in likely_dashboard_databases(outputs):
+            output_dir = db_path.parent
+            stat = safe_stat(db_path)
+            candidates.append((stat[0], db_path, output_dir))
     candidates.sort(reverse=True)
     runs = []
-    for _mtime, db_path, output_dir in candidates[: state.max_discovered_runs]:
+    seen_db_paths: set[str] = set()
+    for _mtime, db_path, output_dir in candidates:
+        db_key = str(db_path.resolve(strict=False))
+        if db_key in seen_db_paths:
+            continue
+        seen_db_paths.add(db_key)
+        if len(runs) >= state.max_discovered_runs:
+            break
         run_id = discovered_run_id(output_dir)
+        if db_path.name != "qa.db":
+            run_id = sanitize_id(f"{run_id}-{db_path.stem}")
         item = {
             "run_id": run_id,
             "mode": "discovered",
@@ -339,6 +459,23 @@ def discover_output_runs(state: DashboardState) -> list[dict[str, Any]]:
     return runs
 
 
+def likely_dashboard_databases(outputs: Path) -> list[Path]:
+    """Find common QA DB locations without recursively scanning huge output trees."""
+    candidates: list[Path] = []
+    patterns = (
+        "qa.db",
+        "qa_pipeline.db",
+        "qa_pipeline *.db",
+        "*/qa.db",
+        "*/*/qa.db",
+        "*/qa_pipeline.db",
+        "*/qa_pipeline *.db",
+    )
+    for pattern in patterns:
+        candidates.extend(path for path in outputs.glob(pattern) if path.is_file())
+    return candidates
+
+
 def api_run_detail(state: DashboardState, run_id: str) -> dict[str, Any]:
     sync_registered_run_statuses(state)
     run = find_run(state, run_id)
@@ -351,6 +488,7 @@ def api_run_detail(state: DashboardState, run_id: str) -> dict[str, Any]:
     detail["run_status"] = latest_run_status(output_dir)
     detail["recent_findings"] = recent_findings(db_path)
     detail["issue_episodes"] = issue_episodes(db_path)
+    detail["latest_work_session_report"] = latest_work_session_report(output_dir)
     detail["logs"] = tail_file(output_dir / f"{run_id}_pipeline.log", 80)
     if not detail["logs"]:
         detail["logs"] = tail_file(output_dir / "pipeline.log", 80)
@@ -475,17 +613,602 @@ def api_stop_run(state: DashboardState, run_id: str) -> dict[str, Any]:
     return {"ok": True, "run_id": run_id, "status": "stopped"}
 
 
+def api_generate_work_session_report(
+    state: DashboardState,
+    run_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    run = find_run(state, run_id)
+    if not run:
+        raise ValueError(f"unknown run_id: {run_id}")
+    db_path = Path(str(run.get("db_path") or ""))
+    output_dir = Path(str(run.get("output_dir") or ""))
+    if not db_path.is_file():
+        raise ValueError(f"QA database does not exist for run {run_id}: {db_path}")
+
+    config = load_work_session_report_config(WORK_SESSION_REPORT_CONFIG)
+    session = str(payload.get("session") or "run_all")
+    if session == "run_all":
+        report = build_cumulative_work_session_report(
+            db_path,
+            config,
+            label="当前运行累计",
+            start=parse_event_listener_timestamp(str(run.get("started_at") or "")),
+            end=parse_event_listener_timestamp(str(run.get("finished_at") or "")),
+        )
+    else:
+        args = argparse.Namespace(
+            session=session,
+            start=str(payload.get("start") or "") or None,
+            end=str(payload.get("end") or "") or None,
+        )
+        window = resolve_work_session_window(args, config)
+        report = build_work_session_report(
+            db_path,
+            window,
+            config,
+            include_all_when_empty=bool(payload.get("include_all_when_empty", True)),
+        )
+    report_dir = write_work_session_report(output_dir / "reports" / "work_sessions", report, config)
+    append_run_event(
+        state.registry_db,
+        run_id,
+        "work_session_report",
+        f"Generated Chinese work-session report: {report_dir}",
+    )
+    latest = work_session_report_payload(report_dir)
+    return {"ok": True, "run_id": run_id, "report": latest}
+
+
+def api_generate_event_work_session_report(payload: dict[str, Any]) -> dict[str, Any]:
+    session = str(payload.get("session") or "current")
+    config = load_work_session_report_config(WORK_SESSION_REPORT_CONFIG)
+    args = argparse.Namespace(
+        session=session,
+        start=str(payload.get("start") or "") or None,
+        end=str(payload.get("end") or "") or None,
+    )
+    window = resolve_work_session_window(args, config)
+    report = build_event_work_session_report(window, config)
+    report_key = report_directory_name(report)
+    report["device_failure_report_url"] = event_report_url(
+        "/event-listener/device-failure-report.html",
+        report_key,
+    )
+    report_dir = write_work_session_report(event_work_session_report_root(), report, config)
+    cleanup_event_work_session_reports()
+    return {"ok": True, "report": work_session_report_payload(report_dir)}
+
+
+def build_event_work_session_report(window: Any, config: dict[str, Any]) -> dict[str, Any]:
+    jobs = event_listener_report_jobs(window)
+    episode_rows: list[dict[str, Any]] = []
+    finding_rows: list[dict[str, Any]] = []
+    seen_db_paths: set[str] = set()
+    source_dbs: list[str] = []
+    for job in jobs:
+        db_path = resolve_project_path(str(job.get("db_path") or ""))
+        if not db_path.is_file():
+            continue
+        db_key = str(db_path.resolve(strict=False))
+        if db_key in seen_db_paths:
+            continue
+        seen_db_paths.add(db_key)
+        source_dbs.append(str(db_path))
+        try:
+            db_episodes, db_findings = query_all_rows(db_path)
+        except sqlite3.Error:
+            continue
+        for episode in db_episodes:
+            episode["source_db"] = str(db_path)
+        for finding in db_findings:
+            finding["source_db"] = str(db_path)
+        episode_rows.extend(db_episodes)
+        finding_rows.extend(db_findings)
+
+    findings_by_episode: dict[str, list[dict[str, Any]]] = {}
+    for finding in finding_rows:
+        findings_by_episode.setdefault(finding["episode_path"], []).append(finding)
+    core_issues = core_issue_rows(
+        finding_rows,
+        config,
+        total_episodes=len(episode_rows),
+        total_issue_episodes=len(findings_by_episode),
+        total_findings=len(finding_rows),
+    )
+    affected_episodes = affected_episode_rows(episode_rows, findings_by_episode, config)
+    operator_issues = operator_issue_rows(
+        episode_rows,
+        findings_by_episode,
+        total_issue_episodes=len(findings_by_episode),
+        total_findings=len(finding_rows),
+        config=config,
+    )
+    operator_issue_episodes = operator_issue_episode_rows(episode_rows, findings_by_episode, config)
+    device_failures = device_failure_summary_rows(episode_rows, finding_rows)
+    actions = action_rows(core_issues, config)
+    status_counts = ordered_counter(Counter(row.get("final_status") or "pending" for row in episode_rows), STATUS_ORDER)
+    severity_counts = ordered_counter(Counter(row.get("severity") or "unknown" for row in finding_rows), SEVERITY_ORDER)
+    blocking_episodes = {row["episode_path"] for row in affected_episodes if row.get("blocks_training")}
+    return {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "source_db": str(EVENT_JOB_DB),
+        "window": {
+            "key": window.key,
+            "label": f"事件监听{window.label}",
+            "start": window.start.isoformat(timespec="seconds"),
+            "end": window.end.isoformat(timespec="seconds"),
+            "used_all_episode_fallback": False,
+        },
+        "summary": {
+            "episode_count": len(episode_rows),
+            "finding_count": len(finding_rows),
+            "issue_episode_count": len(findings_by_episode),
+            "training_blocking_episode_count": len(blocking_episodes),
+            "event_job_count": len(jobs),
+            "source_db_count": len(source_dbs),
+            "status_counts": status_counts,
+            "severity_counts": severity_counts,
+        },
+        "core_issues": core_issues,
+        "operator_issues": operator_issues,
+        "operator_issue_episodes": operator_issue_episodes,
+        "device_failure_summary": device_failures,
+        "affected_episodes": affected_episodes,
+        "suggested_actions": actions,
+        "metadata": {
+            "source_dbs": source_dbs,
+            "event_jobs": jobs,
+        },
+    }
+
+
+def event_listener_report_jobs(window: Any, limit: int = 20000) -> list[dict[str, Any]]:
+    if not EVENT_JOB_DB.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with sqlite3.connect(EVENT_JOB_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        candidates = conn.execute(
+            """
+            SELECT id, status, run_id, output_dir, db_path, updated_at, finished_at
+            FROM jobs
+            WHERE status = ?
+              AND db_path IS NOT NULL
+              AND db_path != ''
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            ("done", limit),
+        ).fetchall()
+    for row in candidates:
+        item = dict(row)
+        timestamp = parse_event_listener_timestamp(str(item.get("finished_at") or item.get("updated_at") or ""))
+        if timestamp is None:
+            continue
+        if window.start <= timestamp < window.end:
+            item["report_timestamp"] = timestamp.isoformat(timespec="seconds")
+            rows.append(item)
+    rows.sort(key=lambda item: item.get("report_timestamp") or "")
+    return rows
+
+
+def parse_event_listener_timestamp(value: str) -> datetime | None:
+    if not value:
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed.astimezone()
+
+
+def resolve_project_path(value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def event_work_session_report_root() -> Path:
+    return PROJECT_ROOT / "outputs" / "event_listener" / "reports" / "work_sessions"
+
+
+def latest_event_work_session_report() -> dict[str, Any]:
+    reports_root = event_work_session_report_root()
+    if not reports_root.is_dir():
+        return {}
+    report_dirs = [path for path in reports_root.iterdir() if path.is_dir()]
+    report_dirs.sort(key=lambda path: safe_stat(path / "半日质检报告.md")[0], reverse=True)
+    for report_dir in report_dirs:
+        payload = work_session_report_payload(report_dir)
+        if payload:
+            return payload
+    return {}
+
+
+def event_work_session_report(report_key: str = "") -> dict[str, Any]:
+    if not report_key:
+        return latest_event_work_session_report()
+    if Path(report_key).name != report_key:
+        return {}
+    report_dir = event_work_session_report_root() / report_key
+    if not report_dir.is_dir():
+        return {}
+    return work_session_report_payload(report_dir)
+
+
+def event_report_url(path: str, report_key: str) -> str:
+    return f"{path}?{urlencode({'report': report_key})}"
+
+
+def cleanup_event_work_session_reports() -> None:
+    """Apply event-listener retention policy to generated report folders."""
+    settings = event_listener_settings()
+    max_days = parse_float_setting(settings.get("retention_days"), 14.0)
+    max_runs = parse_int_setting(settings.get("retention_max_runs"), 0)
+    max_gb = parse_float_setting(settings.get("retention_max_gb"), 0.0)
+    cleanup_report_outputs(
+        event_work_session_report_root(),
+        max_days=max_days,
+        max_runs=max_runs,
+        max_gb=max_gb,
+    )
+
+
+def cleanup_report_outputs(output_dir: Path, max_days: float, max_runs: int, max_gb: float) -> None:
+    if max_runs <= 0 and max_days <= 0 and max_gb <= 0:
+        return
+    candidates = report_retention_candidates(output_dir, include_size=max_gb > 0)
+    if not candidates:
+        return
+    now = time.time()
+    keep: set[Path] = set()
+    remove: dict[Path, str] = {}
+
+    if max_days > 0:
+        cutoff = now - (max_days * 86400)
+        for item in candidates:
+            if item["mtime"] < cutoff:
+                remove[item["path"]] = f"older_than_{max_days:g}_days"
+
+    remaining = [item for item in candidates if item["path"] not in remove]
+    remaining.sort(key=lambda item: item["mtime"], reverse=True)
+    if max_runs > 0:
+        for item in remaining[:max_runs]:
+            keep.add(item["path"])
+        for item in remaining[max_runs:]:
+            remove.setdefault(item["path"], f"over_{max_runs}_runs")
+
+    if max_gb > 0:
+        max_bytes = int(max_gb * 1024**3)
+        size_items = [item for item in remaining if item["path"] not in remove]
+        size_items.sort(key=lambda item: item["mtime"], reverse=True)
+        total = 0
+        for item in size_items:
+            total += int(item["size"])
+            if total > max_bytes and item["path"] not in keep:
+                remove.setdefault(item["path"], f"over_{max_gb:g}_gb")
+
+    if not remove:
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / RETENTION_MANIFEST
+    removed = 0
+    with manifest_path.open("a", encoding="utf-8") as manifest:
+        for path, reason in sorted(remove.items(), key=lambda item: str(item[0])):
+            try:
+                size = directory_size_bytes(path)
+                shutil.rmtree(path)
+                removed += 1
+                manifest.write(
+                    json.dumps(
+                        {
+                            "removed_at": now_iso(),
+                            "path": str(path),
+                            "reason": reason,
+                            "size_bytes": size,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            except OSError as exc:
+                print(f"report retention cleanup warning: could not remove {path}: {exc}", flush=True)
+    if removed:
+        print(f"report retention cleanup: removed {removed} old work-session report folder(s)", flush=True)
+
+
+def report_retention_candidates(output_dir: Path, include_size: bool = False) -> list[dict[str, Any]]:
+    if not output_dir.is_dir():
+        return []
+    candidates = []
+    for child in output_dir.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            stat = child.stat()
+        except OSError:
+            continue
+        candidates.append(
+            {
+                "path": child,
+                "mtime": stat.st_mtime,
+                "size": directory_size_bytes(child) if include_size else 0,
+            }
+        )
+    return candidates
+
+
+def directory_size_bytes(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def parse_float_setting(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_int_setting(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def render_event_work_session_report_html(report_key: str = "") -> str:
+    report = event_work_session_report(report_key)
+    if not report:
+        body = """
+        <main>
+          <h1>事件监听半日报告</h1>
+          <p class="muted">尚未生成报告。请回到控制台点击“生成半日报告”。</p>
+          <p><a href="/">返回控制台</a></p>
+        </main>
+        """
+    else:
+        summary = report.get("summary") or {}
+        window = report.get("window") or {}
+        detail_url = event_report_url(
+            "/event-listener/device-failure-report.html",
+            str(report.get("report_key") or ""),
+        )
+        device_failure_html = render_device_failure_summary_html(
+            report.get("device_failure_summary") or [],
+            detail_url,
+        )
+        body = f"""
+        <main>
+          <div class="topbar">
+            <div>
+              <h1>事件监听半日报告</h1>
+              <p class="muted">{esc_html(window.get("start", ""))} 至 {esc_html(window.get("end", ""))}</p>
+            </div>
+            <p><a href="/">返回控制台</a></p>
+          </div>
+          <div class="metrics">
+            <div><b>{int(summary.get("episode_count") or 0)}</b><span>episode</span></div>
+            <div><b>{int(summary.get("issue_episode_count") or 0)}</b><span>问题 episode</span></div>
+            <div><b>{int(summary.get("finding_count") or 0)}</b><span>finding</span></div>
+            <div><b>{int(summary.get("training_blocking_episode_count") or 0)}</b><span>影响训练</span></div>
+          </div>
+          {device_failure_html}
+          <p class="muted">报告文件：{esc_html(report.get("markdown_path", ""))}</p>
+          <p class="muted">附件：{esc_html(report.get("core_issues_csv", ""))} | {esc_html(report.get("rule_explanations_csv", ""))} | {esc_html(report.get("operator_issues_csv", ""))} | {esc_html(report.get("operator_issue_episodes_csv", ""))} | {esc_html(report.get("affected_episodes_csv", ""))} | {esc_html(report.get("actions_csv", ""))}</p>
+          <pre>{esc_html(report.get("markdown", ""))}</pre>
+        </main>
+        """
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>事件监听半日报告</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1b1f24; }}
+    main {{ max-width: 1120px; margin: 0 auto; padding: 24px; }}
+    h1 {{ margin: 0 0 6px; font-size: 22px; }}
+    a {{ color: #1769aa; text-decoration: none; }}
+    .muted {{ color: #667085; font-size: 13px; }}
+    .topbar {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 16px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 12px; margin: 16px 0; }}
+    .metrics div {{ background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 12px; }}
+    .metrics b {{ display: block; font-size: 28px; }}
+    .metrics span {{ color: #667085; font-size: 12px; }}
+    .device-summary {{ margin: 18px 0; }}
+    .device-summary h2 {{ font-size: 18px; margin: 0 0 10px; }}
+    .device-summary-list {{ margin: 0; padding-left: 22px; columns: 2; }}
+    .device-summary-list li {{ margin: 6px 18px 6px 0; break-inside: avoid; }}
+    .device-summary-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }}
+    .device-summary-head code {{ overflow-wrap: anywhere; }}
+    .device-summary-total {{ font-weight: 700; white-space: nowrap; }}
+    .device-report-link {{ display: inline-block; margin-top: 10px; font-weight: 700; }}
+    pre {{ white-space: pre-wrap; background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 18px; line-height: 1.55; overflow: auto; }}
+    @media (max-width: 760px) {{ .topbar, .metrics {{ display: block; }} .metrics div {{ margin-bottom: 10px; }} .device-summary-list {{ columns: 1; }} }}
+  </style>
+</head>
+<body>{body}</body>
+</html>"""
+
+
+def render_device_failure_summary_html(rows: list[dict[str, Any]], detail_url: str) -> str:
+    if not rows:
+        content = '<p class="muted">本时段暂无设备级失败或待复查 finding。</p>'
+    else:
+        items = "".join(
+            f"<li><code>{esc_html(row.get('collector_id', 'unknown_collector'))}</code>："
+            f"<b>{int(row.get('finding_count') or 0)}</b> 条</li>"
+            for row in rows
+        )
+        content = f'<ol class="device-summary-list">{items}</ol>'
+    return (
+        '<section class="device-summary"><h2>设备故障统计</h2>'
+        f"{content}"
+        f'<a class="device-report-link" href="{esc_html(detail_url)}">设备故障统计</a></section>'
+    )
+
+
+def render_device_failure_detail_html(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return '<p class="muted">本时段暂无设备级失败或待复查 finding。</p>'
+    items = []
+    for row in rows:
+        check_text = "，".join(
+            f"<code>{esc_html(item.get('check_name', 'unknown'))}</code> "
+            f"{int(item.get('finding_count') or 0)} 条 ({float(item.get('percent') or 0):.1f}%)"
+            for item in row.get("check_name_counts") or []
+        )
+        risk_html = ""
+        risk_class = " risk" if row.get("hardware_issue_signal") else ""
+        if row.get("hardware_issue_signal"):
+            risk_html = (
+                '<div class="device-risk">重点设备风险：'
+                f"{esc_html(row.get('dominant_check_name', 'unknown'))} 占 "
+                f"{float(row.get('dominant_percent') or 0):.1f}%，建议优先检查硬件或连接状态。</div>"
+            )
+        items.append(
+            f'<div class="device-summary-item{risk_class}">'
+            '<div class="device-summary-head">'
+            f"<code>{esc_html(row.get('collector_id', 'unknown_collector'))}</code>"
+            f'<span class="device-summary-total">{int(row.get("finding_count") or 0)} 条</span>'
+            "</div>"
+            f'<div class="device-summary-checks">{check_text}</div>'
+            f"{risk_html}</div>"
+        )
+    return (
+        '<div class="device-summary-list">'
+        f'{"".join(items)}</div>'
+    )
+
+
+def render_event_device_failure_report_html(report_key: str = "") -> str:
+    report = event_work_session_report(report_key)
+    if not report:
+        body = """
+        <main>
+          <h1>设备故障统计</h1>
+          <p class="muted">未找到指定报告。</p>
+          <p><a href="/event-listener/work-session-report.html">返回半日报告</a></p>
+        </main>
+        """
+    else:
+        window = report.get("window") or {}
+        selected_key = str(report.get("report_key") or "")
+        back_url = event_report_url("/event-listener/work-session-report.html", selected_key)
+        detail_html = render_device_failure_detail_html(report.get("device_failure_summary") or [])
+        body = f"""
+        <main>
+          <div class="topbar">
+            <div>
+              <h1>设备故障统计</h1>
+              <p class="muted">{esc_html(window.get("start", ""))} 至 {esc_html(window.get("end", ""))}</p>
+            </div>
+            <a href="{esc_html(back_url)}">返回半日报告</a>
+          </div>
+          <p class="muted">仅统计 fail / needs_review finding，全部设备按问题总数降序排列。</p>
+          {detail_html}
+        </main>
+        """
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>设备故障统计</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1b1f24; }}
+    main {{ max-width: 1120px; margin: 0 auto; padding: 24px; }}
+    h1 {{ margin: 0 0 6px; font-size: 22px; }}
+    a {{ color: #1769aa; text-decoration: none; }}
+    code {{ overflow-wrap: anywhere; }}
+    .muted {{ color: #667085; font-size: 13px; }}
+    .topbar {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 16px; }}
+    .device-summary-list {{ display: grid; gap: 8px; margin-top: 14px; }}
+    .device-summary-item {{ background: white; border: 1px solid #d8dde6; border-radius: 6px; padding: 12px; }}
+    .device-summary-item.risk {{ border-color: #d92d20; background: #fff7f6; }}
+    .device-summary-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }}
+    .device-summary-total {{ font-weight: 700; white-space: nowrap; }}
+    .device-summary-checks {{ margin-top: 7px; color: #475467; font-size: 13px; line-height: 1.6; }}
+    .device-risk {{ margin-top: 7px; color: #b42318; font-size: 13px; font-weight: 700; }}
+    @media (max-width: 760px) {{ .topbar {{ display: block; }} }}
+  </style>
+</head>
+<body>{body}</body>
+</html>"""
+
+
+def esc_html(value: Any) -> str:
+    return (
+        str(value or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+def start_work_session_report_scheduler(state: DashboardState) -> None:
+    if not state.auto_work_session_reports:
+        return
+
+    def worker() -> None:
+        time.sleep(5)
+        while True:
+            try:
+                now = time.monotonic()
+                if now - state.work_session_report_last_run >= state.work_session_report_interval_seconds:
+                    api_generate_event_work_session_report({"session": "current"})
+                    state.work_session_report_last_run = now
+            except Exception as exc:
+                print(f"Auto work-session report failed: {exc}", flush=True)
+            time.sleep(60)
+
+    threading.Thread(target=worker, name="work-session-report-scheduler", daemon=True).start()
+
+
 def api_event_listener_action(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     env = os.environ.copy()
     for key in (
         "WORKERS",
         "EVENT_BATCH_SIZE",
+        "EVENT_DATE",
+        "EVENT_DATE_FROM",
+        "EVENT_DATE_TO",
         "STABILITY_INTERVAL",
         "STABILITY_TIMEOUT",
         "MIN_FREE_MEM_GB",
+        "MAX_LOAD_RATIO",
+        "RESOURCE_MAXvo_WAIT_SECONDS",
+        "RETENTION_DAYS",
+        "RETENTION_MAX_RUNS",
+        "RETENTION_MAX_GB",
         "PHASES",
         "QUALITY_LABEL",
         "DISABLE_QUALITY_LABEL_FILTER",
+        "DCS_CONFIG_FILE",
+        "QA_DCS_NOTIFY_ENABLED",
+        "QA_DCS_NOTIFY_DRY_RUN",
+        "QA_DCS_NOTIFY_WAIT",
+        "QA_DCS_NOTIFY_EVENT",
+        "QA_DCS_NOTIFY_STATUSES",
+        "QA_DCS_NOTIFY_ACTIONABLE_STATUSES",
+        "QA_DCS_NOTIFY_ACTIONABLE_CHECKS",
+        "QA_DCS_NOTIFY_EXCLUDE_CHECKS",
     ):
         if key.lower() in payload:
             env[key] = str(payload[key.lower()])
@@ -518,7 +1241,8 @@ def event_listener_status() -> dict[str, Any]:
         "job_db": str(EVENT_JOB_DB),
         "counts": {},
         "recent": [],
-        "output_size": directory_size(PROJECT_ROOT / "outputs" / "event_listener"),
+        "output_size": directory_size(PROJECT_ROOT / "outputs" / "event_listener", max_files=2000),
+        "settings": event_listener_settings(),
     }
     if not EVENT_JOB_DB.exists():
         return status
@@ -541,6 +1265,57 @@ def event_listener_status() -> dict[str, Any]:
     except sqlite3.Error as exc:
         status["error"] = str(exc)
     return status
+
+
+def event_listener_settings() -> dict[str, Any]:
+    args = current_process_args("Werkzeuge/listen_episode_verified.py")
+    if not args:
+        return {}
+    return {
+        "phases": option_value(args, "--phases", ""),
+        "workers": option_value(args, "--workers", ""),
+        "batch_size": option_value(args, "--batch-size", ""),
+        "event_date": option_value(args, "--event-date", ""),
+        "event_date_from": option_value(args, "--event-date-from", ""),
+        "event_date_to": option_value(args, "--event-date-to", ""),
+        "max_load_ratio": option_value(args, "--max-load-ratio", ""),
+        "min_free_mem_gb": option_value(args, "--min-free-mem-gb", ""),
+        "stability_interval": option_value(args, "--stability-interval", ""),
+        "stability_timeout": option_value(args, "--stability-timeout", ""),
+        "resource_max_wait_seconds": option_value(args, "--resource-max-wait-seconds", ""),
+        "retention_days": option_value(args, "--retention-days", ""),
+        "retention_max_runs": option_value(args, "--retention-max-runs", ""),
+        "retention_max_gb": option_value(args, "--retention-max-gb", ""),
+    }
+
+
+def current_process_args(marker: str) -> list[str]:
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return []
+    for path in proc_root.iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            raw = (path / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        args = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+        if any(marker in arg for arg in args) and "serve" in args:
+            return args
+    return []
+
+
+def option_value(args: list[str], flag: str, default: str = "") -> str:
+    try:
+        index = args.index(flag)
+    except ValueError:
+        return default
+    if index + 1 >= len(args):
+        return default
+    return args[index + 1]
 
 
 def event_listener_jobs(limit: int = 100, issues_only: bool = False) -> list[dict[str, Any]]:
@@ -607,20 +1382,26 @@ def event_listener_job_detail(job_id: int, verified_root: Path) -> dict[str, Any
 
 
 def consecutive_failure_warnings(state: DashboardState) -> dict[str, Any]:
+    now = time.monotonic()
+    with state.lock:
+        if state.failure_warning_signature and now - state.failure_warning_last_checked < 60.0:
+            return state.failure_warning_cache
     signature = event_job_warning_signature()
     if signature is None:
         return {"count": 0, "warnings": [], "checked_jobs": 0}
     with state.lock:
         if state.failure_warning_signature == signature:
+            state.failure_warning_last_checked = now
             return state.failure_warning_cache
     warnings = compute_consecutive_failure_warnings(state.issue_history_db)
     with state.lock:
         state.failure_warning_signature = signature
         state.failure_warning_cache = warnings
+        state.failure_warning_last_checked = now
     return warnings
 
 
-def event_job_warning_signature() -> tuple[int, int, str, str] | None:
+def event_job_warning_signature() -> tuple[int, int, str] | None:
     if not EVENT_JOB_DB.exists():
         return None
     try:
@@ -629,19 +1410,9 @@ def event_job_warning_signature() -> tuple[int, int, str, str] | None:
                 "SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id, "
                 "COALESCE(MAX(updated_at), '') AS max_updated_at FROM jobs"
             ).fetchone()
-            db_paths = [
-                str(item[0] or "")
-                for item in conn.execute("SELECT DISTINCT db_path FROM jobs WHERE db_path IS NOT NULL")
-            ]
     except sqlite3.Error:
         return None
-    db_mtimes = []
-    for db_path in db_paths:
-        try:
-            db_mtimes.append(f"{db_path}:{Path(db_path).stat().st_mtime_ns}")
-        except OSError:
-            db_mtimes.append(f"{db_path}:missing")
-    return (int(row[0] or 0), int(row[1] or 0), str(row[2] or ""), "|".join(sorted(db_mtimes)))
+    return (int(row[0] or 0), int(row[1] or 0), str(row[2] or ""))
 
 
 def compute_consecutive_failure_warnings(issue_history_db: Path = DEFAULT_ISSUE_HISTORY_DB) -> dict[str, Any]:
@@ -666,7 +1437,7 @@ def compute_consecutive_failure_warnings(issue_history_db: Path = DEFAULT_ISSUE_
             continue
         latest_by_path[mounted_path] = job
 
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for job in latest_by_path.values():
         mounted_path = str(job.get("mounted_path") or "")
         episode_number = parse_episode_number(mounted_path)
@@ -676,9 +1447,10 @@ def compute_consecutive_failure_warnings(issue_history_db: Path = DEFAULT_ISSUE_
         task = str(result.get("task") or task_from_episode_path(mounted_path) or "")
         robot = str(result.get("robot") or robot_from_episode_path(mounted_path) or "")
         operator = str(result.get("operator") or operator_from_episode_path(mounted_path) or "")
+        context_date = str(result.get("date") or date_from_episode_path(mounted_path) or "")
         if not task or not robot:
             continue
-        groups.setdefault((task, robot, operator), []).append(
+        groups.setdefault((task, robot, operator, context_date), []).append(
             {
                 "episode_number": episode_number,
                 "episode_name": Path(mounted_path).name,
@@ -686,18 +1458,20 @@ def compute_consecutive_failure_warnings(issue_history_db: Path = DEFAULT_ISSUE_
                 "db_path": str(job.get("db_path") or ""),
                 "job_status": str(job.get("status") or ""),
                 "final_status": str(result.get("final_status") or ""),
+                "date": context_date,
                 "updated_at": str(job.get("updated_at") or ""),
             }
         )
 
     detected = []
-    for (task, robot, operator), episodes in groups.items():
+    for (task, robot, operator, context_date), episodes in groups.items():
         for streak in consecutive_bad_segments(episodes, CONSECUTIVE_FAILURE_STREAK_LENGTH):
             detected.append(
                 {
                     "task": task,
                     "robot": robot,
                     "operator": operator,
+                    "context_date": context_date,
                     "start_episode_number": streak[0]["episode_number"],
                     "end_episode_number": streak[-1]["episode_number"],
                     "start_episode_name": streak[0]["episode_name"],
@@ -753,7 +1527,7 @@ def record_consecutive_failure_detections(db_path: Path, detections: list[dict[s
                 """
                 SELECT 1
                 FROM consecutive_failure_streaks
-                WHERE task = ? AND robot = ? AND operator = ?
+                WHERE task = ? AND robot = ? AND operator = ? AND context_date = ?
                   AND episode_start = ? AND episode_end = ?
                 LIMIT 1
                 """,
@@ -761,6 +1535,7 @@ def record_consecutive_failure_detections(db_path: Path, detections: list[dict[s
                     effective["task"],
                     effective["robot"],
                     effective["operator"],
+                    str(effective.get("context_date") or ""),
                     int(effective["start_episode_number"]),
                     int(effective["end_episode_number"]),
                 ),
@@ -770,16 +1545,17 @@ def record_consecutive_failure_detections(db_path: Path, detections: list[dict[s
             conn.execute(
                 """
                 INSERT INTO consecutive_failure_streaks (
-                    task, robot, operator, episode_start, episode_end,
+                    task, robot, operator, context_date, episode_start, episode_end,
                     streak_length, issue_types, detected_at, resolved_at,
                     resolution_time_seconds
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
                 """,
                 (
                     effective["task"],
                     effective["robot"],
                     effective["operator"],
+                    str(effective.get("context_date") or ""),
                     int(effective["start_episode_number"]),
                     int(effective["end_episode_number"]),
                     int(effective["streak_length"]),
@@ -793,17 +1569,18 @@ def effective_detection_for_history(conn: sqlite3.Connection, item: dict[str, An
     task = str(item["task"])
     robot = str(item["robot"])
     operator = str(item["operator"])
+    context_date = str(item.get("context_date") or "")
     segment_start = int(item["start_episode_number"])
     segment_end = int(item["end_episode_number"])
     rows = conn.execute(
         """
         SELECT id, episode_start, episode_end, issue_types, resolved_at
         FROM consecutive_failure_streaks
-        WHERE task = ? AND robot = ? AND operator = ?
+        WHERE task = ? AND robot = ? AND operator = ? AND context_date = ?
           AND episode_start <= ? AND episode_end >= ?
         ORDER BY episode_start, episode_end, id
         """,
-        (task, robot, operator, segment_end, segment_start),
+        (task, robot, operator, context_date, segment_end, segment_start),
     ).fetchall()
 
     for row in rows:
@@ -888,7 +1665,7 @@ def active_consecutive_failure_warnings(db_path: Path, limit: int = 20) -> dict[
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT id, task, robot, operator, episode_start, episode_end,
+            SELECT id, task, robot, operator, context_date, episode_start, episode_end,
                    streak_length, issue_types, detected_at
             FROM consecutive_failure_streaks
             WHERE resolved_at IS NULL
@@ -896,9 +1673,9 @@ def active_consecutive_failure_warnings(db_path: Path, limit: int = 20) -> dict[
             """
         ).fetchall()
 
-    by_combo: dict[tuple[str, str, str], dict[str, Any]] = {}
+    by_combo: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for row in rows:
-        key = (row["task"], row["robot"], row["operator"])
+        key = (row["task"], row["robot"], row["operator"], row["context_date"])
         if key in by_combo:
             continue
         item = {
@@ -906,6 +1683,7 @@ def active_consecutive_failure_warnings(db_path: Path, limit: int = 20) -> dict[
             "task": row["task"],
             "robot": row["robot"],
             "operator": row["operator"],
+            "context_date": row["context_date"],
             "start_episode_number": int(row["episode_start"]),
             "end_episode_number": int(row["episode_end"]),
             "streak_length": int(row["streak_length"]),
@@ -933,6 +1711,7 @@ def api_resolve_consecutive_failure(state: DashboardState, payload: dict[str, An
     task = str(payload.get("task") or "")
     robot = str(payload.get("robot") or "")
     operator = str(payload.get("operator") or "")
+    context_date = str(payload.get("context_date") or payload.get("date") or "")
     episode_start = int(payload.get("episode_start"))
     episode_end = int(payload.get("episode_end"))
     resolved = resolve_consecutive_failure(
@@ -940,13 +1719,19 @@ def api_resolve_consecutive_failure(state: DashboardState, payload: dict[str, An
         task,
         robot,
         operator,
+        context_date,
         episode_start,
         episode_end,
     )
+    active = active_consecutive_failure_warnings(state.issue_history_db, limit=20)
+    signature = event_job_warning_signature()
     with state.lock:
-        state.failure_warning_signature = None
-        state.failure_warning_cache = {"count": 0, "warnings": [], "checked_jobs": 0}
-    return {"ok": resolved, "consecutive_failures": consecutive_failure_warnings(state)}
+        previous_checked_jobs = state.failure_warning_cache.get("checked_jobs", 0)
+        active["checked_jobs"] = previous_checked_jobs
+        state.failure_warning_signature = signature
+        state.failure_warning_cache = active
+        state.failure_warning_last_checked = time.monotonic()
+    return {"ok": resolved, "consecutive_failures": active}
 
 
 def resolve_consecutive_failure(
@@ -954,6 +1739,7 @@ def resolve_consecutive_failure(
     task: str,
     robot: str,
     operator: str,
+    context_date: str,
     episode_start: int,
     episode_end: int,
 ) -> bool:
@@ -964,25 +1750,41 @@ def resolve_consecutive_failure(
             """
             SELECT id, detected_at
             FROM consecutive_failure_streaks
-            WHERE task = ? AND robot = ? AND operator = ?
+            WHERE task = ? AND robot = ? AND operator = ? AND context_date = ?
               AND episode_start = ? AND episode_end = ?
               AND resolved_at IS NULL
             ORDER BY detected_at DESC, id DESC
             LIMIT 1
             """,
-            (task, robot, operator, episode_start, episode_end),
+            (task, robot, operator, context_date, episode_start, episode_end),
         ).fetchone()
         if row is None:
             return False
-        resolution_seconds = max(0, int(datetime.fromisoformat(resolved_at).timestamp() - datetime.fromisoformat(row[1]).timestamp()))
-        conn.execute(
+        unresolved_rows = conn.execute(
             """
-            UPDATE consecutive_failure_streaks
-            SET resolved_at = ?, resolution_time_seconds = ?
-            WHERE id = ?
+            SELECT id, detected_at
+            FROM consecutive_failure_streaks
+            WHERE task = ? AND robot = ? AND operator = ? AND context_date = ?
+              AND resolved_at IS NULL
             """,
-            (resolved_at, resolution_seconds, int(row[0])),
-        )
+            (task, robot, operator, context_date),
+        ).fetchall()
+        for unresolved in unresolved_rows:
+            resolution_seconds = max(
+                0,
+                int(
+                    datetime.fromisoformat(resolved_at).timestamp()
+                    - datetime.fromisoformat(unresolved[1]).timestamp()
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE consecutive_failure_streaks
+                SET resolved_at = ?, resolution_time_seconds = ?
+                WHERE id = ?
+                """,
+                (resolved_at, resolution_seconds, int(unresolved[0])),
+            )
     return True
 
 
@@ -1172,6 +1974,9 @@ def job_episode_result(job: dict[str, Any], include_findings: bool = False) -> d
     db_path = Path(str(job.get("db_path") or ""))
     episode_path = str(job.get("mounted_path") or "")
     if not db_path.is_file() or not episode_path:
+        if str(job.get("status") or "").lower() == "failed":
+            result["pipeline_error"] = str(job.get("error") or "QA pipeline failed before a result database was created.")
+            result["result_missing"] = True
         return result
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
@@ -1193,6 +1998,12 @@ def job_episode_result(job: dict[str, Any], include_findings: bool = False) -> d
                 result["date"] = episode["date"] or ""
                 result["controller"] = episode["controller"] or ""
                 result["episode_last_updated"] = episode["last_updated"] or ""
+            elif str(job.get("status") or "").lower() == "done":
+                result["qa_result_missing"] = True
+                result["qa_missing_reason"] = (
+                    "Listener job finished, but this episode is not in the QA result DB. "
+                    "It was likely filtered or skipped before QA checks, for example by the quality-label filter."
+                )
             result["issue_count"] = scalar(
                 conn,
                 "SELECT COUNT(*) FROM findings WHERE episode_path = ? AND status != ?",
@@ -1267,6 +2078,15 @@ def operator_from_episode_path(path: str) -> str:
     try:
         index = parts.index("verified")
         return parts[index + 5] if len(parts) > index + 5 else ""
+    except ValueError:
+        return ""
+
+
+def date_from_episode_path(path: str) -> str:
+    parts = Path(path).parts
+    try:
+        index = parts.index("verified")
+        return parts[index + 4] if len(parts) > index + 4 else ""
     except ValueError:
         return ""
 
@@ -1483,6 +2303,56 @@ def latest_run_status(output_dir: Path) -> dict[str, Any]:
         if isinstance(data, dict):
             return data
     return {}
+
+
+def latest_work_session_report(output_dir: Path) -> dict[str, Any]:
+    reports_root = output_dir / "reports" / "work_sessions"
+    if not reports_root.is_dir():
+        return {}
+    report_dirs = [path for path in reports_root.iterdir() if path.is_dir()]
+    report_dirs.sort(key=lambda path: safe_stat(path / "半日质检报告.md")[0], reverse=True)
+    for report_dir in report_dirs:
+        payload = work_session_report_payload(report_dir)
+        if payload:
+            return payload
+    return {}
+
+
+def work_session_report_payload(report_dir: Path) -> dict[str, Any]:
+    markdown_path = report_dir / "半日质检报告.md"
+    json_path = report_dir / "report.json"
+    try:
+        markdown = markdown_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    metadata: dict[str, Any] = {}
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            metadata = {
+                "generated_at": raw.get("generated_at", ""),
+                "window": raw.get("window", {}),
+                "summary": raw.get("summary", {}),
+                "core_issue_count": len(raw.get("core_issues") or []),
+                "device_failure_summary": raw.get("device_failure_summary") or [],
+                "rule_explanations": raw.get("rule_explanations") or [],
+            }
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {
+        "report_key": report_dir.name,
+        "report_dir": str(report_dir),
+        "markdown_path": str(markdown_path),
+        "json_path": str(json_path),
+        "core_issues_csv": str(report_dir / "核心问题汇总.csv"),
+        "rule_explanations_csv": str(report_dir / "检测规则说明.csv"),
+        "operator_issues_csv": str(report_dir / "采集人员问题占比.csv"),
+        "operator_issue_episodes_csv": str(report_dir / "采集人员问题episode索引.csv"),
+        "affected_episodes_csv": str(report_dir / "问题episode清单.csv"),
+        "actions_csv": str(report_dir / "处理建议.csv"),
+        "markdown": markdown,
+        **metadata,
+    }
 
 
 def server_load() -> dict[str, Any]:
@@ -1703,16 +2573,31 @@ def tail_file(path: Path, limit: int) -> list[str]:
     return lines[-limit:]
 
 
-def directory_size(path: Path) -> str:
+def directory_size(path: Path, max_files: int | None = None) -> str:
     if not path.exists():
         return "0B"
     total = 0
-    for item in path.rglob("*"):
-        if item.is_file():
+    scanned = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        for item in entries:
+            if item.is_dir():
+                stack.append(item)
+                continue
+            if not item.is_file():
+                continue
             try:
                 total += item.stat().st_size
             except OSError:
                 pass
+            scanned += 1
+            if max_files is not None and scanned >= max_files:
+                return human_bytes(total) + "+"
     return human_bytes(total)
 
 
@@ -1768,7 +2653,12 @@ def discovered_run_id(output_dir: Path) -> str:
             return run_dir.name
     except OSError:
         pass
-    return sanitize_id(str(output_dir.relative_to(PROJECT_ROOT / "outputs")).replace("/", "-"))
+    for root in (PROJECT_ROOT / "outputs", REPO_ROOT / "outputs"):
+        try:
+            return sanitize_id(str(output_dir.relative_to(root)).replace("/", "-"))
+        except ValueError:
+            continue
+    return sanitize_id(output_dir.name)
 
 
 def now_iso() -> str:
@@ -1877,6 +2767,7 @@ def render_index_html(state: DashboardState) -> str:
     .failure-warning-issues {{ color: var(--muted); font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }}
     .resolve-streak-btn {{ height: 26px; padding: 0 8px; font-size: 12px; margin-top: 6px; }}
     .resolve-streak-btn.confirm {{ background: #f59e0b; border-color: #d97706; color: #fff; }}
+    .report-preview {{ max-height: 460px; overflow: auto; white-space: pre-wrap; }}
     .failure-warning-more {{ color: var(--muted); font-size: 12px; padding-top: 8px; border-top: 1px solid #fde68a; }}
     .event-summary-section {{ margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }}
     .event-summary-overview {{ margin-top: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; }}
@@ -1896,6 +2787,11 @@ def render_index_html(state: DashboardState) -> str:
     .modal.wide {{ width: min(1280px, 96vw); }}
     .modal-header {{ position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
     .modal-body {{ padding: 12px; }}
+    .rule-card {{ border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin-bottom: 10px; background: #fff; }}
+    .rule-title {{ display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }}
+    .rule-title code {{ color: var(--muted); }}
+    .rule-meta {{ display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; font-size: 13px; }}
+    .rule-meta b {{ color: var(--muted); font-weight: 600; }}
     @media (max-width: 1000px) {{ main {{ grid-template-columns: 1fr; }} aside {{ border-right: 0; border-bottom: 1px solid var(--line); }} .grid, .two, .summary-card {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
@@ -1946,6 +2842,28 @@ def render_index_html(state: DashboardState) -> str:
     </div>
     <div class="panel">
       <h2>Event Listener</h2>
+      <div class="two">
+        <div><label>Phases</label><input id="eventPhases" value="1,2,3,7"></div>
+        <div><label>Workers</label><input id="eventWorkers" type="number" value="1" min="1" max="8"></div>
+      </div>
+      <div class="two">
+        <div><label>Event batch size</label><input id="eventBatchSize" type="number" value="16" min="1" max="256"></div>
+        <div><label>Max load ratio</label><input id="eventMaxLoadRatio" type="number" value="0.75" min="0.1" max="1.5" step="0.05"></div>
+      </div>
+      <label>Event exact date</label>
+      <input id="eventDate" placeholder="YYYYMMDD/today/yesterday, optional">
+      <div class="two">
+        <div><label>Event date from</label><input id="eventDateFrom" placeholder="YYYYMMDD or today"></div>
+        <div><label>Event date to</label><input id="eventDateTo" placeholder="YYYYMMDD or today"></div>
+      </div>
+      <div class="two">
+        <div><label>Min free mem GB</label><input id="eventMinMem" type="number" value="6" min="1" max="64" step="0.1"></div>
+        <div><label>Resource wait sec</label><input id="eventResourceWait" type="number" value="300" min="0" max="3600"></div>
+      </div>
+      <div class="two">
+        <div><label>Stability interval sec</label><input id="eventStabilityInterval" type="number" value="3" min="1" max="120"></div>
+        <div><label>Stability timeout sec</label><input id="eventStabilityTimeout" type="number" value="90" min="10" max="3600"></div>
+      </div>
       <label>Quality label filter</label>
       <input id="eventQualityLabel" value="完全正常">
       <label class="row" style="margin-top:8px">
@@ -1980,13 +2898,18 @@ def render_index_html(state: DashboardState) -> str:
       <div>
         <div id="eventSeverityStrip" class="severity-strip"></div>
         <div id="eventSummaryLead" class="summary-subtitle"></div>
+        <div id="eventWorkSessionReportBox" class="summary-subtitle" style="margin-top:8px"></div>
       </div>
-      <div><button class="primary" onclick="openEventSummaryModal()">Summary</button></div>
+      <div class="row">
+        <button class="primary" onclick="generateEventWorkSessionReport()">生成半日报告</button>
+        <button onclick="openEventWorkSessionReport()">打开报告</button>
+        <button onclick="openEventSummaryModal()">Summary</button>
+      </div>
     </div>
     <div class="panel">
       <div class="row" style="justify-content:space-between">
-        <h2>Event Issue Episodes</h2>
-        <span class="muted">episodes with non-pass findings from event listener</span>
+        <h2>Latest Event Episodes</h2>
+        <span class="muted">latest detected episodes from event listener</span>
       </div>
       <div class="table-scroll wide">
         <table>
@@ -2074,18 +2997,39 @@ def render_index_html(state: DashboardState) -> str:
     </div>
   </div>
 </div>
+<div id="ruleExplanationModal" class="modal-backdrop" onclick="closeRuleExplanationModal(event)">
+  <div class="modal wide" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <h2>检测规则说明</h2>
+        <div id="ruleExplanationMeta" class="muted">当前报告命中的非通过规则</div>
+      </div>
+      <button onclick="closeRuleExplanationModal()" class="link-btn">Close</button>
+    </div>
+    <div class="modal-body">
+      <input id="ruleExplanationFilter" placeholder="搜索问题类型、中文标题或检测阶段" oninput="renderRuleExplanationRows()" style="margin-bottom:10px">
+      <div id="ruleExplanationBody"></div>
+    </div>
+  </div>
+</div>
 <div id="checkNameTooltip" role="tooltip"></div>
 <script>
 const refreshMs = {refresh};
 let selectedRun = null;
 let selectedEventJob = null;
+let latestRuleExplanations = [];
 let eventJobsSort = {{key: 'id', direction: 'asc'}};
 let eventJobsCache = [];
 let eventIssueSummaryCache = {{}};
 let eventContextSummarySort = {{key: null, direction: 'asc'}};
 let eventIssueSummarySort = {{key: null, direction: 'asc'}};
-let pendingResolveButton = null;
+let refreshInFlight = false;
+let lastHeavyRefresh = 0;
+let eventSettingsInitialized = false;
+let pendingResolveKey = null;
 let pendingResolveTimer = null;
+let consecutiveFailuresState = {{count: 0, warnings: [], hidden_count: 0}};
+const locallyResolvedFailureKeys = new Set();
 
 async function getJson(url) {{
   const r = await fetch(url, {{cache: 'no-store'}});
@@ -2094,7 +3038,9 @@ async function getJson(url) {{
 
 async function postJson(url, body) {{
   const r = await fetch(url, {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(body || {{}})}});
-  return await r.json();
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || `HTTP ${{r.status}}`);
+  return data;
 }}
 
 function cls(status) {{ return 'status-' + String(status || '').replace(/_/g, '-'); }}
@@ -2105,11 +3051,67 @@ function esc(s) {{
   return String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
 }}
 
+function closeRuleExplanationModal(event) {{
+  if (event && event.target && event.target.id !== 'ruleExplanationModal') return;
+  document.getElementById('ruleExplanationModal').classList.remove('open');
+}}
+
+function openRuleExplanationModal() {{
+  const modal = document.getElementById('ruleExplanationModal');
+  const filter = document.getElementById('ruleExplanationFilter');
+  if (filter) filter.value = '';
+  renderRuleExplanationRows();
+  modal.classList.add('open');
+}}
+
+function renderRuleExplanationRows() {{
+  const body = document.getElementById('ruleExplanationBody');
+  const meta = document.getElementById('ruleExplanationMeta');
+  const filter = String((document.getElementById('ruleExplanationFilter') || {{}}).value || '').trim().toLowerCase();
+  const rows = (latestRuleExplanations || []).filter(row => {{
+    if (!filter) return true;
+    return [
+      row.check_name,
+      row.rule_title_zh,
+      row.phase,
+      row.description_zh,
+      row.standard_zh,
+      row.threshold_summary,
+      row.evidence_fields
+    ].some(value => String(value || '').toLowerCase().includes(filter));
+  }});
+  if (meta) meta.textContent = `${{rows.length}} / ${{(latestRuleExplanations || []).length}} 条规则`;
+  if (!rows.length) {{
+    body.innerHTML = '<div class="muted">当前报告暂无可显示的检测规则说明。</div>';
+    return;
+  }}
+  body.innerHTML = rows.map(row => `
+    <div class="rule-card">
+      <div class="rule-title">
+        <b>${{esc(row.rule_title_zh || row.check_name || '未命名规则')}}</b>
+        <code>${{esc(row.check_name || '')}}</code>
+      </div>
+      <div class="rule-meta">
+        <b>检测阶段</b><div>${{esc(row.phase || '未填写')}}</div>
+        <b>检测说明</b><div>${{esc(row.description_zh || '未填写')}}</div>
+        <b>判定标准</b><div>${{esc(row.standard_zh || '未填写')}}</div>
+        <b>阈值</b><div>${{esc(row.threshold_summary || '未填写')}}</div>
+        <b>严重程度</b><div>${{esc(row.severity_rule_zh || '未填写')}}</div>
+        <b>证据字段</b><div>${{esc(row.evidence_fields || '未填写')}}</div>
+      </div>
+    </div>
+  `).join('');
+}}
+
 async function copyEventPath(button) {{
   const text = button.dataset.copyPath || '';
   const original = button.textContent;
   try {{
-    await navigator.clipboard.writeText(text);
+    if (navigator.clipboard && window.isSecureContext) {{
+      await navigator.clipboard.writeText(text);
+    }} else {{
+      fallbackCopyText(text);
+    }}
     button.textContent = '已复制';
   }} catch (error) {{
     button.textContent = '复制失败';
@@ -2117,6 +3119,21 @@ async function copyEventPath(button) {{
   window.setTimeout(() => {{
     button.textContent = original;
   }}, 1500);
+}}
+
+function fallbackCopyText(text) {{
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!ok) throw new Error('copy command failed');
 }}
 
 function localTimestamp(value) {{
@@ -2129,33 +3146,83 @@ function localTimestamp(value) {{
 }}
 
 async function refresh() {{
-  const data = await getJson('/api/status');
-  document.getElementById('clock').textContent = localTimestamp(data.generated_at);
-  renderConsecutiveFailures(data.consecutive_failures || {{}});
-  document.getElementById('load1').textContent = Number(val(data,'server.load.1m',0)).toFixed(2);
-  document.getElementById('memUsed').textContent =
-    val(data,'server.memory.used_gb','-') + ' / ' + val(data,'server.memory.total_gb','-') + ' GB';
-  document.getElementById('memAvail').textContent =
-    'remaining ' + val(data,'server.memory.available_gb','-') + ' GB, swap used ' + val(data,'server.memory.swap_used_gb','-') + ' GB';
-  document.getElementById('eventPending').textContent = val(data,'event_listener.counts.pending',0);
-  document.getElementById('eventDone').textContent = val(data,'event_listener.counts.done',0);
-  document.getElementById('eventBox').innerHTML =
-    '<div>tmux: <b>' + (val(data,'event_listener.tmux_running',false) ? 'running' : 'stopped') + '</b></div>' +
-    '<div>running: ' + val(data,'event_listener.counts.running',0) + '</div>' +
-    '<div>pending: ' + val(data,'event_listener.counts.pending',0) + '</div>' +
-    '<div>output: ' + val(data,'event_listener.output_size','-') + '</div>';
-  renderRuns(data.runs || []);
-  await refreshEventIssueSummary();
-  await refreshEventJobs();
-  renderProcesses(val(data,'server.top_processes',[]));
-  if (selectedRun) await loadRun(selectedRun, false);
-  else await loadLog('event_listener');
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  try {{
+    const data = await getJson('/api/status');
+    document.getElementById('clock').textContent = localTimestamp(data.generated_at);
+    renderConsecutiveFailures(data.consecutive_failures || {{}});
+    document.getElementById('load1').textContent = Number(val(data,'server.load.1m',0)).toFixed(2);
+    document.getElementById('memUsed').textContent =
+      val(data,'server.memory.used_gb','-') + ' / ' + val(data,'server.memory.total_gb','-') + ' GB';
+    document.getElementById('memAvail').textContent =
+      'remaining ' + val(data,'server.memory.available_gb','-') + ' GB, swap used ' + val(data,'server.memory.swap_used_gb','-') + ' GB';
+    document.getElementById('eventPending').textContent = val(data,'event_listener.counts.pending',0);
+    document.getElementById('eventDone').textContent = val(data,'event_listener.counts.done',0);
+    const settings = val(data, 'event_listener.settings', {{}});
+    applyEventSettings(settings);
+    document.getElementById('eventBox').innerHTML =
+      '<div>tmux: <b>' + (val(data,'event_listener.tmux_running',false) ? 'running' : 'stopped') + '</b></div>' +
+      '<div>running: ' + val(data,'event_listener.counts.running',0) + '</div>' +
+      '<div>pending: ' + val(data,'event_listener.counts.pending',0) + '</div>' +
+      '<div>workers: ' + esc(settings.workers || '-') + ', batch: ' + esc(settings.batch_size || '-') + ', phases: ' + esc(settings.phases || '-') + '</div>' +
+      '<div>date filter: exact ' + esc(settings.event_date || '-') + ', from ' + esc(settings.event_date_from || '-') + ', to ' + esc(settings.event_date_to || '-') + '</div>' +
+      '<div>guard: max load ratio ' + esc(settings.max_load_ratio || '-') + ', min free mem ' + esc(settings.min_free_mem_gb || '-') + ' GB</div>' +
+      '<div>output: ' + val(data,'event_listener.output_size','-') + '</div>' +
+      '<div class="muted">Changing these values requires Restart if the listener is already running.</div>';
+    renderRuns(data.runs || []);
+    const now = Date.now();
+    if (now - lastHeavyRefresh > Math.max(30000, refreshMs * 4)) {{
+      lastHeavyRefresh = now;
+      await refreshEventIssueSummary();
+    }}
+    await refreshEventJobs();
+    renderProcesses(val(data,'server.top_processes',[]));
+    if (selectedRun) await loadLog(selectedRun);
+    else await loadLog('event_listener');
+  }} catch (err) {{
+    document.getElementById('clock').textContent = 'dashboard refresh failed: ' + err;
+  }} finally {{
+    refreshInFlight = false;
+  }}
+}}
+
+function applyEventSettings(settings) {{
+  if (eventSettingsInitialized || !settings || !settings.workers) return;
+  const mapping = {{
+    eventPhases: settings.phases,
+    eventWorkers: settings.workers,
+    eventBatchSize: settings.batch_size,
+    eventDate: settings.event_date,
+    eventDateFrom: settings.event_date_from,
+    eventDateTo: settings.event_date_to,
+    eventMaxLoadRatio: settings.max_load_ratio,
+    eventMinMem: settings.min_free_mem_gb,
+    eventResourceWait: settings.resource_max_wait_seconds,
+    eventStabilityInterval: settings.stability_interval,
+    eventStabilityTimeout: settings.stability_timeout
+  }};
+  for (const [id, value] of Object.entries(mapping)) {{
+    const el = document.getElementById(id);
+    if (el && value !== undefined && value !== null && value !== '') el.value = value;
+  }}
+  eventSettingsInitialized = true;
 }}
 
 function renderConsecutiveFailures(summary) {{
-  const warnings = summary.warnings || [];
+  const rawWarnings = summary.warnings || [];
+  const warnings = rawWarnings.filter(item => !locallyResolvedFailureKeys.has(consecutiveFailureKey(item)));
+  const removedCount = rawWarnings.length - warnings.length;
+  const count = Math.max(0, Number(summary.count ?? rawWarnings.length) - removedCount);
+  const normalized = {{
+    ...summary,
+    count,
+    warnings,
+    hidden_count: Math.max(0, count - warnings.length),
+  }};
+  consecutiveFailuresState = normalized;
   document.getElementById('consecutiveFailureTitle').textContent =
-    `⚠️ ${{summary.count || warnings.length || 0}} 个组合连续失败`;
+    `⚠️ ${{count}} 个组合连续失败`;
   const body = document.getElementById('consecutiveFailureBody');
   if (!warnings.length) {{
     body.className = 'failure-warning-list failure-warning-empty';
@@ -2165,38 +3232,65 @@ function renderConsecutiveFailures(summary) {{
   body.className = 'failure-warning-list';
   body.innerHTML = warnings.map(item => {{
     const operator = item.operator ? ` · ${{esc(item.operator)}}` : '';
+    const contextDate = item.context_date ? ` · ${{esc(item.context_date)}}` : '';
     const issueTypes = (item.issue_types || []).join(', ');
+    const resolveKey = consecutiveFailureKey(item);
+    const confirming = pendingResolveKey === resolveKey;
     return `<div class="failure-warning-item">
       <div class="failure-warning-task">${{esc(item.task || '-')}}</div>
-      <div class="failure-warning-meta">${{esc(item.robot || '-')}}${{operator}}</div>
+      <div class="failure-warning-meta">${{esc(item.robot || '-')}}${{operator}}${{contextDate}}</div>
       <div class="failure-warning-range">${{esc(item.message || '')}}</div>
       <div class="failure-warning-issues">${{esc(issueTypes || 'issue types unavailable')}}</div>
-      <button class="resolve-streak-btn"
+      <button class="resolve-streak-btn${{confirming ? ' confirm' : ''}}"
         data-task="${{esc(item.task || '')}}"
         data-robot="${{esc(item.robot || '')}}"
         data-operator="${{esc(item.operator || '')}}"
+        data-context-date="${{esc(item.context_date || '')}}"
         data-episode-start="${{item.start_episode_number}}"
         data-episode-end="${{item.end_episode_number}}"
-        onclick="resolveConsecutiveFailureClick(event, this)">标记已解决</button>
+        onclick="resolveConsecutiveFailureClick(event, this)">${{confirming ? '确认解决？' : '标记已解决'}}</button>
     </div>`;
-  }}).join('') + (summary.hidden_count ? `<div class="failure-warning-more">+${{summary.hidden_count}} more</div>` : '');
+  }}).join('') + (normalized.hidden_count ? `<div class="failure-warning-more">+${{normalized.hidden_count}} more</div>` : '');
+}}
+
+function consecutiveFailureKey(item) {{
+  return JSON.stringify([
+    item.task || '',
+    item.robot || '',
+    item.operator || '',
+    item.context_date || item.date || '',
+    Number(item.start_episode_number ?? item.episode_start ?? 0),
+    Number(item.end_episode_number ?? item.episode_end ?? 0),
+  ]);
+}}
+
+function consecutiveFailureButtonKey(button) {{
+  return consecutiveFailureKey({{
+    task: button.dataset.task,
+    robot: button.dataset.robot,
+    operator: button.dataset.operator,
+    context_date: button.dataset.contextDate,
+    episode_start: button.dataset.episodeStart,
+    episode_end: button.dataset.episodeEnd,
+  }});
 }}
 
 function resetPendingResolveButton() {{
   if (pendingResolveTimer) window.clearTimeout(pendingResolveTimer);
   pendingResolveTimer = null;
-  if (pendingResolveButton) {{
-    pendingResolveButton.classList.remove('confirm');
-    pendingResolveButton.textContent = '标记已解决';
-  }}
-  pendingResolveButton = null;
+  pendingResolveKey = null;
+  document.querySelectorAll('.resolve-streak-btn.confirm').forEach(button => {{
+    button.classList.remove('confirm');
+    button.textContent = '标记已解决';
+  }});
 }}
 
 async function resolveConsecutiveFailureClick(event, button) {{
   event.stopPropagation();
-  if (pendingResolveButton !== button) {{
+  const resolveKey = consecutiveFailureButtonKey(button);
+  if (pendingResolveKey !== resolveKey) {{
     resetPendingResolveButton();
-    pendingResolveButton = button;
+    pendingResolveKey = resolveKey;
     button.classList.add('confirm');
     button.textContent = '确认解决？';
     pendingResolveTimer = window.setTimeout(resetPendingResolveButton, 3000);
@@ -2206,12 +3300,24 @@ async function resolveConsecutiveFailureClick(event, button) {{
     task: button.dataset.task || '',
     robot: button.dataset.robot || '',
     operator: button.dataset.operator || '',
+    context_date: button.dataset.contextDate || '',
     episode_start: Number(button.dataset.episodeStart || 0),
     episode_end: Number(button.dataset.episodeEnd || 0),
   }};
   resetPendingResolveButton();
-  const data = await postJson('/api/consecutive-failures/resolve', payload);
-  renderConsecutiveFailures(data.consecutive_failures || {{}});
+  locallyResolvedFailureKeys.add(resolveKey);
+  renderConsecutiveFailures(consecutiveFailuresState);
+  try {{
+    const data = await postJson('/api/consecutive-failures/resolve', payload);
+    if (!data.ok) throw new Error('No matching unresolved streak was found');
+    renderConsecutiveFailures(data.consecutive_failures || consecutiveFailuresState);
+  }} catch (error) {{
+    locallyResolvedFailureKeys.delete(resolveKey);
+    renderConsecutiveFailures(consecutiveFailuresState);
+    console.error('Failed to resolve consecutive-failure streak', error, payload);
+    button.textContent = '解决失败';
+    window.setTimeout(() => {{ button.textContent = '标记已解决'; }}, 2000);
+  }}
 }}
 
 document.addEventListener('click', event => {{
@@ -2233,7 +3339,7 @@ function renderRuns(runs) {{
 }}
 
 async function refreshEventJobs() {{
-  const data = await getJson('/api/event-listener/jobs?limit=120&issues_only=1');
+  const data = await getJson('/api/event-listener/jobs?limit=120');
   eventJobsCache = data.jobs || [];
   renderEventJobs(eventJobsCache);
 }}
@@ -2241,6 +3347,8 @@ async function refreshEventJobs() {{
 async function refreshEventIssueSummary() {{
   const data = await getJson('/api/event-listener/issue-summary?limit=500');
   renderEventIssueSummary(data.summary || {{}});
+  const reportData = await getJson('/api/event-listener/work-session-report');
+  renderEventWorkSessionReport(reportData.report || {{}});
 }}
 
 function severityText(counts) {{
@@ -2292,6 +3400,12 @@ function showCheckNameTooltip(target) {{
 }}
 
 function eventIssueSummaryHtml(job) {{
+  if (job.pipeline_error) {{
+    return `<div class="issue-summary status-failed" title="${{esc(job.pipeline_error)}}">Pipeline failed</div>`;
+  }}
+  if (job.qa_result_missing) {{
+    return `<div class="issue-summary status-warning" title="${{esc(job.qa_missing_reason || '')}}">Not QA processed</div>`;
+  }}
   const issues = job.top_issues || [];
   if (!issues.length) {{
     return `<div class="issue-summary issue-summary-empty">${{job.issue_count || 0}}</div>`;
@@ -2514,11 +3628,46 @@ function renderEventSummaryTables(summary) {{
   ).join('');
 }}
 
+function renderEventWorkSessionReport(report) {{
+  const box = document.getElementById('eventWorkSessionReportBox');
+  if (!box) return;
+  if (!report || !report.markdown_path) {{
+    box.innerHTML = '半日报告：尚未生成。可点击“生成半日报告”。';
+    return;
+  }}
+  const summary = report.summary || {{}};
+  const window = report.window || {{}};
+  box.innerHTML =
+    '半日报告：' + esc(window.label || '') +
+    '，episode ' + (summary.episode_count || 0) +
+    '，问题 episode ' + (summary.issue_episode_count || 0) +
+    '，<a href="/event-listener/work-session-report.html" target="_blank">查看内容</a>' +
+    '，文件：' + esc(report.markdown_path || '');
+}}
+
+function openEventWorkSessionReport() {{
+  window.open('/event-listener/work-session-report.html', '_blank');
+}}
+
+async function generateEventWorkSessionReport() {{
+  const box = document.getElementById('eventWorkSessionReportBox');
+  if (box) box.textContent = '半日报告：正在生成...';
+  const data = await postJson('/api/event-listener/work-session-report', {{
+    session: 'current'
+  }});
+  if (!data.ok) {{
+    if (box) box.textContent = '半日报告：生成失败 ' + (data.error || '');
+    return;
+  }}
+  renderEventWorkSessionReport(data.report || {{}});
+  openEventWorkSessionReport();
+}}
+
 function renderEventJobs(jobs) {{
   const body = document.getElementById('eventJobsBody');
   updateEventJobsSortIndicators();
   body.innerHTML = [...jobs].sort(compareEventJobs).map(job => {{
-    const qa = job.final_status || (job.status === 'done' ? 'complete' : '');
+    const qa = job.final_status || (job.qa_result_missing ? 'skipped' : (job.status === 'done' ? 'complete' : ''));
     return `<tr>
       <td>${{job.id}}</td>
       <td class="${{cls(job.status)}}">${{esc(job.status)}}</td>
@@ -2549,6 +3698,8 @@ async function loadEventJob(jobId, openModal) {{
   const phaseStatus = Object.entries(job.phase_status || {{}}).map(([phase,status]) => `P${{phase}}=${{status}}`).join(', ');
   const topIssues = (job.top_issues || []).map(i => `${{esc(i.check_name)}}(${{i.count}})`).join(', ') || 'None';
   const issueSummary = findings.map(f => `${{esc(f.check_name)}}: ${{findingMessageHtml(f)}}`).join('\\n');
+  const pipelineError = job.pipeline_error ? `<div><b>Pipeline error:</b> <span class="status-failed">${{esc(job.pipeline_error)}}</span></div>` : '';
+  const qaMissing = job.qa_result_missing ? `<div><b>QA result:</b> <span class="status-warning">${{esc(job.qa_missing_reason || 'Not QA processed.')}}</span></div>` : '';
   const mountedPath = job.mounted_path || '';
   const copyPath = job.nas_internal_path || mountedPath;
   document.getElementById('eventJobDetail').innerHTML =
@@ -2556,6 +3707,8 @@ async function loadEventJob(jobId, openModal) {{
     `<div><b>Episode:</b> ${{esc(job.episode_name || '')}}</div>` +
     `<div class="path-field"><b>Path:</b><span>${{esc(mountedPath)}}</span><button class="copy-path-btn" data-copy-path="${{esc(copyPath)}}" onclick="copyEventPath(this)">复制路径</button></div>` +
     `<div><b>Task:</b> ${{esc(job.task || '')}} | <b>Robot:</b> ${{esc(job.robot || '')}} | <b>Operator:</b> ${{esc(job.operator || '')}}</div>` +
+    pipelineError +
+    qaMissing +
     `<div><b>Phase status:</b> ${{esc(phaseStatus || '-')}}</div>` +
     `<div><b>Top issues:</b> ${{topIssues}}</div>` +
     `<div><b>Output:</b> ${{esc(job.output_dir || '')}}</div>` +
@@ -2582,6 +3735,7 @@ async function loadRun(runId, select) {{
   const counts = run.status_counts || {{}};
   const live = run.live_status || run.run_status || {{}};
   const issueEpisodes = run.issue_episodes || [];
+  const report = run.latest_work_session_report || {{}};
   const issueEpisodeRows = issueEpisodes.length ? issueEpisodes.map(ep =>
     `<tr class="run-row"><td>${{esc(ep.episode_name)}}</td><td class="${{cls(ep.final_status)}}">${{esc(ep.final_status)}}</td><td class="task-cell">${{wrapTaskTextHtml(ep.task)}}</td><td>${{esc(ep.robot)}}</td><td>${{ep.issue_count}}</td><td>${{esc((ep.issue_names || []).join(', '))}}</td></tr>`
   ).join('') : '<tr><td colspan="6" class="muted">No issue episodes in this run.</td></tr>';
@@ -2592,11 +3746,60 @@ async function loadRun(runId, select) {{
     `<div>Episodes: ${{run.episode_count || 0}} | Issues: ${{run.finding_count || 0}}</div>` +
     `<div>Pass: ${{counts.pass || 0}} Warning: ${{counts.warning || 0}} Fail: ${{counts.fail || 0}} Review: ${{counts.needs_review || 0}}</div>` +
     `<div>Phase: ${{live.current_phase || '-'}} ${{live.current_phase_processed || 0}}/${{live.current_phase_total || 0}}</div>` +
+    `<h3>中文质检报告</h3>` +
+    `<div class="row">
+      <select id="workSessionSelect" style="width:160px">
+        <option value="run_all">当前运行累计报告</option>
+        <option value="previous">最近结束的工作半日</option>
+        <option value="current">当前工作半日</option>
+        <option value="forenoon">今天上午</option>
+        <option value="afternoon">今天下午</option>
+      </select>
+      <button class="primary" onclick="generateWorkSessionReport('${{run.run_id}}')">生成/刷新报告</button>
+      <span id="workSessionReportMsg" class="muted"></span>
+    </div>` +
+    renderWorkSessionReport(report) +
     `<h3>Top Issues</h3>` +
     `<div class="table-scroll"><table><tbody>${{(run.top_issues || []).map(i=>`<tr><td>${{i.check_name}}</td><td>${{i.count}}</td></tr>`).join('')}}</tbody></table></div>` +
     `<h3>Episodes With Issues</h3>` +
     `<div class="table-scroll wide"><table><thead><tr><th>Episode</th><th>Status</th><th class="task-cell">Task</th><th>Robot</th><th>Issues</th><th>Issue Names</th></tr></thead><tbody>${{issueEpisodeRows}}</tbody></table></div>`;
   await loadLog(runId);
+}}
+
+function renderWorkSessionReport(report) {{
+  if (!report || !report.markdown_path) {{
+    latestRuleExplanations = [];
+    return '<div class="muted" style="margin-top:8px">还没有生成中文半日报告。</div>';
+  }}
+  latestRuleExplanations = report.rule_explanations || [];
+  const summary = report.summary || {{}};
+  const window = report.window || {{}};
+  const ruleButton = latestRuleExplanations.length
+    ? `<button class="link-btn" onclick="openRuleExplanationModal()">查看检测规则说明</button>`
+    : `<span class="muted">当前报告暂无检测规则说明</span>`;
+  return `<div style="margin-top:8px">
+    <div><b>最新报告：</b>${{esc(window.label || '')}}，${{esc(window.start || '')}} 至 ${{esc(window.end || '')}}</div>
+    <div>episode: ${{summary.episode_count || 0}} | 问题 episode: ${{summary.issue_episode_count || 0}} | 影响训练: ${{summary.training_blocking_episode_count || 0}} | 核心问题: ${{report.core_issue_count || 0}}</div>
+    <div class="row" style="margin-top:6px">${{ruleButton}}<span class="muted">括号内统计数字默认表示 finding 条数；去重 episode 数见报告里的 episode 字段。</span></div>
+    <div class="muted">文件：${{esc(report.markdown_path || '')}}</div>
+    <pre class="report-preview">${{esc(report.markdown || '')}}</pre>
+  </div>`;
+}}
+
+async function generateWorkSessionReport(runId) {{
+  const msg = document.getElementById('workSessionReportMsg');
+  if (msg) msg.textContent = '正在生成...';
+  const sessionEl = document.getElementById('workSessionSelect');
+  const data = await postJson('/api/runs/' + encodeURIComponent(runId) + '/work-session-report', {{
+    session: sessionEl ? sessionEl.value : 'run_all',
+    include_all_when_empty: true
+  }});
+  if (!data.ok) {{
+    if (msg) msg.textContent = data.error || '生成失败';
+    return;
+  }}
+  if (msg) msg.textContent = '已生成';
+  await loadRun(runId, false);
 }}
 
 async function loadLog(target) {{
@@ -2631,6 +3834,17 @@ async function stopRun(runId) {{
 
 async function eventAction(action) {{
   await postJson('/api/event-listener/' + action, {{
+    phases: document.getElementById('eventPhases').value,
+    workers: Number(document.getElementById('eventWorkers').value),
+    event_batch_size: Number(document.getElementById('eventBatchSize').value),
+    event_date: document.getElementById('eventDate').value,
+    event_date_from: document.getElementById('eventDateFrom').value,
+    event_date_to: document.getElementById('eventDateTo').value,
+    max_load_ratio: Number(document.getElementById('eventMaxLoadRatio').value),
+    min_free_mem_gb: Number(document.getElementById('eventMinMem').value),
+    resource_max_wait_seconds: Number(document.getElementById('eventResourceWait').value),
+    stability_interval: Number(document.getElementById('eventStabilityInterval').value),
+    stability_timeout: Number(document.getElementById('eventStabilityTimeout').value),
     quality_label: document.getElementById('eventQualityLabel').value,
     disable_quality_label_filter: document.getElementById('eventDisableQualityLabelFilter').checked ? '1' : '0'
   }});

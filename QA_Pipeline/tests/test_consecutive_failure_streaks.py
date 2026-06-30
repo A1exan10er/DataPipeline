@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import http.client
+import json
 import sqlite3
 import sys
 import tempfile
+import threading
+from types import SimpleNamespace
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from QA_Pipeline.scripts import qa_control_dashboard as dashboard
 from QA_Pipeline.scripts.qa_control_dashboard import (
     active_consecutive_failure_warnings,
     consecutive_bad_segments,
     init_issue_history,
     record_consecutive_failure_detections,
+    render_index_html,
     resolve_consecutive_failure,
 )
 
@@ -48,12 +54,15 @@ def pipeline_failed(number: int) -> dict:
     return item
 
 
-def detection(start: int, end: int) -> dict:
+def detection(start: int, end: int, context_date: str = "") -> dict:
     episodes = [bad(number) for number in range(start, end + 1)]
+    for episode in episodes:
+        episode["date"] = context_date
     return {
         "task": TASK,
         "robot": ROBOT,
         "operator": OPERATOR,
+        "context_date": context_date,
         "start_episode_number": start,
         "end_episode_number": end,
         "start_episode_name": f"episode_{start:04d}",
@@ -143,7 +152,7 @@ def run_history_tests() -> None:
         record_consecutive_failure_detections(db_path, [detection(1, 5)])
         assert_equal(db_ranges(db_path), [(1, 5, None)], "insert initial streak")
 
-        resolved = resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, 1, 5)
+        resolved = resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, "", 1, 5)
         assert_equal(resolved, True, "resolve initial streak")
         record_consecutive_failure_detections(db_path, [detection(1, 5)])
         rows = db_ranges(db_path)
@@ -164,7 +173,7 @@ def run_history_tests() -> None:
         db_path = Path(tmpdir) / "issue_history.db"
         init_issue_history(db_path)
         record_consecutive_failure_detections(db_path, [detection(9, 13)])
-        assert_equal(resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, 9, 13), True, "resolve prefix")
+        assert_equal(resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, "", 9, 13), True, "resolve prefix")
         record_consecutive_failure_detections(db_path, [detection(9, 31)])
         assert_equal(
             [(start, end) for start, end, resolved_at in db_ranges(db_path) if resolved_at is None],
@@ -172,10 +181,102 @@ def run_history_tests() -> None:
             "resolved prefix growth creates only new suffix",
         )
 
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "issue_history.db"
+        init_issue_history(db_path)
+        record_consecutive_failure_detections(db_path, [detection(40, 44), detection(90, 95)])
+        assert_equal(
+            active_consecutive_failure_warnings(db_path, 20)["warnings"][0]["start_episode_number"],
+            90,
+            "latest range is shown for repeated unresolved combo",
+        )
+        assert_equal(resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, "", 90, 95), True, "resolve repeated combo")
+        assert_equal(
+            [(start, end) for start, end, resolved_at in db_ranges(db_path) if resolved_at is None],
+            [],
+            "resolving visible range clears older unresolved ranges for same combo",
+        )
+        assert_equal(
+            active_consecutive_failure_warnings(db_path, 20)["count"],
+            0,
+            "resolved combo disappears from active warnings",
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "issue_history.db"
+        init_issue_history(db_path)
+        record_consecutive_failure_detections(db_path, [detection(1, 5, "20260629")])
+        assert_equal(
+            resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, "20260629", 1, 5),
+            True,
+            "resolve first date range",
+        )
+        record_consecutive_failure_detections(db_path, [detection(1, 5, "20260630")])
+        active = active_consecutive_failure_warnings(db_path, 20)
+        assert_equal(active["count"], 1, "same episode numbers on new date are detected")
+        assert_equal(active["warnings"][0]["context_date"], "20260630", "active warning retains date context")
+
+
+def run_dashboard_ui_tests() -> None:
+    html = render_index_html(SimpleNamespace(refresh_seconds=5.0))
+    assert_equal("let pendingResolveKey = null;" in html, True, "resolve confirmation uses stable identity")
+    assert_equal("pendingResolveButton" in html, False, "resolve confirmation does not retain stale DOM node")
+    assert_equal("const locallyResolvedFailureKeys = new Set();" in html, True, "resolved identities persist across refresh renders")
+    assert_equal("locallyResolvedFailureKeys.add(resolveKey);" in html, True, "successful resolve updates local state immediately")
+    assert_equal("rawWarnings.filter(item => !locallyResolvedFailureKeys.has" in html, True, "stale refresh cannot restore resolved warning")
+    assert_equal("if (!r.ok) throw new Error" in html, True, "POST errors are surfaced")
+    assert_equal("if (!data.ok) throw new Error" in html, True, "unmatched resolve is surfaced")
+
+
+def run_resolve_endpoint_test() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "issue_history.db"
+        missing_jobs_db = Path(tmpdir) / "missing-jobs.db"
+        init_issue_history(db_path)
+        record_consecutive_failure_detections(db_path, [detection(1, 5)])
+        state = SimpleNamespace(
+            issue_history_db=db_path,
+            lock=threading.Lock(),
+            failure_warning_signature=None,
+            failure_warning_cache={"count": 0, "warnings": [], "checked_jobs": 0},
+            failure_warning_last_checked=0.0,
+        )
+        original_event_job_db = dashboard.EVENT_JOB_DB
+        server = dashboard.DashboardHTTPServer(("127.0.0.1", 0), dashboard.make_handler(state))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            dashboard.EVENT_JOB_DB = missing_jobs_db
+            thread.start()
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            body = json.dumps(
+                {
+                    "task": TASK,
+                    "robot": ROBOT,
+                    "operator": OPERATOR,
+                    "episode_start": 1,
+                    "episode_end": 5,
+                }
+            )
+            connection.request("POST", "/api/consecutive-failures/resolve", body, {"Content-Type": "application/json"})
+            response = connection.getresponse()
+            data = json.loads(response.read())
+            connection.close()
+            assert_equal(response.status, 200, "resolve endpoint HTTP status")
+            assert_equal(data["ok"], True, "resolve endpoint reports persisted update")
+            assert_equal(data["consecutive_failures"]["count"], 0, "resolve endpoint returns updated active count")
+            assert_equal(db_ranges(db_path)[0][2] is not None, True, "resolve endpoint sets resolved_at")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            dashboard.EVENT_JOB_DB = original_event_job_db
+
 
 def main() -> None:
     run_segment_tests()
     run_history_tests()
+    run_dashboard_ui_tests()
+    run_resolve_endpoint_test()
 
 
 if __name__ == "__main__":

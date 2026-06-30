@@ -134,6 +134,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "action.eef_pose",
         ],
     },
+    "dcs_notifications": {
+        "enabled": False,
+        "dry_run": False,
+        "wait": False,
+        "event_name": "qa.episode_abnormal.detected",
+        "notify_statuses": ["fail"],
+        "actionable_statuses": ["needs_review"],
+        "actionable_check_names": [
+            "abnormal_fps_loss",
+            "frame_drop_ratio",
+            "duration_under_5s",
+            "modality_alignment_start",
+            "modality_alignment_end",
+            "standstill_segment",
+            "excessive_standstill",
+            "trajectory_not_smooth",
+            "ik_executability_failed",
+        ],
+        "exclude_check_names": ["timestamps_raw_inconsistency"],
+    },
 }
 
 

@@ -76,6 +76,7 @@ QA_Pipeline/requirements.txt
 - `opencv-python-headless`：第 4 阶段视频检查；
 - `scipy`：UMI 处理；
 - `openpyxl`：仅手动 Excel 导出需要，正常 QA 运行不需要；
+- `pytest`：仅开发/回归测试需要，正常 QA 运行和 dashboard 不需要；
 - 主机上的 `ffmpeg` 和 `ffprobe`：UMI 视频处理。
 
 将 Python 依赖安装到仓库虚拟环境：
@@ -108,6 +109,7 @@ QA_Pipeline/scripts/run_pipeline.py
 4  视频健康：可打开性、视频属性、黑/白/冻结采样帧
 5  机器人状态/action 合理性和静止检查
 6  UMI 专用验证、预处理和 world-frame 导出
+7  操作员静止/有效运动检查：开头、中段、结尾静止和总静止占比
 ```
 
 所有阶段都可以通过 `--phases` 选择性运行。
@@ -272,6 +274,104 @@ HTTP 访问时，页面默认每 5 秒读取一次 JSON 并局部更新内容，
 一次并退出。直接用 `file://` 打开时，浏览器安全限制会阻止读取 JSON；请使用
 `live_dashboard.py --port <port>` 或其他 HTTP 服务访问输出目录。
 
+### 服务器控制 Dashboard
+
+服务器长期运行推荐使用中心控制台：
+
+```bash
+python3 QA_Pipeline/scripts/qa_control_dashboard.py \
+  --host 0.0.0.0 \
+  --port 4131
+```
+
+然后打开：
+
+```text
+http://<server-ip>:4131
+```
+
+该控制台与 `live_dashboard.py` 不同：`live_dashboard.py` 只展示单个输出目录的
+只读 HTML；`qa_control_dashboard.py` 是服务器级控制台，负责：
+
+- 从页面启动 date-range 或 task-folder run；
+- 设置 `date_from`、`date_to`、`phases`、`workers`、`batch_size`、质量标签过滤等参数；
+- 查看当前 run 的阶段进度、日志、episode/finding 数和中文报告；
+- 管理 event listener 的启动、停止、重启和日期过滤；
+- 汇总最近 event listener job 的问题、设备故障和采集人员/设备组合；
+- 展示“连续失败组合”告警，并允许 reviewer 标记已解决。
+
+控制台启动 run 时，默认仍遵守 `quality.labels` 过滤，只处理 `完全正常` 数据；
+需要完整审计时可勾选或传入禁用质量标签过滤。
+
+### 中文工作时段报告
+
+中文报告生成脚本：
+
+```bash
+python3 QA_Pipeline/scripts/generate_work_session_report.py \
+  --db-path outputs/<run>/qa.db \
+  --output-dir outputs/<run>/reports/work_sessions \
+  --session current
+```
+
+输出目录包含：
+
+```text
+半日质检报告.md
+report.json
+核心问题汇总.csv
+问题episode清单.csv
+采集人员问题占比.csv
+采集人员问题episode索引.csv
+检测规则说明.csv
+处理建议.csv
+```
+
+在服务器控制台的 Run Detail 中，`中文质检报告` 可选择：
+
+- `当前运行累计报告`：覆盖当前 run 已经写入 DB 的全部结果，适合多日 run 边跑边看；
+- `最近结束的工作半日`、`当前工作半日`、`今天上午`、`今天下午`：按更新时间窗口生成半日报告。
+
+报告中“主要任务/主要机器人/主要采集人员”后面的括号数字表示该类别下的
+finding 条数，不是去重 episode 数；去重 episode 数见“影响 episode 数”或
+采集人员部分的“问题 episode”。
+
+报告还会写出中文检测规则说明。Dashboard 中的 `查看检测规则说明` 按钮会弹出
+浮层，直接展示命中的问题类型、中文说明、判定标准、阈值和证据字段，reviewer
+无需单独打开 CSV。当前规则说明配置位于：
+
+```text
+QA_Pipeline/configs/report_rule_explanations_zh.json
+```
+
+### Event Listener 与连续失败告警
+
+Event listener 用于持续监听新采集 episode 并提交 QA job。服务器控制台会显示
+pending/running/done job 数、最近问题 job、问题类型汇总，以及工作时段中文报告。
+
+控制台左侧 Issues 面板会检测明显连续失败：
+
+- 以 `task + robot + operator + date` 为组合；
+- 连续 `fail` episode 达到阈值时出现告警，目前阈值为 5；
+- date 来自 QA DB 的 `date` 字段，缺失时从路径
+  `<verified>/<task>/<robot>/<collector>/<date>/<operator>/episode_...` 推断；
+- 因此同一采集人员、同一任务、同一机器在不同日期出现相同 episode 编号范围，
+  会作为新的独立问题重新检测。
+
+Reviewer 点击 `标记已解决` 后按钮会变成 `确认解决？`；第二次点击才真正提交。
+提交后前端会立即隐藏该组合，后端把同一 `task + robot + operator + date` 下
+当前 unresolved 连续失败段标记为 resolved。后续如果同一天或新日期又产生新的
+连续失败段，达到阈值后会重新出现在 Issues 列表。
+
+### 设备故障统计
+
+中文报告和 event listener 报告会生成设备/采集端维度的 failure summary：
+
+- 只统计 `fail` 和 `needs_review` finding；
+- 按 collector/device 的问题总数排序；
+- 当某个问题类型占该设备问题的大头时，会标记为重点设备风险；
+- Dashboard 主页面显示前若干设备摘要，详情页显示完整 breakdown。
+
 Excel 不属于正常流水线输出。如需从已有 DB 生成 Excel，不需要重新运行 QA：
 
 ```bash
@@ -299,6 +399,49 @@ UMI 检测会使用 metadata 中的 robot 值、episode 名称中的 robot token
 ```text
 outputs/umi_processed/
 ```
+
+## 第 7 阶段：操作员静止检测
+
+第 7 阶段是主 QA runner 的一部分，用于检测 episode 中采集人员长时间没有产生
+有效运动的情况。选择方式：
+
+```bash
+--phases 7
+```
+
+它优先从以下运动源读取时间序列：
+
+```text
+observation.state.joint_position
+actions.joint_position
+observation.state.eef_pose
+actions.eef_pose
+action.eef_pose
+```
+
+判定方法：
+
+- 对相邻时间行计算非 gripper 运动列变化；
+- 如果所有运动列变化都小于 `motion_delta_threshold`，该相邻区间视为静止；
+- `stillness_buffer_ms` 以内的静止允许存在；
+- 超过缓冲的静止段会按位置分为开头 `leading`、中段 `middle`、结尾 `trailing`；
+- 同时统计总超额静止占比和有效运动时长。
+
+主要 finding：
+
+```text
+operator_standstill_leading
+operator_standstill_middle
+operator_standstill_trailing
+operator_standstill_excessive
+operator_standstill_motion_too_short
+standstill_motion_source_missing
+standstill_motion_source_invalid
+```
+
+第 7 阶段只写报告和 SQLite finding，不会裁剪视频，也不会修改原始 CSV。阈值来
+自 `QA_Pipeline/configs/quality_rules.json` 的 `phase7_standstill` 配置，并会
+在中文工作时段报告的 `检测规则说明.csv` 和 dashboard 规则弹窗中解释。
 
 ## 静止裁剪规划器
 
