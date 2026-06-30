@@ -1,0 +1,129 @@
+Phase 1: phase1_metadata.py — Validates episode structure, metadata, modality files, checksum manifest, labels, and task-device consistency.
+Inputs: episode_path name, parent path parts, metadata.json, .checksum_manifest, modality directories, video.mp4, timestamps.csv, data.csv, quality.labels, task_device_reference. Depends on prior phase: no
+check_name|what_it_checks|pass_condition|warning_or_needs_review_condition|fail_condition|config_source
+episode_folder_name|Episode folder naming prefix|episode_path.name startswith "episode_"|—|episode_path.name does not startwith "episode_"|—
+checksum_manifest_missing|Checksum manifest presence|.checksum_manifest exists|missing and phase1_metadata.checksum.required=False -> warning|missing and phase1_metadata.checksum.required=True -> fail|phase1_metadata.checksum.required=True
+checksum_manifest_invalid|Checksum manifest JSON and entries|JSON object; all paths relative safe; hashes match accepted lengths|—|invalid JSON/read error/non-object/unsafe paths/unsupported hashes|phase1_metadata.checksum.accepted_algorithms=["sha256","md5"]; phase1_metadata.checksum.max_missing_paths_in_details=50
+checksum_manifest_file_missing|Manifest-listed files exist|missing_count=0|—|missing_count>0|phase1_metadata.checksum.max_missing_paths_in_details=50
+checksum_manifest_path_not_file|Manifest paths are files|path_count=0|—|path_count>0|phase1_metadata.checksum.max_missing_paths_in_details=50
+checksum_manifest_file_empty|Manifest files are nonempty|empty_count=0|—|empty_count>0|phase1_metadata.checksum.max_missing_paths_in_details=50
+checksum_hash_unreadable|Hashable files readable|unreadable_count=0 or verify_hashes=False|—|unreadable_count>0 and verify_hashes=True|phase1_metadata.checksum.verify_hashes=False; phase1_metadata.checksum.accepted_algorithms=["sha256","md5"]
+checksum_hash_mismatch|Manifest hashes match files|mismatch_count=0 or verify_hashes=False|—|mismatch_count>0 and verify_hashes=True|phase1_metadata.checksum.verify_hashes=False; phase1_metadata.checksum.accepted_algorithms=["sha256","md5"]
+metadata_exists|metadata.json exists|metadata.json exists|—|metadata.json missing|—
+metadata_valid_json|metadata JSON loads as object|valid JSON object|—|JSON parse/read error or top-level non-object|—
+parent_path_structure|Parent path follows task/date/operator|len(parts)>=4 and parts[-3] is 8 digits and parts[-2] nonempty|otherwise warning|—|—
+required_metadata_field|Required metadata fields valid|task_key,episode_index,duration_seconds>0,total_frames>0,modalities nonempty dict,fps_actual>0 or fps_config>0,quality present|—|any required field missing/invalid|—
+task_folder_metadata_mismatch|Task folder differs from task_key|normalized task_key equals normalized task_folder or either missing|mismatch recorded as pass/info|—|—
+task_device_reference_missing|Task reference coverage|reference defined or unavailable|undefined reference recorded as pass/info|—|—
+robot_device_category_unknown|Robot category mapping coverage|actual robot category known or no expected category|unknown robot category recorded as pass/info|—|phase1_metadata.robot_device_categories single_arm=["ur","ur5","ur5e","ur7e","franka","fr3","fr3v2","flexiv","flexiv_rizon4"], dual_arm=["arx","arx5","aloha","piper","aloha_piper"], umi=["umi"]
+task_robot_mismatch|Task category matches robot category|categories_compatible(task_category, actual_category)=True|—|reference defined and task_category, actual_category known and incompatible|phase1_metadata.robot_device_categories single_arm=["ur","ur5","ur5e","ur7e","franka","fr3","fr3v2","flexiv","flexiv_rizon4"], dual_arm=["arx","arx5","aloha","piper","aloha_piper"], umi=["umi"]
+modality_folder_missing|Metadata modality folders exist|each known non-flow metadata modality has matching directory|—|known non-flow modality has no directory|phase1_metadata.modalities.ignore_flow_modalities=True
+required_modality_file_missing|Required modality files exist|required files present for known non-flow modalities|—|video.mp4/timestamps.csv/data.csv missing as required|phase1_metadata.modalities.ignore_flow_modalities=True
+required_modality_file_empty|Required modality files nonempty|required files size>0|—|required file size=0|—
+action_modality_singular_name|Singular action directory naming|no directory startswith action. unless actions.|status from config when singular paths exist|status=fail if configured and singular paths exist|phase1_metadata.modalities.singular_action_status="pass"
+unknown_modality_detected|Unknown modality names present|no unknown modality names|status from config when unknown names exist|status=fail if configured and unknown names exist|phase1_metadata.modalities.unknown_modality_status="pass"
+quality_labels_missing|Quality labels present|quality.labels is nonempty list|missing/empty -> warning|—|—
+Edge cases: metadata failures stop later Phase 1 checks; flow image modalities ignored; metadata "actions" maps to existing action.* and actions.* directories; singular action rename detection does not mutate files; checksum path details capped at 50; checksum hashes verified only when verify_hashes=True; robot inferred from metadata then episode name then robot-type folder; task-device mismatch compares categories not exact suffixes
+Output fields — findings table: episode_path, phase, check_name, severity, status, message, details. episodes.metrics: p1_modality_count:int, p1_image_modality_count:int, p1_has_checksum_manifest:bool, p1_quality_labels:list, p1_task_folder:str, p1_task_expected_robot:str, p1_task_device_category:str, p1_robot_device_category:str, p1_task_device_reference_source:str, p1_checksum_manifest_file_count:int, p1_checksum_missing_file_count:int, p1_checksum_empty_file_count:int, p1_checksum_hash_mismatch_count:int, p1_action_rename_needed_count:int.
+Historical note: Exact robot suffix matching was replaced with single-arm/dual-arm/UMI category matching to reduce false task_robot_mismatch failures.
+
+Phase 2: phase2_duration.py — Validates metadata duration, frame counts, row counts, and task-level duration outliers.
+Inputs: metadata.json duration_seconds,total_frames,fps_actual,fps_config,modalities, image timestamps.csv, state data.csv, task/state context. Depends on prior phase: no
+check_name|what_it_checks|pass_condition|warning_or_needs_review_condition|fail_condition|config_source
+duration_under_5s|Duration hard minimum|duration_seconds>=5.0 or nonpositive|—|0<duration_seconds<5.0|—
+duration_not_positive|Duration positive number|duration_seconds>0|—|duration_seconds missing/non-numeric/<=0|—
+total_frames_not_positive|Total frames positive integer|int(total_frames)>0 and not bool|—|total_frames missing/non-numeric/<=0/bool|—
+duration_frames_fps_inconsistent|Duration frames match FPS|abs(total_frames-duration_seconds*fps)/(duration_seconds*fps)<=0.10|—|error_ratio>0.10|—
+timestamps_unreadable|Image timestamps readable|count_csv_rows(timestamps.csv) is not None|—|count_csv_rows(timestamps.csv) is None|—
+timestamps_row_count_mismatch|Timestamp rows match total_frames|abs(rows-total_frames)/total_frames<=0.10|—|error_ratio>0.10|—
+state_csv_row_count_mismatch|State rows match duration*FPS|abs(rows-duration_seconds*fps)/(duration_seconds*fps)<=0.15|error_ratio>0.15 -> warning|—|—
+modality_frame_count_misaligned|Modality counts align|spread=max(counts)-min(counts)<=3|4<=spread<=10 -> warning; spread>10 -> needs_review|—|phase2_duration.length_alignment.max_video_action_difference=3
+duration_task_outlier|Task duration IQR outlier|group_size<5 or IQR<=0 or abs(duration-median)/IQR<=3.0|distance>3.0 -> needs_review|—|—
+duration_absolute_too_short|Duration below task median|group_size<3 or median<=0 or ratio>=0.40|0.20<=duration/median<0.40 -> needs_review|duration/median<0.20|—
+duration_absolute_too_long|Duration above task median|group_size<3 or median<=0 or ratio<=2.50|duration/median>2.50 -> needs_review|—|—
+Edge cases: fps_actual preferred over fps_config; image flow modalities excluded; tactile state modalities skipped for row checks and count alignment; task groups use state.task then metadata task_key; group checks require at least 3 or 5 valid durations; positive integer accepts numeric strings via int(float(value))
+Output fields — findings table: episode_path, phase, check_name, severity, status, message, details. episodes.metrics: p2_duration_seconds:float, p2_total_frames:int, p2_fps:float, p2_expected_frames:float, p2_frame_count_error_ratio:float, p2_timestamps_checked:int, p2_tactile_state_row_count_skipped:int, p2_timestamps_mismatch_count:int, p2_duration_iqr_distance:float, p2_modality_frame_spread:int, p2_modality_min_frames:int.
+
+Phase 3: phase3_timestamp.py — Validates image timestamp integrity, FPS, frame drops, raw/processed consistency, and cross-camera alignment.
+Inputs: metadata.json modalities, fps_actual,fps_config, frame_integrity, image timestamps.csv, timestamps_raw.csv. Depends on prior phase: no
+check_name|what_it_checks|pass_condition|warning_or_needs_review_condition|fail_condition|config_source
+timestamps_unreadable|Timestamp source readable|timestamps.csv exists and readable|—|timestamps.csv missing/unreadable|—
+timestamps_not_monotonic|Timestamps strictly increase|violation_count=0|0<violation_ratio<0.01 -> warning; 0.01<=violation_ratio<0.05 -> needs_review|violation_ratio>=0.05|—
+duplicate_timestamps|Duplicate timestamp values|duplicate_count=0|0<duplicate_ratio<0.01 -> warning; 0.01<=duplicate_ratio<0.05 -> needs_review|duplicate_ratio>=0.05|—
+timestamp_large_gap|Data timestamp gaps|max_gap<=5.0*median_interval|5.0*median_interval<max_gap<=20.0*median_interval -> warning|max_gap>20.0*median_interval|—
+frame_drop_ratio|Image frame drop ratio|drop_ratio<=threshold|—|drop_ratio>threshold|phase3_timestamp.frame_drops.normal_video_drop_ratio_fail=0.10; phase3_timestamp.frame_drops.tactile_video_drop_ratio_fail=0.15
+frame_drop_consecutive|Consecutive image frame drops|max_consecutive_drops<25|—|max_consecutive_drops>=25|phase3_timestamp.frame_drops.max_consecutive_fail=25
+abnormal_fps_loss|Actual FPS too low|loss_ratio<=0.10|—|loss_ratio>0.10|phase3_timestamp.abnormal_fps.loss_fail_ratio=0.10
+abnormal_fps_gain|Actual FPS too high|gain_ratio<=0.10|gain_ratio>0.10 -> warning|—|phase3_timestamp.abnormal_fps.gain_warning_ratio=0.10
+timestamps_raw_inconsistency|Raw and processed row counts|abs(raw_rows-processed_rows)<=2|abs(raw_rows-processed_rows)>2 -> warning|—|—
+modality_alignment_start|Modality start alignment|start spread<=500.0 ms|—|start spread>500.0 ms|—
+modality_alignment_end|Modality end alignment|end spread<=500.0 ms|—|end spread>500.0 ms|—
+consecutive_drops_outlier|Drop streak group outlier|group_size>=5 and value<=median+3.0*IQR; or group_size<5 and value<10|group_size>=5 and value>median+3.0*IQR -> needs_review; group_size<5 and value>=10 -> warning|—|phase3_timestamp.frame_drops.max_consecutive_warn=10
+Edge cases: only observation.image.* checked; observation.image.flow_* excluded; image timestamps use rows where is_new=="1"; frame drops read metadata first then timestamps.csv is_new fallback; boolean is_new accepts 1/0,true/false,yes/no; expected FPS uses modality hz/frequency/hz_nominal then episode fps; unreadable raw consistency silently skipped
+Output fields — findings table: episode_path, phase, check_name, severity, status, message, details. episodes.metrics: p3_<modality>_actual_fps:float, p3_<modality>_row_count:int, p3_<modality>_max_gap_ms:float, p3_<modality>_duplicate_count:int, p3_<modality>_monotonic_ok:bool, p3_<modality>_total_drops:int, p3_<modality>_max_consecutive_drops:number, p3_<modality>_drop_ratio:float.
+
+Phase 4: phase4_video.py — Checks video openability, properties, sampled-frame health, frozen cameras, and ARX wrist stillness.
+Inputs: metadata.json modalities,total_frames,duration_seconds,cameras, modality config.csv, video.mp4, robot. Depends on prior phase: no
+check_name|what_it_checks|pass_condition|warning_or_needs_review_condition|fail_condition|config_source
+video_not_openable|Video can be opened|cv2.VideoCapture(video.mp4).isOpened()=True|—|isOpened()=False|—
+video_frame_count_unreadable|Video frame count readable|frame_count>0|—|frame_count<=0|—
+video_frame_count_mismatch|Video frames match metadata|metadata_frames missing or abs(video_frames-metadata_frames)/metadata_frames<=0.10|—|error_ratio>0.10|—
+video_duration_mismatch|Video duration matches metadata|metadata_duration missing or frame_count<=0 or fps<=0 or error_ratio<=0.10|error_ratio>0.10 -> warning|—|—
+video_resolution_mismatch|Video resolution expected|expected missing or width/height match or width matches and height>=expected_height|otherwise warning|—|—
+video_frozen|Sampled frames vary|sampled_count=0 or any adjacent sample diff>=1.0|—|all adjacent sample diffs<1.0|—
+video_black_frames|Black sampled frames|black_frame_count=0|bad_count>0 and bad_count<=sampled_count/2 -> needs_review|bad_count>sampled_count/2|—
+video_white_frames|White sampled frames|white_frame_count=0|bad_count>0 and bad_count<=sampled_count/2 -> needs_review|bad_count>sampled_count/2|—
+both_wrist_views_still|ARX wrist cameras both still|robot!="arx5" or fewer than 2 wrist views or at least one still_ratio<=0.80|—|robot=="arx5" and both wrist views have diff<threshold in >0.80 pairs|—
+Edge cases: OpenCV missing raises PipelineConfigurationError before episode writes; samples at [0,0.15,0.30,0.45,0.60,0.75,0.90,1.0] or every frame when frame_count<=8; black brightness<5.0; white brightness>250.0; ARX wrist cameras only left_wrist_view and right_wrist_view; ARX still diff threshold=5.0; letterboxed taller video accepted when width matches
+Output fields — findings table: episode_path, phase, check_name, severity, status, message, details. episodes.metrics: p4_<modality>_openable:bool, p4_<modality>_video_frames:int, p4_<modality>_video_fps:float, p4_<modality>_video_duration_s:float, p4_<modality>_width:int, p4_<modality>_height:int, p4_<modality>_mean_brightness:float, p4_<modality>_min_frame_diff:float.
+Historical note: ARX wrist stillness intentionally excludes tactile cameras because their natural frame-diff range caused false still-camera findings.
+
+Phase 5: phase5_robot_state.py — Checks robot joint, gripper, velocity, acceleration, jitter, EEF, timestamp, and standstill reasonableness.
+Inputs: actions.joint_position/data.csv, observation.state.joint_position/data.csv, observation.state.joint_velocity/data.csv, actions.eef_pose/data.csv, action.eef_pose/data.csv, observation.state.eef_pose/data.csv, metadata robot. Depends on prior phase: no
+check_name|what_it_checks|pass_condition|warning_or_needs_review_condition|fail_condition|config_source
+robot_config_fallback|Robot config availability|robot in ROBOT_CONFIGS|unknown robot recorded as pass/info with arx5 defaults|—|—
+csv_not_parseable|Robot CSV parseability|data.csv readable with headers|—|data.csv exists but cannot parse/read|—
+joint_nan_inf|Joint values finite|nonfinite_count=0|—|nonfinite_count>0|—
+timestamps_missing_or_unparseable|Robot timestamps present|timestamp_ms has >=1 finite value|—|no finite timestamp_ms values|—
+timestamps_not_monotonic|Robot timestamps increase|violation_count=0|0<ratio<0.01 -> warning; 0.01<=ratio<0.05 -> needs_review|ratio>=0.05|—
+joint_out_of_limits|Joint values within limits|all values in [low-0.003, high+0.003]|any violation -> needs_review|—|phase5_robot_state.robots.* overrides default gripper only: aloha.gripper_limits_m=[0.0,0.1], arx5.gripper_limits_m=[0.0,0.082]
+gripper_out_of_limits|Gripper values within limits|all values in [low-0.003, high+0.003]|any violation -> needs_review|—|phase5_robot_state.robots.aloha.gripper_limits_m=[0.0,0.1]; phase5_robot_state.robots.arx5.gripper_limits_m=[0.0,0.082]
+gripper_mean_too_low_remap_needed|Mean gripper distance too low|mean_value>=0.005 or no values|mean_value<0.005 -> needs_review|—|phase5_robot_state.gripper.mean_remap_threshold_m=0.005
+joint_step_too_large|Per-frame joint jumps|max_step<=robot max_joint_step_rad|any step>threshold -> needs_review|—|—
+gripper_step_too_large|Per-frame gripper jumps|max_step<=robot max_gripper_step_m|any step>threshold -> needs_review|—|—
+joint_velocity_exceeded|Joint velocity p99 limit|p99_velocity<=robot max_joint_velocity_rad_s|p99_velocity>threshold -> needs_review|—|—
+joint_acceleration_high|Joint acceleration p99 limit|p99_acceleration<=robot max_acceleration_rad_s2|p99_acceleration>threshold -> warning|—|—
+jitter_high|Joint jitter score|score<robot jitter_score_warn|jitter_score_warn<=score<jitter_score_fail -> warning|score>=jitter_score_fail|—
+operator_standstill|Operator idle segments|no segment duration>5000 ms|segment duration>5000 ms -> warning|—|—
+operator_standstill_excessive|Operator idle excess ratio|excess_ratio<=0.20|excess_ratio>0.20 -> needs_review|—|—
+eef_position_step_too_large|EEF position jumps|max_step<=robot max_eef_position_step_m|any step>threshold -> needs_review|—|—
+joint_columns_not_detected|Joint column detection|joint_cols detected|not detected recorded as pass/info|—|—
+Edge cases: unknown robot uses arx5 defaults; LIMIT_TOLERANCE=0.003; standstill buffer=5000 ms; standstill source prefers observation.state.joint_position over actions.joint_position; gripper columns excluded from standstill; measured velocity used when present else estimated from positions; velocity/acceleration thresholds use p99; ARX columns left_j/right_j and left_v/right_v; Flexiv columns jN/joint_*.pos and vN/joint_*.vel
+Output fields — findings table: episode_path, phase, check_name, severity, status, message, details. episodes.metrics: p5_max_joint_abs:float, p5_max_joint_step:float, p5_max_velocity:float, p5_max_acceleration:float, p5_jitter_score:float, p5_standstill_segment_count:int, p5_standstill_total_excess_ms:float, p5_standstill_excess_ratio:float, p5_nan_inf_count:int, p5_joint_limit_violations:int.
+Historical note: ARX5 joint, velocity, step, and gripper thresholds were calibrated from 20260602-20260603 data to reduce prior false positives.
+
+Phase 6: phase6_umi_processing.py — Runs UMI-specific trajectory gating, validation, preprocessing repair, world-frame export, and optional IK executability.
+Inputs: metadata.json robot, task_key, episode folder name/path, required UMI modality data.csv files, DataProcessUMI assessment/preprocess/transform modules, optional IK resources, qa_config settings. Depends on prior phase: no
+check_name|what_it_checks|pass_condition|warning_or_needs_review_condition|fail_condition|config_source
+umi_processing_disabled|UMI phase enabled flag|enabled=False records pass/info|—|—|phase6_umi_processing.enabled=True
+umi_not_applicable|Episode is UMI data|non-UMI episode records pass/info|—|—|phase6_umi_processing.umi_tokens=["umi"]; phase6_umi_processing.required_modalities=[]
+umi_processing_error|UMI processing exceptions|no exception and result status not error|—|exception raised or final status not passed/rejected|—
+umi_processed_repaired|UMI accepted after repair|status=passed and operations not empty and operations!=["passthrough"]|status_for_repaired controls returned status|status_for_repaired="fail" -> fail|phase6_umi_processing.status_for_repaired="warning"
+umi_processed_passed|UMI accepted without repair|status=passed and operations empty or ["passthrough"]|—|—|—
+umi_trajectory_gate_rejected|Trajectory gate rejected UMI|trajectory_first_gate=False or trajectory label in pass labels|label not in pass labels -> trajectory_nonpass_status|trajectory_nonpass_status="fail" and label not in pass labels|phase6_umi_processing.trajectory_first_gate=True; phase6_umi_processing.trajectory_pass_labels=["smooth"]; phase6_umi_processing.trajectory_nonpass_status="fail"
+umi_processing_rejected|Assessment/preprocess rejected UMI|assessment gate not blocking and preprocess ok/category!="reject"|—|assessment blocking, preprocess category reject, or kept_frames=0|—
+Edge cases: disabled skips dependency validation; UMI detection checks metadata robot then episode-name robot then state.robot, returning False on first non-UMI robot token; path/task token fallback handles plain episode_#### UMI folders; required_modalities fallback requires all configured data.csv files; assessment video_frame_count_mismatch, missing_timestamps, duplicate_frames_exceed_thresholds tolerated; gripper assessment incorrect tolerated; action assessment incorrect blocks; output destination must stay under output_root; overwrite=False fails if destination exists; keep_intermediate=False removes preprocess workdir; executability rc allowed only 0 or 1
+Output fields — findings table: episode_path, phase, check_name, severity, status, message, details. episodes.metrics: p6_umi_status:str, p6_umi_failed_stage:str, p6_umi_reason:str, p6_umi_label:str, p6_umi_category:str, p6_umi_operations:list, p6_umi_data_path:str, p6_umi_report_path:str, p6_umi_trajectory_gate:dict, p6_umi_executability:dict.
+
+Phase 7: phase7_standstill.py — Detects long standstill segments and insufficient useful motion from configured motion sources.
+Inputs: configured source modality data.csv files, timestamp_ms, non-gripper motion columns. Depends on prior phase: no
+check_name|what_it_checks|pass_condition|warning_or_needs_review_condition|fail_condition|config_source
+standstill_motion_source_missing|Usable motion source exists|at least one configured data.csv yields usable series|no usable source -> warning|—|phase7_standstill.source_modalities=["observation.state.joint_position","actions.joint_position","observation.state.eef_pose","actions.eef_pose","action.eef_pose"]
+standstill_motion_source_invalid|Motion source duration valid|duration_ms>0|duration_ms<=0 -> needs_review|—|—
+operator_standstill_leading|Leading standstill duration|duration<warn_segment_ms|warn_segment_ms<=duration<review_segment_ms -> warning; review_segment_ms<=duration<fail_segment_ms -> needs_review|duration>=fail_segment_ms|phase7_standstill.warn_segment_ms=5000; phase7_standstill.review_segment_ms=10000; phase7_standstill.fail_segment_ms=30000
+operator_standstill_middle|Middle standstill duration|duration<warn_segment_ms|warn_segment_ms<=duration<review_segment_ms -> warning; review_segment_ms<=duration<fail_segment_ms -> needs_review|duration>=fail_segment_ms|phase7_standstill.warn_segment_ms=5000; phase7_standstill.review_segment_ms=10000; phase7_standstill.fail_segment_ms=30000
+operator_standstill_trailing|Trailing standstill duration|duration<warn_segment_ms|warn_segment_ms<=duration<review_segment_ms -> warning; review_segment_ms<=duration<fail_segment_ms -> needs_review|duration>=fail_segment_ms|phase7_standstill.warn_segment_ms=5000; phase7_standstill.review_segment_ms=10000; phase7_standstill.fail_segment_ms=30000
+operator_standstill_motion_too_short|Useful motion minimum|useful_motion_ms>=min_useful_motion_ms or no segments|—|useful_motion_ms<min_useful_motion_ms and segment_count>0|phase7_standstill.min_useful_motion_ms=5000
+operator_standstill_excessive|Standstill excess ratio|excess_ratio<review_excess_ratio|review_excess_ratio<=excess_ratio<fail_excess_ratio -> needs_review|excess_ratio>=fail_excess_ratio|phase7_standstill.review_excess_ratio=0.20; phase7_standstill.fail_excess_ratio=0.40
+Edge cases: enabled=False writes no findings; source modalities tried in configured order; rows with non-increasing timestamps skipped; gripper and is_standstill columns excluded; still pair requires every motion column delta<0.001; segments counted only when duration>stillness_buffer_ms; leading/trailing classification uses edge_tolerance_ms=1000; initial metrics omit location-specific fields until a valid source is processed
+Output fields — findings table: episode_path, phase, check_name, severity, status, message, details. episodes.metrics: p7_duration_ms:float, p7_standstill_segment_count:int, p7_standstill_total_ms:float, p7_standstill_excess_ms:float, p7_standstill_excess_ratio:float, p7_useful_motion_ms:float, p7_source_modality:str, p7_leading_standstill_ms:float, p7_middle_standstill_ms:float, p7_trailing_standstill_ms:float.
