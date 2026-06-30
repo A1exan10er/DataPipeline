@@ -862,10 +862,8 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
     ]
     device_failures = report.get("device_failure_summary") or []
     if device_failures:
-        for row in device_failures[:10]:
+        for row in device_failures:
             lines.append(f"- `{row['collector_id']}`：{row['finding_count']} 条")
-        if len(device_failures) > 10:
-            lines.append(f"- 其余 {len(device_failures) - 10} 个设备见完整设备故障统计页面。")
     else:
         lines.append("- 本时段暂无设备级失败或待复查 finding。")
     device_report_url = str(report.get("device_failure_report_url") or "")

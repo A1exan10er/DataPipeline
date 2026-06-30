@@ -1052,10 +1052,9 @@ def render_device_failure_summary_html(rows: list[dict[str, Any]], detail_url: s
         items = "".join(
             f"<li><code>{esc_html(row.get('collector_id', 'unknown_collector'))}</code>："
             f"<b>{int(row.get('finding_count') or 0)}</b> 条</li>"
-            for row in rows[:10]
+            for row in rows
         )
-        more = f'<p class="muted">另有 {len(rows) - 10} 个设备，请查看完整统计。</p>' if len(rows) > 10 else ""
-        content = f'<ol class="device-summary-list">{items}</ol>{more}'
+        content = f'<ol class="device-summary-list">{items}</ol>'
     return (
         '<section class="device-summary"><h2>设备故障统计</h2>'
         f"{content}"

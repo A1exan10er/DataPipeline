@@ -167,7 +167,8 @@ def main() -> None:
         ]
         summary_html = render_device_failure_summary_html(many_rows, "/detail?report=selected")
         assert_equal("collector-09" in summary_html, True, "main HTML includes tenth collector")
-        assert_equal("collector-10" in summary_html, False, "main HTML caps collectors at ten")
+        assert_equal("collector-10" in summary_html, True, "main HTML includes every collector")
+        assert_equal("另有" in summary_html, False, "main HTML does not hide extra collectors")
         assert_equal("frame_drop_ratio" in summary_html, False, "main HTML omits check breakdown")
         assert_equal('href="/detail?report=selected"' in summary_html, True, "main HTML links to selected detail report")
         detail_html = render_device_failure_detail_html(many_rows)
