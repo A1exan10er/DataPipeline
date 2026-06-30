@@ -1,6 +1,6 @@
 # QA Pipeline 用户指南
 
-最后更新：2026-06-15
+最后更新：2026-06-30
 
 ## 目的
 
@@ -220,6 +220,79 @@ Dashboard 展示：
 - 按阶段统计的问题数量；
 - 可筛选的 episode 表；
 - 可筛选的具体问题表。
+
+## 服务器控制 Dashboard
+
+服务器上推荐长期运行中心控制台：
+
+```bash
+python3 QA_Pipeline/scripts/qa_control_dashboard.py \
+  --host 0.0.0.0 \
+  --port 4131
+```
+
+打开：
+
+```text
+http://<server-ip>:4131
+```
+
+它和上面的 `live_dashboard.py` 不同。`live_dashboard.py` 只展示某个输出目录；
+`qa_control_dashboard.py` 是服务器控制台，支持：
+
+- 在页面上启动 date-range 或 task-folder run；
+- 设置 `date_from`、`date_to`、`phases`、`workers`、`batch_size`、质量标签过滤；
+- 查看 run 实时状态、阶段进度、日志和问题 episode；
+- 管理 event listener 的启动、停止、重启和日期过滤；
+- 生成/刷新中文工作时段报告；
+- 查看设备故障统计和连续失败告警。
+
+Run Detail 里的 `中文质检报告` 可以生成：
+
+- `当前运行累计报告`：按当前 run 的 DB 累计结果生成，适合多日 run 边跑边看；
+- 半日报告：按工作时段窗口统计最近或当前半日结果。
+
+报告附件包含：
+
+```text
+半日质检报告.md
+report.json
+核心问题汇总.csv
+问题episode清单.csv
+采集人员问题占比.csv
+采集人员问题episode索引.csv
+检测规则说明.csv
+处理建议.csv
+```
+
+报告正文中类似 `umi(88)`、`pengshasha(21)` 的括号数字表示 finding 条数，不是
+去重 episode 数。去重统计看“影响 episode 数”或采集人员部分的“问题 episode”。
+
+Dashboard 中的 `查看检测规则说明` 会打开浮层，显示命中规则的中文说明、判定
+标准、阈值和证据字段。规则说明配置在：
+
+```text
+QA_Pipeline/configs/report_rule_explanations_zh.json
+```
+
+Issues 面板会检测连续失败组合。组合身份为：
+
+```text
+task + robot + operator + date
+```
+
+date 优先来自 QA DB，缺失时从 episode 路径中的日期目录推断。这样同一
+operator 在不同日期用同一机器做同一任务，即使 episode 编号范围相同，也会
+作为新的独立问题重新检测。
+
+Reviewer 点击 `标记已解决` 后，按钮会变成 `确认解决？`。第二次点击会立即在
+前端隐藏该组合，并在后端把同一 `task + robot + operator + date` 下的当前
+unresolved 连续失败段标记为 resolved。如果后续真的再次出现新的连续失败段，
+达到阈值后会重新出现在 Issues 列表。
+
+设备故障统计只统计 `fail` 和 `needs_review` finding，并按 collector/device
+汇总。若某个设备的问题高度集中在同一 check name，会标记为重点设备风险，便
+于优先排查硬件、相机、采集端负载或连接问题。
 
 ## 运行中的实时状态
 

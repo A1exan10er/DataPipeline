@@ -1,6 +1,6 @@
 # QA Pipeline User Guide
 
-Last updated: 2026-06-15
+Last updated: 2026-06-30
 
 ## Purpose
 
@@ -271,6 +271,84 @@ The dashboard shows:
 - issue counts by phase;
 - a filterable episode table;
 - a filterable exact issue table.
+
+## Server Control Dashboard
+
+For long-running server use, start the central control dashboard:
+
+```bash
+python3 QA_Pipeline/scripts/qa_control_dashboard.py \
+  --host 0.0.0.0 \
+  --port 4131
+```
+
+Open:
+
+```text
+http://<server-ip>:4131
+```
+
+This is different from `live_dashboard.py`. `live_dashboard.py` serves one
+output directory. `qa_control_dashboard.py` is a server control surface that can:
+
+- start date-range or task-folder runs from the browser;
+- set `date_from`, `date_to`, `phases`, `workers`, `batch_size`, and quality
+  label filtering;
+- show run status, phase progress, logs, and issue episodes;
+- start, stop, and restart the event listener with date filters;
+- generate or refresh Chinese work-session reports;
+- show device failure summaries and consecutive-failure warnings.
+
+In Run Detail, `中文质检报告` can generate:
+
+- `当前运行累计报告`: a cumulative report over the current run DB, useful while
+  a multi-day run is still in progress;
+- half-day reports for current/previous work sessions.
+
+Report outputs include:
+
+```text
+半日质检报告.md
+report.json
+核心问题汇总.csv
+问题episode清单.csv
+采集人员问题占比.csv
+采集人员问题episode索引.csv
+检测规则说明.csv
+处理建议.csv
+```
+
+Counts shown as `umi(88)` or `pengshasha(21)` are finding counts, not unique
+episode counts. Unique episode counts are shown as affected episode counts or
+operator issue episode counts.
+
+The dashboard button `查看检测规则说明` opens a popup with Chinese rule details:
+rule title, phase, detection logic, thresholds, severity rule, and evidence
+fields. The source configuration is:
+
+```text
+QA_Pipeline/configs/report_rule_explanations_zh.json
+```
+
+The Issues panel detects consecutive-failure combinations using:
+
+```text
+task + robot + operator + date
+```
+
+The date comes from the QA DB when available, otherwise from the episode path.
+This prevents the same episode number range on a later date from being hidden
+by a previously resolved warning.
+
+Reviewers click `标记已解决`, then `确认解决？`. The second click immediately
+hides that combination in the browser and persists the resolution for the same
+`task + robot + operator + date`. If a new consecutive failure happens later,
+including on a new date with the same episode numbers, it is detected and shown
+again.
+
+Device failure summaries count only `fail` and `needs_review` findings and
+group them by collector/device. A collector whose failures are dominated by one
+check name is marked as a priority device risk.
 
 ## Live Status While Running
 

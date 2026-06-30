@@ -54,12 +54,15 @@ def pipeline_failed(number: int) -> dict:
     return item
 
 
-def detection(start: int, end: int) -> dict:
+def detection(start: int, end: int, context_date: str = "") -> dict:
     episodes = [bad(number) for number in range(start, end + 1)]
+    for episode in episodes:
+        episode["date"] = context_date
     return {
         "task": TASK,
         "robot": ROBOT,
         "operator": OPERATOR,
+        "context_date": context_date,
         "start_episode_number": start,
         "end_episode_number": end,
         "start_episode_name": f"episode_{start:04d}",
@@ -149,7 +152,7 @@ def run_history_tests() -> None:
         record_consecutive_failure_detections(db_path, [detection(1, 5)])
         assert_equal(db_ranges(db_path), [(1, 5, None)], "insert initial streak")
 
-        resolved = resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, 1, 5)
+        resolved = resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, "", 1, 5)
         assert_equal(resolved, True, "resolve initial streak")
         record_consecutive_failure_detections(db_path, [detection(1, 5)])
         rows = db_ranges(db_path)
@@ -170,13 +173,48 @@ def run_history_tests() -> None:
         db_path = Path(tmpdir) / "issue_history.db"
         init_issue_history(db_path)
         record_consecutive_failure_detections(db_path, [detection(9, 13)])
-        assert_equal(resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, 9, 13), True, "resolve prefix")
+        assert_equal(resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, "", 9, 13), True, "resolve prefix")
         record_consecutive_failure_detections(db_path, [detection(9, 31)])
         assert_equal(
             [(start, end) for start, end, resolved_at in db_ranges(db_path) if resolved_at is None],
             [(14, 31)],
             "resolved prefix growth creates only new suffix",
         )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "issue_history.db"
+        init_issue_history(db_path)
+        record_consecutive_failure_detections(db_path, [detection(40, 44), detection(90, 95)])
+        assert_equal(
+            active_consecutive_failure_warnings(db_path, 20)["warnings"][0]["start_episode_number"],
+            90,
+            "latest range is shown for repeated unresolved combo",
+        )
+        assert_equal(resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, "", 90, 95), True, "resolve repeated combo")
+        assert_equal(
+            [(start, end) for start, end, resolved_at in db_ranges(db_path) if resolved_at is None],
+            [],
+            "resolving visible range clears older unresolved ranges for same combo",
+        )
+        assert_equal(
+            active_consecutive_failure_warnings(db_path, 20)["count"],
+            0,
+            "resolved combo disappears from active warnings",
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "issue_history.db"
+        init_issue_history(db_path)
+        record_consecutive_failure_detections(db_path, [detection(1, 5, "20260629")])
+        assert_equal(
+            resolve_consecutive_failure(db_path, TASK, ROBOT, OPERATOR, "20260629", 1, 5),
+            True,
+            "resolve first date range",
+        )
+        record_consecutive_failure_detections(db_path, [detection(1, 5, "20260630")])
+        active = active_consecutive_failure_warnings(db_path, 20)
+        assert_equal(active["count"], 1, "same episode numbers on new date are detected")
+        assert_equal(active["warnings"][0]["context_date"], "20260630", "active warning retains date context")
 
 
 def run_dashboard_ui_tests() -> None:

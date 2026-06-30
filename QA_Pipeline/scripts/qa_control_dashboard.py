@@ -323,6 +323,7 @@ def init_issue_history(db_path: Path) -> None:
                 task TEXT NOT NULL,
                 robot TEXT NOT NULL,
                 operator TEXT NOT NULL,
+                context_date TEXT NOT NULL DEFAULT '',
                 episode_start INTEGER NOT NULL,
                 episode_end INTEGER NOT NULL,
                 streak_length INTEGER NOT NULL,
@@ -333,11 +334,17 @@ def init_issue_history(db_path: Path) -> None:
             )
             """
         )
+        try:
+            conn.execute("ALTER TABLE consecutive_failure_streaks ADD COLUMN context_date TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+        conn.execute("DROP INDEX IF EXISTS idx_consecutive_failure_unresolved_identity")
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_consecutive_failure_unresolved_identity
             ON consecutive_failure_streaks (
-                task, robot, operator, episode_start, episode_end
+                task, robot, operator, context_date, episode_start, episode_end
             )
             WHERE resolved_at IS NULL
             """
@@ -1431,7 +1438,7 @@ def compute_consecutive_failure_warnings(issue_history_db: Path = DEFAULT_ISSUE_
             continue
         latest_by_path[mounted_path] = job
 
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for job in latest_by_path.values():
         mounted_path = str(job.get("mounted_path") or "")
         episode_number = parse_episode_number(mounted_path)
@@ -1441,9 +1448,10 @@ def compute_consecutive_failure_warnings(issue_history_db: Path = DEFAULT_ISSUE_
         task = str(result.get("task") or task_from_episode_path(mounted_path) or "")
         robot = str(result.get("robot") or robot_from_episode_path(mounted_path) or "")
         operator = str(result.get("operator") or operator_from_episode_path(mounted_path) or "")
+        context_date = str(result.get("date") or date_from_episode_path(mounted_path) or "")
         if not task or not robot:
             continue
-        groups.setdefault((task, robot, operator), []).append(
+        groups.setdefault((task, robot, operator, context_date), []).append(
             {
                 "episode_number": episode_number,
                 "episode_name": Path(mounted_path).name,
@@ -1451,18 +1459,20 @@ def compute_consecutive_failure_warnings(issue_history_db: Path = DEFAULT_ISSUE_
                 "db_path": str(job.get("db_path") or ""),
                 "job_status": str(job.get("status") or ""),
                 "final_status": str(result.get("final_status") or ""),
+                "date": context_date,
                 "updated_at": str(job.get("updated_at") or ""),
             }
         )
 
     detected = []
-    for (task, robot, operator), episodes in groups.items():
+    for (task, robot, operator, context_date), episodes in groups.items():
         for streak in consecutive_bad_segments(episodes, CONSECUTIVE_FAILURE_STREAK_LENGTH):
             detected.append(
                 {
                     "task": task,
                     "robot": robot,
                     "operator": operator,
+                    "context_date": context_date,
                     "start_episode_number": streak[0]["episode_number"],
                     "end_episode_number": streak[-1]["episode_number"],
                     "start_episode_name": streak[0]["episode_name"],
@@ -1518,7 +1528,7 @@ def record_consecutive_failure_detections(db_path: Path, detections: list[dict[s
                 """
                 SELECT 1
                 FROM consecutive_failure_streaks
-                WHERE task = ? AND robot = ? AND operator = ?
+                WHERE task = ? AND robot = ? AND operator = ? AND context_date = ?
                   AND episode_start = ? AND episode_end = ?
                 LIMIT 1
                 """,
@@ -1526,6 +1536,7 @@ def record_consecutive_failure_detections(db_path: Path, detections: list[dict[s
                     effective["task"],
                     effective["robot"],
                     effective["operator"],
+                    str(effective.get("context_date") or ""),
                     int(effective["start_episode_number"]),
                     int(effective["end_episode_number"]),
                 ),
@@ -1535,16 +1546,17 @@ def record_consecutive_failure_detections(db_path: Path, detections: list[dict[s
             conn.execute(
                 """
                 INSERT INTO consecutive_failure_streaks (
-                    task, robot, operator, episode_start, episode_end,
+                    task, robot, operator, context_date, episode_start, episode_end,
                     streak_length, issue_types, detected_at, resolved_at,
                     resolution_time_seconds
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
                 """,
                 (
                     effective["task"],
                     effective["robot"],
                     effective["operator"],
+                    str(effective.get("context_date") or ""),
                     int(effective["start_episode_number"]),
                     int(effective["end_episode_number"]),
                     int(effective["streak_length"]),
@@ -1558,17 +1570,18 @@ def effective_detection_for_history(conn: sqlite3.Connection, item: dict[str, An
     task = str(item["task"])
     robot = str(item["robot"])
     operator = str(item["operator"])
+    context_date = str(item.get("context_date") or "")
     segment_start = int(item["start_episode_number"])
     segment_end = int(item["end_episode_number"])
     rows = conn.execute(
         """
         SELECT id, episode_start, episode_end, issue_types, resolved_at
         FROM consecutive_failure_streaks
-        WHERE task = ? AND robot = ? AND operator = ?
+        WHERE task = ? AND robot = ? AND operator = ? AND context_date = ?
           AND episode_start <= ? AND episode_end >= ?
         ORDER BY episode_start, episode_end, id
         """,
-        (task, robot, operator, segment_end, segment_start),
+        (task, robot, operator, context_date, segment_end, segment_start),
     ).fetchall()
 
     for row in rows:
@@ -1653,7 +1666,7 @@ def active_consecutive_failure_warnings(db_path: Path, limit: int = 20) -> dict[
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT id, task, robot, operator, episode_start, episode_end,
+            SELECT id, task, robot, operator, context_date, episode_start, episode_end,
                    streak_length, issue_types, detected_at
             FROM consecutive_failure_streaks
             WHERE resolved_at IS NULL
@@ -1661,9 +1674,9 @@ def active_consecutive_failure_warnings(db_path: Path, limit: int = 20) -> dict[
             """
         ).fetchall()
 
-    by_combo: dict[tuple[str, str, str], dict[str, Any]] = {}
+    by_combo: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for row in rows:
-        key = (row["task"], row["robot"], row["operator"])
+        key = (row["task"], row["robot"], row["operator"], row["context_date"])
         if key in by_combo:
             continue
         item = {
@@ -1671,6 +1684,7 @@ def active_consecutive_failure_warnings(db_path: Path, limit: int = 20) -> dict[
             "task": row["task"],
             "robot": row["robot"],
             "operator": row["operator"],
+            "context_date": row["context_date"],
             "start_episode_number": int(row["episode_start"]),
             "end_episode_number": int(row["episode_end"]),
             "streak_length": int(row["streak_length"]),
@@ -1698,6 +1712,7 @@ def api_resolve_consecutive_failure(state: DashboardState, payload: dict[str, An
     task = str(payload.get("task") or "")
     robot = str(payload.get("robot") or "")
     operator = str(payload.get("operator") or "")
+    context_date = str(payload.get("context_date") or payload.get("date") or "")
     episode_start = int(payload.get("episode_start"))
     episode_end = int(payload.get("episode_end"))
     resolved = resolve_consecutive_failure(
@@ -1705,13 +1720,19 @@ def api_resolve_consecutive_failure(state: DashboardState, payload: dict[str, An
         task,
         robot,
         operator,
+        context_date,
         episode_start,
         episode_end,
     )
+    active = active_consecutive_failure_warnings(state.issue_history_db, limit=20)
+    signature = event_job_warning_signature()
     with state.lock:
-        state.failure_warning_signature = None
-        state.failure_warning_cache = {"count": 0, "warnings": [], "checked_jobs": 0}
-    return {"ok": resolved, "consecutive_failures": consecutive_failure_warnings(state)}
+        previous_checked_jobs = state.failure_warning_cache.get("checked_jobs", 0)
+        active["checked_jobs"] = previous_checked_jobs
+        state.failure_warning_signature = signature
+        state.failure_warning_cache = active
+        state.failure_warning_last_checked = time.monotonic()
+    return {"ok": resolved, "consecutive_failures": active}
 
 
 def resolve_consecutive_failure(
@@ -1719,6 +1740,7 @@ def resolve_consecutive_failure(
     task: str,
     robot: str,
     operator: str,
+    context_date: str,
     episode_start: int,
     episode_end: int,
 ) -> bool:
@@ -1729,25 +1751,41 @@ def resolve_consecutive_failure(
             """
             SELECT id, detected_at
             FROM consecutive_failure_streaks
-            WHERE task = ? AND robot = ? AND operator = ?
+            WHERE task = ? AND robot = ? AND operator = ? AND context_date = ?
               AND episode_start = ? AND episode_end = ?
               AND resolved_at IS NULL
             ORDER BY detected_at DESC, id DESC
             LIMIT 1
             """,
-            (task, robot, operator, episode_start, episode_end),
+            (task, robot, operator, context_date, episode_start, episode_end),
         ).fetchone()
         if row is None:
             return False
-        resolution_seconds = max(0, int(datetime.fromisoformat(resolved_at).timestamp() - datetime.fromisoformat(row[1]).timestamp()))
-        conn.execute(
+        unresolved_rows = conn.execute(
             """
-            UPDATE consecutive_failure_streaks
-            SET resolved_at = ?, resolution_time_seconds = ?
-            WHERE id = ?
+            SELECT id, detected_at
+            FROM consecutive_failure_streaks
+            WHERE task = ? AND robot = ? AND operator = ? AND context_date = ?
+              AND resolved_at IS NULL
             """,
-            (resolved_at, resolution_seconds, int(row[0])),
-        )
+            (task, robot, operator, context_date),
+        ).fetchall()
+        for unresolved in unresolved_rows:
+            resolution_seconds = max(
+                0,
+                int(
+                    datetime.fromisoformat(resolved_at).timestamp()
+                    - datetime.fromisoformat(unresolved[1]).timestamp()
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE consecutive_failure_streaks
+                SET resolved_at = ?, resolution_time_seconds = ?
+                WHERE id = ?
+                """,
+                (resolved_at, resolution_seconds, int(unresolved[0])),
+            )
     return True
 
 
@@ -2045,6 +2083,15 @@ def operator_from_episode_path(path: str) -> str:
         return ""
 
 
+def date_from_episode_path(path: str) -> str:
+    parts = Path(path).parts
+    try:
+        index = parts.index("verified")
+        return parts[index + 4] if len(parts) > index + 4 else ""
+    except ValueError:
+        return ""
+
+
 def normalize_severity(value: str) -> str:
     severity = str(value or "unknown").strip().lower()
     aliases = {
@@ -2289,6 +2336,7 @@ def work_session_report_payload(report_dir: Path) -> dict[str, Any]:
                 "summary": raw.get("summary", {}),
                 "core_issue_count": len(raw.get("core_issues") or []),
                 "device_failure_summary": raw.get("device_failure_summary") or [],
+                "rule_explanations": raw.get("rule_explanations") or [],
             }
     except (OSError, json.JSONDecodeError):
         pass
@@ -2740,6 +2788,11 @@ def render_index_html(state: DashboardState) -> str:
     .modal.wide {{ width: min(1280px, 96vw); }}
     .modal-header {{ position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
     .modal-body {{ padding: 12px; }}
+    .rule-card {{ border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin-bottom: 10px; background: #fff; }}
+    .rule-title {{ display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }}
+    .rule-title code {{ color: var(--muted); }}
+    .rule-meta {{ display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; font-size: 13px; }}
+    .rule-meta b {{ color: var(--muted); font-weight: 600; }}
     @media (max-width: 1000px) {{ main {{ grid-template-columns: 1fr; }} aside {{ border-right: 0; border-bottom: 1px solid var(--line); }} .grid, .two, .summary-card {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
@@ -2945,11 +2998,27 @@ def render_index_html(state: DashboardState) -> str:
     </div>
   </div>
 </div>
+<div id="ruleExplanationModal" class="modal-backdrop" onclick="closeRuleExplanationModal(event)">
+  <div class="modal wide" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <h2>检测规则说明</h2>
+        <div id="ruleExplanationMeta" class="muted">当前报告命中的非通过规则</div>
+      </div>
+      <button onclick="closeRuleExplanationModal()" class="link-btn">Close</button>
+    </div>
+    <div class="modal-body">
+      <input id="ruleExplanationFilter" placeholder="搜索问题类型、中文标题或检测阶段" oninput="renderRuleExplanationRows()" style="margin-bottom:10px">
+      <div id="ruleExplanationBody"></div>
+    </div>
+  </div>
+</div>
 <div id="checkNameTooltip" role="tooltip"></div>
 <script>
 const refreshMs = {refresh};
 let selectedRun = null;
 let selectedEventJob = null;
+let latestRuleExplanations = [];
 let eventJobsSort = {{key: 'id', direction: 'asc'}};
 let eventJobsCache = [];
 let eventIssueSummaryCache = {{}};
@@ -2981,6 +3050,58 @@ function val(obj, path, fallback='-') {{
 }}
 function esc(s) {{
   return String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+}}
+
+function closeRuleExplanationModal(event) {{
+  if (event && event.target && event.target.id !== 'ruleExplanationModal') return;
+  document.getElementById('ruleExplanationModal').classList.remove('open');
+}}
+
+function openRuleExplanationModal() {{
+  const modal = document.getElementById('ruleExplanationModal');
+  const filter = document.getElementById('ruleExplanationFilter');
+  if (filter) filter.value = '';
+  renderRuleExplanationRows();
+  modal.classList.add('open');
+}}
+
+function renderRuleExplanationRows() {{
+  const body = document.getElementById('ruleExplanationBody');
+  const meta = document.getElementById('ruleExplanationMeta');
+  const filter = String((document.getElementById('ruleExplanationFilter') || {{}}).value || '').trim().toLowerCase();
+  const rows = (latestRuleExplanations || []).filter(row => {{
+    if (!filter) return true;
+    return [
+      row.check_name,
+      row.rule_title_zh,
+      row.phase,
+      row.description_zh,
+      row.standard_zh,
+      row.threshold_summary,
+      row.evidence_fields
+    ].some(value => String(value || '').toLowerCase().includes(filter));
+  }});
+  if (meta) meta.textContent = `${{rows.length}} / ${{(latestRuleExplanations || []).length}} 条规则`;
+  if (!rows.length) {{
+    body.innerHTML = '<div class="muted">当前报告暂无可显示的检测规则说明。</div>';
+    return;
+  }}
+  body.innerHTML = rows.map(row => `
+    <div class="rule-card">
+      <div class="rule-title">
+        <b>${{esc(row.rule_title_zh || row.check_name || '未命名规则')}}</b>
+        <code>${{esc(row.check_name || '')}}</code>
+      </div>
+      <div class="rule-meta">
+        <b>检测阶段</b><div>${{esc(row.phase || '未填写')}}</div>
+        <b>检测说明</b><div>${{esc(row.description_zh || '未填写')}}</div>
+        <b>判定标准</b><div>${{esc(row.standard_zh || '未填写')}}</div>
+        <b>阈值</b><div>${{esc(row.threshold_summary || '未填写')}}</div>
+        <b>严重程度</b><div>${{esc(row.severity_rule_zh || '未填写')}}</div>
+        <b>证据字段</b><div>${{esc(row.evidence_fields || '未填写')}}</div>
+      </div>
+    </div>
+  `).join('');
 }}
 
 async function copyEventPath(button) {{
@@ -3112,18 +3233,20 @@ function renderConsecutiveFailures(summary) {{
   body.className = 'failure-warning-list';
   body.innerHTML = warnings.map(item => {{
     const operator = item.operator ? ` · ${{esc(item.operator)}}` : '';
+    const contextDate = item.context_date ? ` · ${{esc(item.context_date)}}` : '';
     const issueTypes = (item.issue_types || []).join(', ');
     const resolveKey = consecutiveFailureKey(item);
     const confirming = pendingResolveKey === resolveKey;
     return `<div class="failure-warning-item">
       <div class="failure-warning-task">${{esc(item.task || '-')}}</div>
-      <div class="failure-warning-meta">${{esc(item.robot || '-')}}${{operator}}</div>
+      <div class="failure-warning-meta">${{esc(item.robot || '-')}}${{operator}}${{contextDate}}</div>
       <div class="failure-warning-range">${{esc(item.message || '')}}</div>
       <div class="failure-warning-issues">${{esc(issueTypes || 'issue types unavailable')}}</div>
       <button class="resolve-streak-btn${{confirming ? ' confirm' : ''}}"
         data-task="${{esc(item.task || '')}}"
         data-robot="${{esc(item.robot || '')}}"
         data-operator="${{esc(item.operator || '')}}"
+        data-context-date="${{esc(item.context_date || '')}}"
         data-episode-start="${{item.start_episode_number}}"
         data-episode-end="${{item.end_episode_number}}"
         onclick="resolveConsecutiveFailureClick(event, this)">${{confirming ? '确认解决？' : '标记已解决'}}</button>
@@ -3136,6 +3259,7 @@ function consecutiveFailureKey(item) {{
     item.task || '',
     item.robot || '',
     item.operator || '',
+    item.context_date || item.date || '',
     Number(item.start_episode_number ?? item.episode_start ?? 0),
     Number(item.end_episode_number ?? item.episode_end ?? 0),
   ]);
@@ -3146,6 +3270,7 @@ function consecutiveFailureButtonKey(button) {{
     task: button.dataset.task,
     robot: button.dataset.robot,
     operator: button.dataset.operator,
+    context_date: button.dataset.contextDate,
     episode_start: button.dataset.episodeStart,
     episode_end: button.dataset.episodeEnd,
   }});
@@ -3176,17 +3301,20 @@ async function resolveConsecutiveFailureClick(event, button) {{
     task: button.dataset.task || '',
     robot: button.dataset.robot || '',
     operator: button.dataset.operator || '',
+    context_date: button.dataset.contextDate || '',
     episode_start: Number(button.dataset.episodeStart || 0),
     episode_end: Number(button.dataset.episodeEnd || 0),
   }};
   resetPendingResolveButton();
+  locallyResolvedFailureKeys.add(resolveKey);
+  renderConsecutiveFailures(consecutiveFailuresState);
   try {{
     const data = await postJson('/api/consecutive-failures/resolve', payload);
     if (!data.ok) throw new Error('No matching unresolved streak was found');
-    locallyResolvedFailureKeys.add(resolveKey);
-    renderConsecutiveFailures(consecutiveFailuresState);
     renderConsecutiveFailures(data.consecutive_failures || consecutiveFailuresState);
   }} catch (error) {{
+    locallyResolvedFailureKeys.delete(resolveKey);
+    renderConsecutiveFailures(consecutiveFailuresState);
     console.error('Failed to resolve consecutive-failure streak', error, payload);
     button.textContent = '解决失败';
     window.setTimeout(() => {{ button.textContent = '标记已解决'; }}, 2000);
@@ -3641,13 +3769,19 @@ async function loadRun(runId, select) {{
 
 function renderWorkSessionReport(report) {{
   if (!report || !report.markdown_path) {{
+    latestRuleExplanations = [];
     return '<div class="muted" style="margin-top:8px">还没有生成中文半日报告。</div>';
   }}
+  latestRuleExplanations = report.rule_explanations || [];
   const summary = report.summary || {{}};
   const window = report.window || {{}};
+  const ruleButton = latestRuleExplanations.length
+    ? `<button class="link-btn" onclick="openRuleExplanationModal()">查看检测规则说明</button>`
+    : `<span class="muted">当前报告暂无检测规则说明</span>`;
   return `<div style="margin-top:8px">
     <div><b>最新报告：</b>${{esc(window.label || '')}}，${{esc(window.start || '')}} 至 ${{esc(window.end || '')}}</div>
     <div>episode: ${{summary.episode_count || 0}} | 问题 episode: ${{summary.issue_episode_count || 0}} | 影响训练: ${{summary.training_blocking_episode_count || 0}} | 核心问题: ${{report.core_issue_count || 0}}</div>
+    <div class="row" style="margin-top:6px">${{ruleButton}}<span class="muted">括号内统计数字默认表示 finding 条数；去重 episode 数见报告里的 episode 字段。</span></div>
     <div class="muted">文件：${{esc(report.markdown_path || '')}}</div>
     <pre class="report-preview">${{esc(report.markdown || '')}}</pre>
   </div>`;
