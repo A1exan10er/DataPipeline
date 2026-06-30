@@ -109,6 +109,7 @@ QA_Pipeline/scripts/run_pipeline.py
 4  视频健康：可打开性、视频属性、黑/白/冻结采样帧
 5  机器人状态/action 合理性和静止检查
 6  UMI 专用验证、预处理和 world-frame 导出
+7  操作员静止/有效运动检查：开头、中段、结尾静止和总静止占比
 ```
 
 所有阶段都可以通过 `--phases` 选择性运行。
@@ -398,6 +399,49 @@ UMI 检测会使用 metadata 中的 robot 值、episode 名称中的 robot token
 ```text
 outputs/umi_processed/
 ```
+
+## 第 7 阶段：操作员静止检测
+
+第 7 阶段是主 QA runner 的一部分，用于检测 episode 中采集人员长时间没有产生
+有效运动的情况。选择方式：
+
+```bash
+--phases 7
+```
+
+它优先从以下运动源读取时间序列：
+
+```text
+observation.state.joint_position
+actions.joint_position
+observation.state.eef_pose
+actions.eef_pose
+action.eef_pose
+```
+
+判定方法：
+
+- 对相邻时间行计算非 gripper 运动列变化；
+- 如果所有运动列变化都小于 `motion_delta_threshold`，该相邻区间视为静止；
+- `stillness_buffer_ms` 以内的静止允许存在；
+- 超过缓冲的静止段会按位置分为开头 `leading`、中段 `middle`、结尾 `trailing`；
+- 同时统计总超额静止占比和有效运动时长。
+
+主要 finding：
+
+```text
+operator_standstill_leading
+operator_standstill_middle
+operator_standstill_trailing
+operator_standstill_excessive
+operator_standstill_motion_too_short
+standstill_motion_source_missing
+standstill_motion_source_invalid
+```
+
+第 7 阶段只写报告和 SQLite finding，不会裁剪视频，也不会修改原始 CSV。阈值来
+自 `QA_Pipeline/configs/quality_rules.json` 的 `phase7_standstill` 配置，并会
+在中文工作时段报告的 `检测规则说明.csv` 和 dashboard 规则弹窗中解释。
 
 ## 静止裁剪规划器
 

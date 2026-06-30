@@ -11,6 +11,18 @@ Main entry point:
 python3 QA_Pipeline/scripts/run_pipeline.py
 ```
 
+Implemented phases:
+
+```text
+1  structure, metadata, required files, labels, task/robot consistency
+2  duration, frame/row counts, video/action length alignment, duration outliers
+3  timestamps, FPS, frame drops, cross-camera start/end alignment
+4  video health: openability, properties, black/white/frozen sampled frames
+5  robot state/action reasonableness, limits, steps, velocity, jitter, EEF jumps
+6  UMI-specific validation, preprocessing, and world-frame export
+7  standstill/operator-idle detection using motion source time series
+```
+
 From the repository root, activate the virtual environment first:
 
 ```bash

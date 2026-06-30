@@ -641,6 +641,107 @@ aloha gripper range: 0.0 to 0.1 m
 arx5 gripper range: 0.0 to 0.082 m
 ```
 
+## 第 6 阶段：UMI 处理
+
+文件：
+
+```text
+QA_Pipeline/scripts/pipeline/phase6_umi.py
+```
+
+目的：
+
+执行 UMI 专用验证和处理。该阶段只对 UMI episode 有意义；非 UMI episode 会被
+跳过，并产生 pass/info finding。
+
+运行：
+
+```bash
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --phases 6 \
+  --db-path outputs/qa_umi/qa.db \
+  --output-dir outputs/qa_umi
+```
+
+主要工作：
+
+- 根据 metadata、episode 名称 token、task 名称和路径上下文识别 UMI episode；
+- 调用 `DataProcessUMI` 下的 UMI 工具；
+- 执行 raw-data assessment 和 trajectory preprocessing；
+- 导出 world-frame 数据，供后续 UMI 工作流使用；
+- 将处理产物写入配置的 UMI 输出目录，不修改 NAS 原始 episode。
+
+注意事项：
+
+- 第 6 阶段可能打开视频、复制/转换 episode 数据，并使用 FFmpeg，因此比元数据
+  和时间戳阶段慢；
+- 它目前不走普通 multiprocessing 路径，即使设置了 `--workers`，UMI episode
+  也会顺序处理；
+- 大规模运行时通常建议先跑第 1-5 阶段或第 1-7 阶段，再只对需要 UMI 处理的
+  数据运行第 6 阶段。
+
+主要非通过情况包括 UMI 必需输入缺失、UMI 轨迹无效或处理失败、处理脚本异常，
+以及 UMI 专用验证失败。
+
+## 第 7 阶段：操作员静止/有效运动检测
+
+文件：
+
+```text
+QA_Pipeline/scripts/pipeline/phase7_standstill.py
+```
+
+目的：
+
+检测 episode 开头、中段或结尾是否存在采集人员长时间没有产生有效运动的情况。
+
+运行：
+
+```bash
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --phases 7 \
+  --db-path outputs/qa_phase7/qa.db \
+  --output-dir outputs/qa_phase7
+```
+
+运动源优先级：
+
+```text
+observation.state.joint_position
+actions.joint_position
+observation.state.eef_pose
+actions.eef_pose
+action.eef_pose
+```
+
+判定方法：
+
+- 比较相邻运动数据行；
+- 运动检测时忽略 gripper 列；
+- 如果所有选中的非 gripper 运动列变化都小于 `motion_delta_threshold`，该时间
+  区间视为静止；
+- `stillness_buffer_ms` 以内的静止允许存在；
+- 更长静止段按位置分为开头 `leading`、中段 `middle`、结尾 `trailing`；
+- 同时检查总超额静止占比和最小有效运动时长。
+
+主要非通过情况：
+
+| Check | 含义 | 状态影响 |
+| --- | --- | --- |
+| `operator_standstill_leading` | 开头静止过长 | 按时长 warning / needs_review / fail |
+| `operator_standstill_middle` | 中段静止过长 | 按时长 warning / needs_review / fail |
+| `operator_standstill_trailing` | 结尾静止过长 | 按时长 warning / needs_review / fail |
+| `operator_standstill_excessive` | 总超额静止占比过高 | needs_review / fail |
+| `operator_standstill_motion_too_short` | 有效非静止运动时长过短 | fail |
+| `standstill_motion_source_missing` | 未找到配置的运动源 | warning |
+| `standstill_motion_source_invalid` | 运动源存在但时间戳或行数据无效 | needs_review |
+
+第 7 阶段只生成报告和 SQLite finding，不会裁剪视频，也不会重写 CSV。阈值位于
+`QA_Pipeline/configs/quality_rules.json` 的 `phase7_standstill` 配置下，并会
+通过中文工作时段报告的 `检测规则说明.csv` 和 dashboard 规则弹窗展示给 reviewer。
+
 ## 静止裁剪规划器
 
 文件：
