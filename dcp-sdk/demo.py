@@ -1,131 +1,203 @@
 """
-demo.py — 使用 EventListener / listen_event 监听采集结果验证完成事件
+Demo for dcs-sdk consumption patterns.
 
-运行前确保 RabbitMQ 可达且 dcs_config.json 可被加载:
+Run:
     conda activate datacollector
     set DCS_CONFIG_FILE=D:/code/dcp/dcs_config.json   (Windows)
-    python demo.py
+    python demo.py [mode]
 """
 
+import argparse
 import asyncio
 import time
+from urllib.parse import urlparse
 
-# 从 SDK 导入新 API
 from dcs_sdk import (
-    EventListener,
-    listen_event,
     EPISODE_VERIFIED,
     BaseEvent,
+    EventListener,
     emit_event,
+    listen_event,
 )
+from dcs_sdk.events import get_exchange_name, get_rabbitmq_url
 
+PLATFORM_EPISODE_VERIFIED = "platform.episode.verified"
+VERIFIED_ROUTING_KEYS = [EPISODE_VERIFIED, PLATFORM_EPISODE_VERIFIED]
 
-# ---------------------------------------------------------------------------
-# 同步 handler（演示用）
-# ---------------------------------------------------------------------------
 
 def on_episode_verified_sync(event: BaseEvent):
-    """同步回调 —— 收到采集验证完成事件时被调用。"""
+    """Simple sync handler."""
     payload = event.payload or {}
-    print(f"\n[sync handler] 事件: {event.event}")
-    print(f"  event_id    : {event.event_id}")
-    print(f"  record_id   : {payload.get('record_id')}")
-    print(f"  session_id  : {payload.get('session_id')}")
+    print(f"\n[sync handler] event: {event.event}")
+    print(f"  event_id     : {event.event_id}")
+    print(f"  record_id    : {payload.get('record_id')}")
+    print(f"  session_id   : {payload.get('session_id')}")
     print(f"  verified_path: {payload.get('verified_path')}")
-    print(f"  完整 payload: {payload}")
+    print(f"  payload      : {payload}")
 
-
-# ---------------------------------------------------------------------------
-# 异步 handler（演示用）
-# ---------------------------------------------------------------------------
 
 async def on_episode_verified_async(event: BaseEvent):
-    """异步回调 —— 可以做 await 操作（如写数据库、调 HTTP）。"""
+    """Async handler sample."""
     payload = event.payload or {}
-    print(f"\n[async handler] 事件: {event.event}")
-    print(f"  event_id    : {event.event_id}")
-    print(f"  record_id   : {payload.get('record_id')}")
+    print(f"\n[async handler] event: {event.event}")
+    print(f"  event_id   : {event.event_id}")
+    print(f"  record_id  : {payload.get('record_id')}")
 
-    # 模拟异步操作
     await asyncio.sleep(0.1)
-    print(f"  [async 处理完成] session_id={payload.get('session_id')}")
+    print(f"  [done] session_id={payload.get('session_id')}")
 
 
-# ---------------------------------------------------------------------------
-# 方式一: listen_event() 便捷函数（推荐）
-# ---------------------------------------------------------------------------
+def _print_connection_context():
+    """Print MQ endpoint used by this process, with secret masked."""
+    url = get_rabbitmq_url()
+    exchange = get_exchange_name()
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        masked_host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        user = parsed.username or ""
+        vhost = parsed.path or "/"
+        masked_url = f"{parsed.scheme}://{user}:***@{masked_host}{port}{vhost}"
+    else:
+        masked_url = url or "<empty>"
+
+    print(f"MQ URL    : {masked_url}")
+    print(f"Exchange  : {exchange}")
+
+
+def _run_until_keyboard_interrupt():
+    """Block until user hits Ctrl+C."""
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping...")
+
 
 def demo_listen_event():
-    """一键启动监听，自动在后台线程运行。"""
-    print("=" * 60)
-    print("方式一: listen_event() 便捷函数")
-    print("=" * 60)
+    """
+    Method 1 (recommended for multi-system): anonymous queue, listen both keys.
 
-    listener = listen_event(EPISODE_VERIFIED, on_episode_verified_sync)
-    print(f"已启动监听: {EPISODE_VERIFIED}")
-    print("等待消息中... (按 Ctrl+C 退出)\n")
-
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n正在停止...")
-    finally:
-        listener.stop()
-        print("监听已停止")
-
-
-# ---------------------------------------------------------------------------
-# 方式二: EventListener 类（更灵活，支持多个 routing key）
-# ---------------------------------------------------------------------------
-
-def demo_event_listener():
-    """手动创建 EventListener，支持多个事件和精细控制。"""
-    print("=" * 60)
-    print("方式二: EventListener 类（多事件 + 异步 handler）")
-    print("=" * 60)
+    No queue_name is passed, so every process gets its own auto-delete queue.
+    Different services can run this independently without queue-name collision.
+    """
+    print("=" * 64)
+    print("Method 1: EventListener with two routing keys (anonymous, multi-system-safe)")
+    print("=" * 64)
 
     listener = EventListener(
-        routing_keys=[EPISODE_VERIFIED],
-        handler=on_episode_verified_async,  # 异步 handler
-        queue_name="demo.episode_verified",
+        routing_keys=VERIFIED_ROUTING_KEYS,
+        handler=on_episode_verified_sync,
+        max_retries=10,
+        retry_delay_ms=15_000,
     )
     listener.start()
-    print(f"已启动监听 routing_keys={[EPISODE_VERIFIED]}")
-    print("等待消息中... (按 Ctrl+C 退出)\n")
-
+    print(f"Subscribed keys={VERIFIED_ROUTING_KEYS}")
+    _print_connection_context()
+    print("Waiting for messages... (Ctrl+C to stop)\n")
     try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n正在停止...")
+        _run_until_keyboard_interrupt()
     finally:
         listener.stop()
-        print("监听已停止")
+        print("Listener stopped")
 
 
-# ---------------------------------------------------------------------------
-# 方式三: 模拟发送一条测试消息，验证监听器能收到
-# ---------------------------------------------------------------------------
+def demo_listen_event_named():
+    """
+    Method 1.1: named queue.
+
+    Use this only when you explicitly want a durable queue for restart recovery.
+    """
+    print("=" * 64)
+    print("Method 1.1: listen_event() with named queue")
+    print("=" * 64)
+
+    listener = listen_event(
+        EPISODE_VERIFIED,
+        on_episode_verified_sync,
+        queue_name="demo.episode_verified",
+        max_retries=10,
+        retry_delay_ms=15_000,
+    )
+    print("Subscribed queue=demo.episode_verified")
+    _print_connection_context()
+    print("Waiting for messages... (Ctrl+C to stop)\n")
+    try:
+        _run_until_keyboard_interrupt()
+    finally:
+        listener.stop()
+        print("Listener stopped")
+
+
+def demo_event_listener():
+    """
+    Method 2: EventListener with explicit named queue.
+    """
+    print("=" * 64)
+    print("Method 2: EventListener with named queue")
+    print("=" * 64)
+
+    listener = EventListener(
+        routing_keys=VERIFIED_ROUTING_KEYS,
+        handler=on_episode_verified_async,
+        queue_name="demo.episode_verified",
+        max_retries=10,
+        retry_delay_ms=15_000,
+    )
+    listener.start()
+    print(f"Subscribed routing_keys={VERIFIED_ROUTING_KEYS}")
+    _print_connection_context()
+    print("Waiting for messages... (Ctrl+C to stop)\n")
+    try:
+        _run_until_keyboard_interrupt()
+    finally:
+        listener.stop()
+        print("Listener stopped")
+
+
+def demo_event_listener_anonymous():
+    """
+    Method 3: EventListener with anonymous queue.
+
+    Same collision-safe behavior as anonymous listen_event, with async handler.
+    """
+    print("=" * 64)
+    print("Method 3: EventListener without queue_name (anonymous)")
+    print("=" * 64)
+
+    listener = EventListener(
+        routing_keys=VERIFIED_ROUTING_KEYS,
+        handler=on_episode_verified_async,
+        max_retries=10,
+        retry_delay_ms=15_000,
+    )
+    listener.start()
+    print(f"Subscribed routing_keys={VERIFIED_ROUTING_KEYS}")
+    _print_connection_context()
+    print("Waiting for messages... (Ctrl+C to stop)\n")
+    try:
+        _run_until_keyboard_interrupt()
+    finally:
+        listener.stop()
+        print("Listener stopped")
+
 
 def demo_send_and_receive():
-    """发送一条测试事件，验证监听器能收到。"""
-    print("=" * 60)
-    print("方式三: 发送测试消息验证")
-    print("=" * 60)
+    """Method 4: send an event and verify it is received by the listener."""
+    print("=" * 64)
+    print("Method 4: send + receive smoke test")
+    print("=" * 64)
 
-    received_events = []
+    received_events: list[BaseEvent] = []
 
     def handler(event: BaseEvent):
         received_events.append(event)
 
     listener = listen_event(EPISODE_VERIFIED, handler)
-    print("已启动监听，发送测试消息...")
+    _print_connection_context()
+    print("Listener started. Sending one test event...")
 
-    # 等待订阅就绪
     time.sleep(0.5)
-
-    # 发送一条模拟事件
     emit_event(
         EPISODE_VERIFIED,
         {
@@ -136,7 +208,6 @@ def demo_send_and_receive():
         wait=True,
     )
 
-    # 等待投递
     for _ in range(30):
         if received_events:
             break
@@ -144,29 +215,46 @@ def demo_send_and_receive():
 
     if received_events:
         event = received_events[0]
-        print(f"\n[OK] 收到事件!")
-        print(f"  event       : {event.event}")
-        print(f"  event_id    : {event.event_id}")
-        print(f"  payload     : {event.payload}")
+        print("\n[OK] message received")
+        print(f"  event     : {event.event}")
+        print(f"  event_id  : {event.event_id}")
+        print(f"  payload   : {event.payload}")
     else:
-        print("\n[FAIL] 未收到事件（可能 RabbitMQ 未连接）")
+        print("\n[FAIL] no message received (is RabbitMQ reachable?)")
 
     listener.stop()
 
 
-# ---------------------------------------------------------------------------
-# 入口
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
-    import sys
+    parser = argparse.ArgumentParser(description="dcs-sdk demo")
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        default="listen",
+        choices=[
+            "listen",
+            "listen-named",
+            "class",
+            "class-anon",
+            "test",
+        ],
+        help=(
+            "listen: anonymous EventListener for both episode_verified keys (default), "
+            "listen-named: named listen_event, "
+            "class: EventListener named queue, "
+            "class-anon: EventListener anonymous queue, "
+            "test: send + receive smoke test"
+        ),
+    )
+    args = parser.parse_args()
 
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        # python demo.py test  → 发送一条测试消息验证
-        demo_send_and_receive()
-    elif len(sys.argv) > 1 and sys.argv[1] == "class":
-        # python demo.py class → 使用 EventListener 类
+    if args.mode == "listen-named":
+        demo_listen_event_named()
+    elif args.mode == "class":
         demo_event_listener()
+    elif args.mode == "class-anon":
+        demo_event_listener_anonymous()
+    elif args.mode == "test":
+        demo_send_and_receive()
     else:
-        # python demo.py → 使用 listen_event 便捷函数
         demo_listen_event()

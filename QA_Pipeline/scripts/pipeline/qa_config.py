@@ -38,6 +38,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "dual_arm": ["arx", "arx5", "aloha", "piper", "aloha_piper"],
             "umi": ["umi"],
         },
+        "quality_labels": {
+            "normal_labels": ["完全正常"],
+            "allowed_non_error_labels": ["测试任务"],
+            "missing_status": "fail",
+            "unexpected_status": "needs_review",
+        },
     },
     "phase2_duration": {
         "length_alignment": {
@@ -47,6 +53,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "phase3_timestamp": {
         "abnormal_fps": {
             "loss_fail_ratio": 0.10,
+            "normal_video_loss_fail_ratio": 0.10,
+            "tactile_video_loss_fail_ratio": 0.15,
             "gain_warning_ratio": 0.10,
         },
         "frame_drops": {
@@ -71,8 +79,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "phase6_umi_processing": {
         "enabled": True,
+        "profile": "full",
         "output_root": "outputs/umi_processed",
         "suffix": "_w_world_base",
+        "video_only_suffix": "_video_aligned",
         "overwrite": True,
         "keep_intermediate": False,
         "skip_assessment": False,
@@ -83,6 +93,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "trajectory_pass_labels": ["smooth"],
         "trajectory_nonpass_status": "fail",
         "run_executability": False,
+        "video": {
+            "ffmpeg_threads": 2,
+            "preprocess_preset": "veryfast",
+            "output_mode": "derived_copy",
+            "sidecar_filename": "video_rotated_180.mp4",
+            "orientation_correction": {
+                "observation.image.left_wrist_view": 180,
+                "observation.image.right_wrist_view": 180,
+            },
+        },
         "ik": {
             "robots": None,
             "arm": "both",
@@ -152,7 +172,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "trajectory_not_smooth",
             "ik_executability_failed",
         ],
-        "exclude_check_names": ["timestamps_raw_inconsistency"],
+        "exclude_check_names": ["timestamps_raw_inconsistency", "quality_label_unexpected"],
     },
 }
 

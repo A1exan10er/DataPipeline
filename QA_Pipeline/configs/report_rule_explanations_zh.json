@@ -8,14 +8,31 @@
     "evidence_fields": []
   },
   "rules": {
+    "quality_labels_missing": {
+      "title_zh": "缺少采集质量标签",
+      "phase": "Phase 1",
+      "description_zh": "检测 metadata.quality.labels 是否存在且为非空列表。缺少该字段表示 episode 的标注/收尾流程没有完成，或采集系统没有正确写入标签。",
+      "standard_zh": "metadata.json 中必须存在 quality.labels，且列表不能为空。",
+      "severity_zh": "缺失或为空时记为 major/fail，可立即通知采集端。",
+      "evidence_fields": ["labels"]
+    },
+    "quality_label_unexpected": {
+      "title_zh": "采集质量标签非正常",
+      "phase": "Phase 1",
+      "description_zh": "检测 metadata.quality.labels 是否包含允许的正常标签。完全正常表示正常数据；测试任务表示有意采集的测试数据。其他标签由采集人员主动标记，先作为内部复核信号。",
+      "standard_zh": "labels 中包含 完全正常 或 测试任务 时不报错；否则记录该问题。",
+      "severity_zh": "当前记为 minor/needs_review，不立即通知采集端；若重复出现，由重复问题检测机制升级展示和通知。",
+      "evidence_fields": ["labels", "normal_labels", "allowed_non_error_labels"]
+    },
     "abnormal_fps_loss": {
       "title_zh": "视频有效帧率低于预期",
       "phase": "Phase 3",
       "description_zh": "检测视频或触觉视频的实际有效帧率是否明显低于该模态的期望帧率。",
-      "standard_zh": "根据时间戳计算 actual_fps，并读取该模态对应的 expected_fps。若 (expected_fps - actual_fps) / expected_fps 大于 loss_fail_ratio，则判定为帧率损失异常。",
-      "severity_zh": "超过 loss_fail_ratio 时记为 major/fail。",
+      "standard_zh": "根据时间戳计算 actual_fps，并读取该模态对应的 expected_fps。若 (expected_fps - actual_fps) / expected_fps 大于该视频类型的 loss_fail_ratio，则判定为帧率损失异常。普通 RGB/BGR 视频默认阈值为 10%，tactile 视频默认阈值为 15%。",
+      "severity_zh": "超过对应视频类型的 loss_fail_ratio 时记为 major/fail。",
       "thresholds": [
-        {"label_zh": "帧率损失失败阈值", "value_path": ["phase3_timestamp", "abnormal_fps", "loss_fail_ratio"], "unit": "比例"}
+        {"label_zh": "普通 RGB/BGR 视频帧率损失失败阈值", "value_path": ["phase3_timestamp", "abnormal_fps", "normal_video_loss_fail_ratio"], "unit": "比例"},
+        {"label_zh": "触觉视频帧率损失失败阈值", "value_path": ["phase3_timestamp", "abnormal_fps", "tactile_video_loss_fail_ratio"], "unit": "比例"}
       ],
       "evidence_fields": ["modality", "actual_fps", "expected_fps", "deviation_ratio", "threshold"]
     },

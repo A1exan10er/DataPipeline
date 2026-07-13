@@ -43,7 +43,8 @@ declared modalities, required files, checksum manifest, and quality labels.
 | `required_modality_file_empty` | required modality file exists but is empty | fail |
 | `action_modality_singular_name` | folder uses `action.*` instead of preferred `actions.*`; default config is pass/info | configurable |
 | `unknown_modality_detected` | unknown modality names are detected but are not used for required-file failures; default config is pass/info | configurable |
-| `quality_labels_missing` | `quality.labels` is missing or empty | warning |
+| `quality_labels_missing` | `quality.labels` is missing or empty; labeling did not complete | fail |
+| `quality_label_unexpected` | labels exist but do not contain `完全正常` or `测试任务`; recorded for internal review/repeated-issue escalation | needs_review |
 
 Notes:
 

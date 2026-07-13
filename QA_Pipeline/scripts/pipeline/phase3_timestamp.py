@@ -411,9 +411,7 @@ def _check_actual_frequency(state: EpisodeState, modality: str, timestamps: list
         return []
     loss_ratio = max(0.0, (expected_fps - actual_fps) / expected_fps)
     gain_ratio = max(0.0, (actual_fps - expected_fps) / expected_fps)
-    loss_fail_ratio = float(
-        config_value(["phase3_timestamp", "abnormal_fps", "loss_fail_ratio"], 0.10)
-    )
+    loss_fail_ratio = _fps_loss_threshold(modality)
     gain_warning_ratio = float(
         config_value(["phase3_timestamp", "abnormal_fps", "gain_warning_ratio"], 0.10)
     )
@@ -448,6 +446,12 @@ def _check_actual_frequency(state: EpisodeState, modality: str, timestamps: list
             )
         ]
     return []
+
+
+def _fps_loss_threshold(modality: str) -> float:
+    fallback = float(config_value(["phase3_timestamp", "abnormal_fps", "loss_fail_ratio"], 0.10))
+    key = "tactile_video_loss_fail_ratio" if _is_tactile_modality(modality) else "normal_video_loss_fail_ratio"
+    return float(config_value(["phase3_timestamp", "abnormal_fps", key], fallback))
 
 
 def _check_timestamps_raw_consistency(state: EpisodeState, modality: str) -> list[Finding]:

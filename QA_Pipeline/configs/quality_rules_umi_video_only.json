@@ -1,0 +1,19 @@
+{
+  "phase6_umi_processing": {
+    "enabled": true,
+    "profile": "video_only",
+    "output_root": "outputs/umi_video_only_local",
+    "video_only_suffix": "_video_aligned",
+    "overwrite": false,
+    "max_concurrent_episodes": 1,
+    "video": {
+      "ffmpeg_threads": 2,
+      "output_mode": "sidecar",
+      "sidecar_filename": "video_rotated_180.mp4",
+      "orientation_correction": {
+        "observation.image.left_wrist_view": 180,
+        "observation.image.right_wrist_view": 180
+      }
+    }
+  }
+}

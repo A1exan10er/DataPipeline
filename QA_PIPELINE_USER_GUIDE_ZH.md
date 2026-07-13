@@ -76,17 +76,14 @@ group-aware  保证第 2/3 阶段的离群统计分组不会被切开
 
 Group-aware batching 会避免第 2/3 阶段在不完整分组上计算离群统计。第 2 阶段按 task 分组，因此会把完整 task 放在同一个 batch。第 3 阶段按 task+robot 分组，因此在未选择第 2 阶段时会把完整 task+robot 放在同一个 batch。如果某个完整分组本身大于 `--batch-size`，它会作为一个超出 batch size 的完整 batch 运行，并打印 warning。这是有意行为：优先保证分组统计正确，而不是强行切开分组。
 
-进入详细阶段检查前，runner 会先应用默认质量标签过滤。只有 `metadata.json`
-中 `quality.labels` 包含 `完全正常` 的 episode 会被处理。采集员标为其他质量
-标签的 episode 会被跳过，并在终端汇总跳过原因。该过滤在状态加载和阶段派发
-前执行，因此适用于所有阶段。可用以下参数调整：
+质量标签内容在第 1 阶段检查，不再作为 episode 选择过滤条件。`metadata.json`
+中 `quality.labels` 包含 `完全正常` 的 episode 视为正常；包含 `测试任务` 的
+episode 视为有意采集的测试数据。缺失标签或非允许标签会由第 1 阶段写出明确
+finding，但不会阻止第 2/3/4/5 等其他阶段继续检查同一个 episode。历史参数
+`--quality-label` 和 `--disable-quality-label-filter` 仍被接受以保持兼容，
+但不会过滤 episode。
 
-```text
---quality-label <label>              处理指定质量标签
---disable-quality-label-filter       完整审计时处理所有质量标签
-```
-
-使用 `--force-rerun` 时，会重新计算当前筛选到的 episode 的所选阶段。已有 episode 行会被更新，同一个 `episode_path + phase` 的旧 findings 会被删除并写入新 findings。每次运行开始时，数据库还会按当前 `--roots`、`--date`、`--task`、质量标签过滤和 `--max-episodes` 得到的 episode 集合进行清理，删除当前集合之外的旧 episode 记录，避免旧筛选条件的结果污染当前 dashboard。
+使用 `--force-rerun` 时，会重新计算当前筛选到的 episode 的所选阶段。已有 episode 行会被更新，同一个 `episode_path + phase` 的旧 findings 会被删除并写入新 findings。每次运行开始时，数据库还会按当前 `--roots`、`--date`、`--task` 和 `--max-episodes` 得到的 episode 集合进行清理，删除当前集合之外的旧 episode 记录，避免旧筛选条件的结果污染当前 dashboard。
 
 如果要继续一个中断的运行，复用相同的 `--db-path` 和 `--output-dir`，并且不要传 `--force-rerun`。当前 resume 路径仍会先扫描输入 root，并加载匹配 episode 的状态，然后才能跳过已完成工作。因此在大型 NAS root 上，即使之前的阶段结果已经在 SQLite 中，重新发现 episode 仍可能需要等待。后续应增加真正的 DB-resume 模式来避免全量发现步骤。
 
@@ -241,7 +238,7 @@ http://<server-ip>:4131
 `qa_control_dashboard.py` 是服务器控制台，支持：
 
 - 在页面上启动 date-range 或 task-folder run；
-- 设置 `date_from`、`date_to`、`phases`、`workers`、`batch_size`、质量标签过滤；
+- 设置 `date_from`、`date_to`、`phases`、`workers`、`batch_size`；
 - 查看 run 实时状态、阶段进度、日志和问题 episode；
 - 管理 event listener 的启动、停止、重启和日期过滤；
 - 生成/刷新中文工作时段报告；
@@ -404,7 +401,7 @@ QA_Pipeline/scripts/pipeline/phase1_metadata.py
 - 必需元数据字段存在且有效；
 - 元数据中的模态有对应文件夹；
 - 必需文件存在且非空；
-- 存在质量标签。
+- 存在质量标签，并包含 `完全正常` 或允许的非错误标签（例如 `测试任务`）。
 
 主要非通过情况：
 
@@ -418,7 +415,8 @@ QA_Pipeline/scripts/pipeline/phase1_metadata.py
 | `required_modality_file_empty` | 必需文件存在但为空 | fail |
 | `parent_path_structure` | 路径不像 `<task>/<date>/<operator>/<episode>` | warning |
 | `checksum_manifest_missing` | `.checksum_manifest` 缺失 | warning |
-| `quality_labels_missing` | `quality.labels` 缺失或为空 | warning |
+| `quality_labels_missing` | `quality.labels` 缺失或为空，表示标注步骤没有完成 | fail |
+| `quality_label_unexpected` | 已有标签但不包含 `完全正常` 或 `测试任务`，先作为内部复核/重复问题统计 | needs_review |
 | `action_modality_singular_name` | 模态/文件夹使用 `action.*` 而不是 `actions.*`，会记录待修复项 | warning |
 | `unknown_modality_detected` | 检测到未知模态名称，会记录供复核 | 默认 pass/info |
 | `task_robot_mismatch` | metadata/name/path 中的机器人来源与 task 文件夹机器人 token 冲突 | 当前第 1 阶段为 fail |

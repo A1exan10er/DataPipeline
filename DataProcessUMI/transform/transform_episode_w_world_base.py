@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -21,6 +22,9 @@ except ImportError:
 VIDEO_STREAMS = {
     "left": "observation.image.left_wrist_view",
     "right": "observation.image.right_wrist_view",
+}
+DEFAULT_WRIST_ROTATIONS = {
+    stream_dir: 180 for stream_dir in VIDEO_STREAMS.values()
 }
 ACTION_EEF_POSE_DIR = "actions.eef_pose"
 EXPORT_TRANSFORM_VERSION = "v1"
@@ -184,43 +188,158 @@ def is_wrist_video_path(video_path):
 
 
 def ffmpeg_thread_args():
+    threads = ffmpeg_thread_count()
+    return ["-threads", str(threads)] if threads is not None else []
+
+
+def ffmpeg_thread_count():
     value = os.environ.get("UMI_FFMPEG_THREADS")
     if value in (None, ""):
-        return []
+        return None
     try:
         threads = int(value)
     except (TypeError, ValueError):
-        return []
-    return ["-threads", str(threads)] if threads > 0 else []
+        return None
+    return threads if threads > 0 else None
 
 
-def run_video_transcode(video_path, temp_path, clip_start_sec=None, clip_end_sec=None, flip=False):
+def probe_video_stream(video_path):
+    """Return the primary video stream properties needed for format-preserving output."""
+    completed = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            (
+                "stream=codec_name,codec_tag_string,pix_fmt,color_range,color_space,"
+                "color_transfer,color_primaries"
+            ),
+            "-of",
+            "json",
+            str(video_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+    streams = payload.get("streams") or []
+    if not streams:
+        raise ValueError(f"No video stream found: {video_path}")
+    return streams[0]
+
+
+def source_video_encoding_args(video_path):
+    """Build FFmpeg arguments that preserve the source video stream format."""
+    stream = probe_video_stream(video_path)
+    codec = stream.get("codec_name")
+    encoder = {
+        "h264": "libx264",
+        "hevc": "libx265",
+    }.get(codec)
+    if encoder is None:
+        raise ValueError(
+            f"Unsupported source video codec {codec!r} for rotated output: {video_path}"
+        )
+    preset = os.environ.get("UMI_FFMPEG_PRESET", "veryfast").strip() or "veryfast"
+    args = ["-c:v", encoder, "-preset", preset, "-crf", "22"]
+    args.extend(ffmpeg_thread_args())
+    threads = ffmpeg_thread_count()
+    if codec == "hevc" and threads is not None:
+        args.extend(["-x265-params", f"pools={threads}:log-level=error"])
+    if stream.get("pix_fmt"):
+        args.extend(["-pix_fmt", str(stream["pix_fmt"])])
+    if stream.get("codec_tag_string"):
+        args.extend(["-tag:v", str(stream["codec_tag_string"])])
+    for probe_key, ffmpeg_option in (
+        ("color_range", "-color_range"),
+        ("color_space", "-colorspace"),
+        ("color_transfer", "-color_trc"),
+        ("color_primaries", "-color_primaries"),
+    ):
+        value = stream.get(probe_key)
+        if value and value != "unknown":
+            args.extend([ffmpeg_option, str(value)])
+    return args
+
+
+def fsync_file(path):
+    with Path(path).open("rb") as file_obj:
+        os.fsync(file_obj.fileno())
+
+
+def fsync_directory(path):
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        # Some network filesystems do not support directory fsync.
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def run_video_transcode(
+    video_path,
+    temp_path,
+    clip_start_sec=None,
+    clip_end_sec=None,
+    flip=False,
+    rotation_degrees=None,
+    replace_input=True,
+):
     command = ["ffmpeg", "-y", "-loglevel", "error"]
     if clip_start_sec is not None:
         command.extend(["-ss", f"{clip_start_sec:.6f}"])
     if clip_end_sec is not None:
         command.extend(["-to", f"{clip_end_sec:.6f}"])
-    command.extend(["-i", str(video_path), "-an"])
-    if flip:
-        command.extend(["-vf", "hflip,vflip"])
     command.extend(
         [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "22",
-            *ffmpeg_thread_args(),
-            "-pix_fmt",
-            "yuv420p",
+            "-i",
+            str(video_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-map",
+            "0:s?",
+            "-map",
+            "0:d?",
+            "-map_metadata",
+            "0",
+        ]
+    )
+    if rotation_degrees is None:
+        rotation_degrees = 180 if flip else 0
+    if rotation_degrees not in (0, 180):
+        raise ValueError(f"Unsupported video rotation: {rotation_degrees}; expected 0 or 180 degrees.")
+    if rotation_degrees == 180:
+        # Together these exact pixel permutations are a 180-degree rotation,
+        # not a horizontal or vertical mirror.
+        command.extend(["-vf", "hflip,vflip"])
+    command.extend(source_video_encoding_args(video_path))
+    command.extend(
+        [
+            "-c:a",
+            "copy",
+            "-c:s",
+            "copy",
+            "-c:d",
+            "copy",
             "-movflags",
             "+faststart",
             str(temp_path),
         ]
     )
     subprocess.run(command, check=True)
-    temp_path.replace(video_path)
+    if replace_input:
+        temp_path.replace(video_path)
 
 
 def flip_video_in_place(video_path):
@@ -237,6 +356,102 @@ def flip_video_in_place(video_path):
 
 def flip_wrist_videos(episode_dir):
     return [flip_video_in_place(p) for p in wrist_video_paths(episode_dir)]
+
+
+def rotate_video_in_place(video_path, rotation_degrees=180):
+    video_path = Path(video_path)
+    temp_path = video_path.with_name(f"{video_path.stem}.rotate.tmp{video_path.suffix}")
+    if temp_path.exists():
+        temp_path.unlink()
+    try:
+        run_video_transcode(
+            video_path,
+            temp_path,
+            rotation_degrees=rotation_degrees,
+        )
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+    return str(video_path)
+
+
+def rotate_wrist_videos(episode_dir, rotations=None):
+    """Rotate configured wrist streams and return episode-relative paths."""
+    episode_dir = Path(episode_dir)
+    rotations = dict(DEFAULT_WRIST_ROTATIONS if rotations is None else rotations)
+    rotated = []
+    for stream_dir, degrees in rotations.items():
+        video_path = episode_dir / stream_dir / "video.mp4"
+        if not video_path.is_file():
+            raise FileNotFoundError(f"Configured UMI wrist video is missing: {video_path}")
+        degrees = int(degrees)
+        if degrees == 0:
+            continue
+        rotate_video_in_place(video_path, degrees)
+        rotated.append(str(video_path.relative_to(episode_dir)))
+    return rotated
+
+
+def rotate_wrist_videos_to_sidecars(
+    episode_dir,
+    rotations=None,
+    output_filename="video_rotated_180.mp4",
+):
+    """Create rotated sidecars atomically while preserving source videos."""
+    episode_dir = Path(episode_dir)
+    rotations = dict(DEFAULT_WRIST_ROTATIONS if rotations is None else rotations)
+    prepared = []
+    directory_modes = {}
+    try:
+        for stream_dir, degrees in rotations.items():
+            source_path = episode_dir / stream_dir / "video.mp4"
+            if not source_path.is_file():
+                raise FileNotFoundError(f"Configured UMI wrist video is missing: {source_path}")
+            degrees = int(degrees)
+            if degrees == 0:
+                continue
+            camera_dir = source_path.parent
+            current_mode = stat.S_IMODE(camera_dir.stat().st_mode)
+            directory_modes[camera_dir] = current_mode
+            if not current_mode & stat.S_IWUSR:
+                camera_dir.chmod(current_mode | stat.S_IWUSR)
+            output_path = source_path.with_name(output_filename)
+            temp_path = output_path.with_name(
+                f".{output_path.stem}.tmp-{os.getpid()}{output_path.suffix}"
+            )
+            for orphan in camera_dir.glob(
+                f".{output_path.stem}.tmp-*{output_path.suffix}"
+            ):
+                orphan.unlink()
+            prepared.append((temp_path, output_path))
+            run_video_transcode(
+                source_path,
+                temp_path,
+                rotation_degrees=degrees,
+                replace_input=False,
+            )
+            fsync_file(temp_path)
+        for temp_path, output_path in prepared:
+            temp_path.replace(output_path)
+            fsync_directory(output_path.parent)
+        return [str(output.relative_to(episode_dir)) for _, output in prepared]
+    finally:
+        for temp_path, _ in prepared:
+            if temp_path.exists():
+                temp_path.unlink()
+        for camera_dir, original_mode in directory_modes.items():
+            camera_dir.chmod(original_mode)
+
+
+def transform_pose_files_in_place(episode_dir, config):
+    """Transform only action/state EEF CSV files; do not touch videos."""
+    episode_dir = Path(episode_dir)
+    transformed_files = []
+    for rel_dir in (EEF_POSE_DIR, ACTION_EEF_POSE_DIR):
+        csv_path = episode_dir / rel_dir / "data.csv"
+        if transform_pose_csv(csv_path, config):
+            transformed_files.append(str(csv_path.relative_to(episode_dir)))
+    return transformed_files
 
 
 def crop_video_with_timestamps(video_path, start_timestamp_ms, end_timestamp_ms, timestamp_offset_ms, flip=False):
@@ -377,7 +592,25 @@ def recompute_checksum_manifest(episode_dir):
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 digest.update(chunk)
         entries.append(f"{digest.hexdigest()}  {path.relative_to(episode_dir).as_posix()}")
-    manifest_path.write_text("\n".join(entries) + ("\n" if entries else ""), encoding="utf-8")
+    manifest_mode = stat.S_IMODE(manifest_path.stat().st_mode)
+    episode_mode = stat.S_IMODE(episode_dir.stat().st_mode)
+    temp_path = manifest_path.with_name(f".{manifest_path.name}.tmp-{os.getpid()}")
+    try:
+        if not episode_mode & stat.S_IWUSR:
+            episode_dir.chmod(episode_mode | stat.S_IWUSR)
+        for orphan in episode_dir.glob(f".{manifest_path.name}.tmp-*"):
+            orphan.unlink()
+        with temp_path.open("w", encoding="utf-8") as file_obj:
+            file_obj.write("\n".join(entries) + ("\n" if entries else ""))
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+        temp_path.replace(manifest_path)
+        manifest_path.chmod(manifest_mode)
+        fsync_directory(episode_dir)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+        episode_dir.chmod(episode_mode)
     return True
 
 
@@ -389,7 +622,14 @@ def resolve_output_root(output_dir):
     return path.resolve()
 
 
-def transform_episode(source_episode_dir, destination_episode_dir, config, crop_request=None, status=None):
+def transform_episode(
+    source_episode_dir,
+    destination_episode_dir,
+    config,
+    crop_request=None,
+    status=None,
+    rotate_videos=True,
+):
     def step(message):
         if status is not None:
             status(message)
@@ -416,7 +656,7 @@ def transform_episode(source_episode_dir, destination_episode_dir, config, crop_
             crop_request["start_frame"],
             crop_request["end_frame"],
         )
-    else:
+    elif rotate_videos:
         step("flipping wrist-view videos")
         flipped_videos = [
             str(Path(p).relative_to(destination_episode_dir))
@@ -424,11 +664,7 @@ def transform_episode(source_episode_dir, destination_episode_dir, config, crop_
         ]
 
     step("transforming pose CSV files")
-    transformed_files = []
-    for rel_dir in (EEF_POSE_DIR, ACTION_EEF_POSE_DIR):
-        csv_path = destination_episode_dir / rel_dir / "data.csv"
-        if transform_pose_csv(csv_path, config):
-            transformed_files.append(str(csv_path.relative_to(destination_episode_dir)))
+    transformed_files = transform_pose_files_in_place(destination_episode_dir, config)
 
     step("updating metadata.json and checksums.sha256")
     update_export_metadata(destination_episode_dir, crop_info)

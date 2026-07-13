@@ -6,7 +6,6 @@ outputs/
 qa_feature_test/
 qa_umi_test/
 .vscode/
-=2.1
 *.log
 DataProcessUMI/resources/.ament/
 motion_abnormality_report*/

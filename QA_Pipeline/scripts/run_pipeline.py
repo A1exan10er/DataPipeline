@@ -9,7 +9,6 @@ import sqlite3
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
@@ -86,14 +85,7 @@ EPISODE_SELECTION_CACHE = "selected_episodes.jsonl"
 EPISODE_SELECTION_META = "selected_episodes_meta.json"
 STREAMING_PROGRESS_INTERVAL_SECONDS = 10.0
 STREAMING_PROGRESS_INTERVAL_SCANNED = 5000
-
-
-@dataclass
-class QualityFilterSummary:
-    kept: int
-    skipped: int
-    unreadable_metadata: int
-    skipped_label_counts: Counter[str]
+NON_BLOCKING_PRIOR_FAIL_CHECKS = {"quality_labels_missing"}
 
 
 class GracefulStopRequested(RuntimeError):
@@ -177,26 +169,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if task_lower in str(episode_path).lower()
             ]
             print(f"After --task filter ({args.task}): {len(episodes)} episodes", flush=True)
-        if not args.disable_quality_label_filter:
-            print(
-                f"Applying quality label filter ({args.quality_label}) to {len(episodes)} episodes...",
-                flush=True,
-            )
-            episodes, quality_filter_summary = _filter_by_quality_label(episodes, args.quality_label)
-            print(
-                f"After quality label filter ({args.quality_label}): {len(episodes)} episodes "
-                f"({quality_filter_summary.skipped} skipped)"
-            )
-            if quality_filter_summary.unreadable_metadata:
-                print(
-                    "  skipped due to missing/unreadable metadata: "
-                    f"{quality_filter_summary.unreadable_metadata}"
-                )
-            for label_summary, count in quality_filter_summary.skipped_label_counts.most_common(5):
-                print(f"  skipped label {label_summary}: {count}")
-            remaining_labels = len(quality_filter_summary.skipped_label_counts) - 5
-            if remaining_labels > 0:
-                print(f"  ... {remaining_labels} more skipped label group(s)")
         if args.max_episodes is not None:
             episodes = episodes[: args.max_episodes]
         discovery_findings = []
@@ -255,27 +227,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if task_lower in str(episode_path).lower()
                 ]
                 print(f"After --task filter ({args.task}): {len(episodes)} episodes", flush=True)
-            quality_filter_summary: QualityFilterSummary | None = None
-            if not args.disable_quality_label_filter:
-                print(
-                    f"Applying quality label filter ({args.quality_label}) to {len(episodes)} episodes...",
-                    flush=True,
-                )
-                episodes, quality_filter_summary = _filter_by_quality_label(episodes, args.quality_label)
-                print(
-                    f"After quality label filter ({args.quality_label}): {len(episodes)} episodes "
-                    f"({quality_filter_summary.skipped} skipped)"
-                )
-                if quality_filter_summary.unreadable_metadata:
-                    print(
-                        "  skipped due to missing/unreadable metadata: "
-                        f"{quality_filter_summary.unreadable_metadata}"
-                    )
-                for label_summary, count in quality_filter_summary.skipped_label_counts.most_common(5):
-                    print(f"  skipped label {label_summary}: {count}")
-                remaining_labels = len(quality_filter_summary.skipped_label_counts) - 5
-                if remaining_labels > 0:
-                    print(f"  ... {remaining_labels} more skipped label group(s)")
             if args.max_episodes is not None:
                 episodes = episodes[: args.max_episodes]
             discovery_findings = _discovery_findings(discovery.skipped_hidden_dirs)
@@ -442,14 +393,14 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--quality-label",
         default="完全正常",
         help=(
-            "Only process episodes whose metadata quality.labels contains this label. "
-            "Default: 完全正常."
+            "Deprecated compatibility option. Label content is checked by Phase 1 and "
+            "does not filter episode selection."
         ),
     )
     parser.add_argument(
         "--disable-quality-label-filter",
         action="store_true",
-        help="Process episodes regardless of metadata quality.labels. Use for full audits only.",
+        help="Deprecated compatibility option. Episodes are always processed regardless of labels.",
     )
     parser.add_argument(
         "--disable-episode-selection-cache",
@@ -756,8 +707,6 @@ def _run_streaming_discovery(
     completed_groups = 0
     oversized_groups = 0
     skipped_completed = 0
-    skipped_quality = 0
-    skipped_unreadable = 0
     batch_index = 0
     started = time.perf_counter()
     last_report = started
@@ -810,8 +759,7 @@ def _run_streaming_discovery(
             print(
                 f"Streaming batch {batch_index} complete. "
                 f"Processed so far: {processed}; scanned={scanned}; selected={selected}; "
-                f"skipped_completed={skipped_completed}; skipped_quality={skipped_quality}; "
-                f"skipped_unreadable={skipped_unreadable}"
+                f"skipped_completed={skipped_completed}"
             )
         finally:
             batch = []
@@ -855,8 +803,6 @@ def _run_streaming_discovery(
                     selected,
                     processed,
                     skipped_completed,
-                    skipped_quality,
-                    skipped_unreadable,
                     started,
                     last_report,
                 )
@@ -867,25 +813,6 @@ def _run_streaming_discovery(
                     selected,
                     processed,
                     skipped_completed,
-                    skipped_quality,
-                    skipped_unreadable,
-                    started,
-                    last_report,
-                )
-                continue
-            keep, unreadable = _streaming_quality_filter(episode_path, args)
-            if not keep:
-                if unreadable:
-                    skipped_unreadable += 1
-                else:
-                    skipped_quality += 1
-                last_report = _print_streaming_progress(
-                    scanned,
-                    selected,
-                    processed,
-                    skipped_completed,
-                    skipped_quality,
-                    skipped_unreadable,
                     started,
                     last_report,
                 )
@@ -897,8 +824,6 @@ def _run_streaming_discovery(
                     selected,
                     processed,
                     skipped_completed,
-                    skipped_quality,
-                    skipped_unreadable,
                     started,
                     last_report,
                 )
@@ -930,8 +855,6 @@ def _run_streaming_discovery(
                 selected,
                 processed,
                 skipped_completed,
-                skipped_quality,
-                skipped_unreadable,
                 started,
                 last_report,
             )
@@ -964,8 +887,7 @@ def _run_streaming_discovery(
         "Streaming discovery complete: "
         f"scanned={scanned}, selected={selected}, processed={processed}, "
         f"groups={completed_groups}, oversized_groups={oversized_groups}, "
-        f"skipped_completed={skipped_completed}, skipped_quality={skipped_quality}, "
-        f"skipped_unreadable={skipped_unreadable}, hidden_dirs={len(skipped_hidden_dirs)}"
+        f"skipped_completed={skipped_completed}, hidden_dirs={len(skipped_hidden_dirs)}"
     )
     _print_db_final_summary(db_path, output_dir)
     return 0
@@ -1075,11 +997,24 @@ def _mark_deferred_umi_pending(
 
 
 def _has_failed_prior_phase(state: EpisodeState, current_phase: int) -> bool:
-    return any(
-        status == "fail"
-        for phase_num, status in state.phase_status.items()
-        if int(phase_num) < current_phase
-    )
+    for phase_num, status in state.phase_status.items():
+        if int(phase_num) >= current_phase or status != "fail":
+            continue
+        blocking_findings = [
+            finding
+            for finding in state.findings
+            if finding.phase == int(phase_num)
+            and finding.status == "fail"
+            and finding.check_name not in NON_BLOCKING_PRIOR_FAIL_CHECKS
+        ]
+        if blocking_findings:
+            return True
+        if not any(
+            finding.phase == int(phase_num) and finding.status == "fail"
+            for finding in state.findings
+        ):
+            return True
+    return False
 
 
 def _episode_matches_date_filters(episode_path: Path, args: argparse.Namespace) -> bool:
@@ -1104,15 +1039,6 @@ def _episode_path_date(episode_path: Path) -> str | None:
     return None
 
 
-def _streaming_quality_filter(episode_path: Path, args: argparse.Namespace) -> tuple[bool, bool]:
-    if args.disable_quality_label_filter:
-        return True, False
-    metadata, findings = load_metadata(episode_path)
-    if findings:
-        return False, True
-    return args.quality_label in _quality_labels(metadata), False
-
-
 def _streaming_episode_completed(
     db_path: Path,
     episode_path: Path,
@@ -1125,7 +1051,12 @@ def _streaming_episode_completed(
     if state is None:
         return False
     completed = {int(phase) for phase in state.phases_completed}
-    return all(phase in completed for phase in phases)
+    for phase in phases:
+        if phase not in completed:
+            return False
+        if phase == 6 and phase6_umi_processing.needs_run(state):
+            return False
+    return True
 
 
 def _print_streaming_progress(
@@ -1133,8 +1064,6 @@ def _print_streaming_progress(
     selected: int,
     processed: int,
     skipped_completed: int,
-    skipped_quality: int,
-    skipped_unreadable: int,
     started: float,
     last_report: float,
     force: bool = False,
@@ -1151,8 +1080,7 @@ def _print_streaming_progress(
     print(
         "  streaming discovery: "
         f"scanned={scanned}, selected={selected}, processed={processed}, "
-        f"skipped_completed={skipped_completed}, skipped_quality={skipped_quality}, "
-        f"skipped_unreadable={skipped_unreadable}, "
+        f"skipped_completed={skipped_completed}, "
         f"scan_rate={rate:.1f}/s, elapsed={_format_duration(elapsed)}",
         flush=True,
     )
@@ -1306,63 +1234,14 @@ def _print_live_dashboard_command(args: argparse.Namespace, db_path: Path, outpu
     )
 
 
-def _filter_by_quality_label(
-    episodes: list[Path],
-    required_label: str,
-) -> tuple[list[Path], QualityFilterSummary]:
-    kept = []
-    skipped_label_counts: Counter[str] = Counter()
-    unreadable_metadata = 0
-    total = len(episodes)
-    started = time.perf_counter()
-    last_report = started
-    for index, episode_path in enumerate(episodes, start=1):
-        metadata, metadata_findings = load_metadata(episode_path)
-        if metadata_findings:
-            unreadable_metadata += 1
-            skipped_label_counts["(metadata_unreadable)"] += 1
-            last_report = _print_prefilter_progress(
-                "quality label filter",
-                index,
-                total,
-                started,
-                last_report,
-                len(kept),
-                force=index == total,
-            )
-            continue
-        labels = _quality_labels(metadata)
-        if required_label in labels:
-            kept.append(episode_path)
-        else:
-            skipped_label_counts[_label_summary(labels)] += 1
-        last_report = _print_prefilter_progress(
-            "quality label filter",
-            index,
-            total,
-            started,
-            last_report,
-            len(kept),
-            force=index == total,
-        )
-    return kept, QualityFilterSummary(
-        kept=len(kept),
-        skipped=len(episodes) - len(kept),
-        unreadable_metadata=unreadable_metadata,
-        skipped_label_counts=skipped_label_counts,
-    )
-
-
 def _episode_selection_cache_meta(args: argparse.Namespace, roots: list[Path]) -> dict:
     return {
-        "version": 1,
+        "version": 2,
         "roots": [str(root) for root in roots],
         "date": args.date or "",
         "date_from": args.date_from or "",
         "date_to": args.date_to or "",
         "task": args.task or "",
-        "quality_label_filter_enabled": not args.disable_quality_label_filter,
-        "quality_label": args.quality_label if not args.disable_quality_label_filter else "",
         "max_episodes": args.max_episodes,
     }
 
@@ -1448,22 +1327,6 @@ def _build_group_key_cache(episodes: list[Path], roots: list[Path]) -> dict[str,
             force=index == total,
         )
     return cache
-
-
-def _quality_labels(metadata: dict) -> list[str]:
-    quality = metadata.get("quality")
-    if not isinstance(quality, dict):
-        return []
-    labels = quality.get("labels")
-    if not isinstance(labels, list):
-        return []
-    return [label for label in labels if isinstance(label, str)]
-
-
-def _label_summary(labels: list[str]) -> str:
-    if not labels:
-        return "(missing_or_empty_quality_labels)"
-    return "|".join(labels)
 
 
 def _print_prefilter_progress(
@@ -1757,6 +1620,7 @@ def _filter_runnable_states(
             state
             for state in states
             if current_phase not in state.phases_completed
+            or (current_phase == 6 and phase6_umi_processing.needs_run(state))
         ]
     runnable = []
     for state in states:
@@ -1829,6 +1693,8 @@ def _final_status(state: EpisodeState) -> str:
     if state.metrics.get("p6_umi_status") == "pending":
         return "umi_pending"
     statuses = set(state.phase_status.values())
+    if not statuses:
+        return "pending"
     if "fail" in statuses:
         return "fail"
     if "needs_review" in statuses:

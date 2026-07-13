@@ -20,6 +20,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.pipeline.qa_config import load_quality_config  # noqa: E402
 from scripts.pipeline.qa_dcs_notifier import collector_id_from_episode_path  # noqa: E402
+from scripts.pipeline.issue_messages_zh import (  # noqa: E402
+    details_summary_zh,
+    issue_location_zh,
+    issue_summary_zh,
+    issue_title_zh,
+)
 
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "work_session_report.json"
@@ -345,8 +351,10 @@ def query_findings_for_episodes(conn: sqlite3.Connection, episode_paths: list[st
     for chunk in chunks(episode_paths, 500):
         placeholders = ",".join("?" for _ in chunk)
         rows.extend(
-            dict(row)
-            for row in conn.execute(
+            enrich_finding_zh(row)
+            for row in (
+                dict(row)
+                for row in conn.execute(
                 f"""
                 SELECT f.episode_path, f.phase, f.check_name, f.severity, f.status,
                        f.message, f.details, e.task, e.date, e.operator, e.robot,
@@ -358,8 +366,62 @@ def query_findings_for_episodes(conn: sqlite3.Connection, episode_paths: list[st
                 """,
                 ("pass", *chunk),
             )
+            )
+            if finding_matches_current_report_rules(row)
         )
     return rows
+
+
+def enrich_finding_zh(row: dict[str, Any]) -> dict[str, Any]:
+    details = parse_json_object(row.get("details"))
+    enriched = dict(row)
+    enriched["issue_title_zh"] = issue_title_zh(str(row.get("check_name") or ""))
+    enriched["message_zh"] = issue_summary_zh({**row, "details": details})
+    enriched["details_summary_zh"] = details_summary_zh(details)
+    enriched["location_zh"] = issue_location_zh(details)
+    return enriched
+
+
+def finding_matches_current_report_rules(row: dict[str, Any]) -> bool:
+    if str(row.get("check_name") or "") != "abnormal_fps_loss":
+        return True
+    details = parse_json_object(row.get("details"))
+    modality = str(details.get("modality") or "")
+    deviation = float_or_none(details.get("deviation_ratio"))
+    if not modality or deviation is None:
+        return True
+    threshold = current_fps_loss_threshold(modality)
+    return deviation > threshold
+
+
+def current_fps_loss_threshold(modality: str) -> float:
+    quality_config = load_quality_config()
+    abnormal_fps = ((quality_config.get("phase3_timestamp") or {}).get("abnormal_fps") or {})
+    fallback = float_or_none(abnormal_fps.get("loss_fail_ratio"))
+    fallback = 0.10 if fallback is None else fallback
+    key = "tactile_video_loss_fail_ratio" if "tactile" in modality.lower() else "normal_video_loss_fail_ratio"
+    threshold = float_or_none(abnormal_fps.get(key))
+    return fallback if threshold is None else threshold
+
+
+def parse_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number
 
 
 def chunks(values: list[str], size: int) -> list[list[str]]:
@@ -384,6 +446,7 @@ def rule_explanation_rows(check_names: list[str], rule_config: dict[str, Any]) -
         rows.append(
             {
                 "check_name": check_name,
+                "issue_title_zh": issue_title_zh(check_name),
                 "rule_title_zh": str(raw_rule.get("title_zh") or check_name),
                 "phase": str(raw_rule.get("phase") or ""),
                 "description_zh": str(raw_rule.get("description_zh") or ""),
@@ -521,6 +584,7 @@ def affected_episode_rows(
         if not episode_findings:
             continue
         check_names = Counter(finding.get("check_name") or "unknown" for finding in episode_findings)
+        issue_titles = Counter(finding.get("issue_title_zh") or finding.get("check_name") or "unknown" for finding in episode_findings)
         severities = Counter(finding.get("severity") or "unknown" for finding in episode_findings)
         blocks_training = any(
             issue_action(finding.get("check_name") or "", config).get("blocks_training", True)
@@ -539,6 +603,7 @@ def affected_episode_rows(
                 "final_status_label": label_value("status_labels", episode.get("final_status") or "pending", config),
                 "issue_count": len(episode_findings),
                 "top_issues": counter_text(check_names, limit=6),
+                "top_issues_zh": counter_text(issue_titles, limit=6),
                 "severity_summary": counter_text(severities, limit=4),
                 "blocks_training": blocks_training,
                 "last_updated": episode.get("last_updated") or "",
@@ -560,6 +625,7 @@ def operator_issue_rows(
     finding_count_by_operator: Counter[str] = Counter()
     severity_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
     check_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
+    check_title_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
     task_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
     robot_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
     blocking_paths_by_operator: dict[str, set[str]] = defaultdict(set)
@@ -580,6 +646,7 @@ def operator_issue_rows(
             finding_count_by_operator[operator] += 1
             severity_by_operator[operator].update([severity])
             check_by_operator[operator].update([check_name])
+            check_title_by_operator[operator].update([str(finding.get("issue_title_zh") or check_name)])
             if issue_action(check_name, config).get("blocks_training", True):
                 blocking_paths_by_operator[operator].add(episode_path)
 
@@ -599,6 +666,7 @@ def operator_issue_rows(
                 "finding_share_percent": percent_value(finding_count_by_operator[operator], total_findings),
                 "training_blocking_episode_count": len(blocking_paths_by_operator.get(operator, set())),
                 "top_issues": counter_text(check_by_operator[operator], limit=8),
+                "top_issues_zh": counter_text(check_title_by_operator[operator], limit=8),
                 "severity_summary": counter_text(severity_by_operator[operator], limit=4),
                 "top_tasks": counter_text(task_by_operator[operator], limit=5),
                 "top_robots": counter_text(robot_by_operator[operator], limit=5),
@@ -632,11 +700,25 @@ def operator_issue_episode_rows(
         for check_name, check_findings in findings_by_check.items():
             severities = Counter(str(finding.get("severity") or "unknown") for finding in check_findings)
             messages = sorted({str(finding.get("message") or "") for finding in check_findings if finding.get("message")})
+            messages_zh = sorted(
+                {str(finding.get("message_zh") or "") for finding in check_findings if finding.get("message_zh")}
+            )
+            detail_summaries_zh = sorted(
+                {
+                    str(finding.get("details_summary_zh") or "")
+                    for finding in check_findings
+                    if finding.get("details_summary_zh")
+                }
+            )
+            locations_zh = sorted(
+                {str(finding.get("location_zh") or "") for finding in check_findings if finding.get("location_zh")}
+            )
             action = issue_action(check_name, config)
             rows.append(
                 {
                     "operator": str(episode.get("operator") or "未填写"),
                     "check_name": check_name,
+                    "issue_title_zh": issue_title_zh(check_name),
                     "issue_label": action.get("label") or check_name,
                     "episode_path": episode_path,
                     "episode_name": Path(episode_path).name,
@@ -648,6 +730,9 @@ def operator_issue_episode_rows(
                     "finding_count": len(check_findings),
                     "severity_summary": counter_text(severities, limit=4),
                     "blocks_training": bool(action.get("blocks_training", True)),
+                    "messages_zh": " | ".join(messages_zh[:5]),
+                    "details_summary_zh": " | ".join(detail_summaries_zh[:5]),
+                    "locations_zh": "，".join(locations_zh[:8]),
                     "messages": " | ".join(messages[:5]),
                     "last_updated": episode.get("last_updated") or "",
                 }
@@ -691,7 +776,17 @@ def device_failure_summary_rows(
                     }
                     for check_name, count in ordered_checks
                 ],
+                "check_name_counts_zh": [
+                    {
+                        "check_name": check_name,
+                        "issue_title_zh": issue_title_zh(check_name),
+                        "finding_count": count,
+                        "percent": round((count / total) * 100, 1),
+                    }
+                    for check_name, count in ordered_checks
+                ],
                 "dominant_check_name": dominant_check_name,
+                "dominant_issue_title_zh": issue_title_zh(dominant_check_name),
                 "dominant_check_count": dominant_count,
                 "dominant_percent": dominant_percent,
                 "hardware_issue_signal": dominant_percent > 70.0,
@@ -885,14 +980,14 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
                 f"- {row['operator']}：问题 episode {row['issue_episode_count']}/{row['episode_count']} "
                 f"({row['issue_rate_percent']})；占全部问题 episode {row['issue_episode_share_percent']}；"
                 f"finding {row['finding_count']} 条 ({row['finding_share_percent']})；"
-                f"主要问题：{row['top_issues'] or '未填写'}"
+                f"主要问题：{row.get('top_issues_zh') or row['top_issues'] or '未填写'}"
             )
     else:
         lines.append("- 本时段暂无采集人员问题占比。")
     lines.extend(
         [
             "",
-            "可在附件 `采集人员问题episode索引.csv` 中按采集人员、问题类型或 episode 路径筛选具体问题位置。",
+            "可在附件 `采集人员问题episode索引.csv` 中按采集人员、问题类型、中文问题说明、问题位置或 episode 路径筛选具体问题。",
             "",
             "## 四、检测规则与判定标准",
             "",
@@ -982,8 +1077,8 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
             "- `核心问题汇总.csv`",
             "- `检测规则说明.csv`",
             "- `采集人员问题占比.csv`",
-            "- `采集人员问题episode索引.csv`",
-            "- `问题episode清单.csv`",
+            "- `采集人员问题episode索引.csv`（含中文问题说明、位置和证据摘要）",
+            "- `问题episode清单.csv`（含中文主要问题）",
             "- `处理建议.csv`",
             "- `report.json`",
             "",

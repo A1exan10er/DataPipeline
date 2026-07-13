@@ -102,22 +102,19 @@ together when Phase 2 is not selected. If one complete group is larger than
 warning. This is intentional: correct group statistics are preferred over
 splitting the group.
 
-Before detailed phase checks, the runner applies the default quality-label
-filter. Only episodes whose `metadata.json` contains `quality.labels` with
-`完全正常` are processed. Episodes with other collector labels are skipped and
-summarized on the console. This filter applies to every phase because it runs
-before state loading and phase dispatch. Use:
-
-```text
---quality-label <label>              process a different label
---disable-quality-label-filter       process all labels for a full audit
-```
+Label content is checked during Phase 1, not during episode selection.
+Episodes with `metadata.quality.labels` containing `完全正常` are normal.
+Episodes labeled `测试任务` are treated as intentional test data. Missing labels
+and labels outside those allowed values are reported by Phase 1, but they do
+not prevent Phase 2/3/4/5/etc. from checking the same episode. The legacy
+`--quality-label` and `--disable-quality-label-filter` options are accepted for
+backward compatibility and do not filter episodes.
 
 With `--force-rerun`, the selected phases are recomputed for the selected
 episodes. Existing episode rows are updated, and findings for the same
 `episode_path + phase` are replaced. At the start of each run, the database is
 also pruned to the current selected episode set after `--roots`, `--date`,
-`--task`, quality-label filtering, and `--max-episodes`. This prevents stale
+`--task`, and `--max-episodes`. This prevents stale
 rows from earlier filters from appearing in the current dashboard.
 
 To continue an interrupted run, reuse the same `--db-path` and `--output-dir`
@@ -473,7 +470,8 @@ Pass cases:
 - required metadata fields are present and valid;
 - metadata modalities have matching folders;
 - required files exist and are non-empty;
-- quality labels exist.
+- quality labels exist and contain `完全正常` or an allowed non-error label such
+  as `测试任务`.
 
 Main not-pass cases:
 
@@ -487,7 +485,8 @@ Main not-pass cases:
 | `required_modality_file_empty` | Required file exists but is empty | fail |
 | `parent_path_structure` | Path does not look like `<task>/<date>/<operator>/<episode>` | warning |
 | `checksum_manifest_missing` | `.checksum_manifest` missing | warning |
-| `quality_labels_missing` | `quality.labels` missing or empty | warning |
+| `quality_labels_missing` | `quality.labels` missing or empty; labeling did not complete | fail |
+| `quality_label_unexpected` | Labels exist but do not contain `完全正常` or `测试任务`; recorded for internal review and repeated-issue escalation | needs_review |
 | `action_modality_singular_name` | Modality/folder uses `action.*` instead of `actions.*`; fix item is reported | warning |
 | `unknown_modality_detected` | Unknown modality names are reported for review | pass/info by default |
 | `task_robot_mismatch` | Metadata/name/path robot source conflicts with robot token in task folder | fail in current Phase 1 |

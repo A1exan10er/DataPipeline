@@ -1,3 +1,4 @@
+import hashlib
 import json
 from typing import Awaitable, Callable, Optional
 
@@ -7,6 +8,7 @@ from event_center.events.base import BaseEvent
 
 
 class EventBus:
+    RETRY_COUNT_HEADER = "x-dcs-retry-count"
     RELIABLE_EPISODE_QUEUE = "collector.episode_finalize.workflow"
     RELIABLE_EPISODE_ROUTING_KEY = "collector.episode_finalize"
     PLATFORM_EPISODE_VERIFIED_ROUTING_KEY = "collector_platform.episode_verified"
@@ -83,10 +85,10 @@ class EventBus:
             name=queue_name,
             durable=True,
             auto_delete=False,
-            arguments={
-                "x-dead-letter-exchange": self.retry_exchange.name,
-            },
         )
+
+        retry_routing_key = self._retry_routing_key(queue_name)
+        retry_return_routing_key = self._retry_return_routing_key(queue_name)
 
         retry_queue = await self.channel.declare_queue(
             name=f"{queue_name}.retry",
@@ -94,7 +96,8 @@ class EventBus:
             auto_delete=False,
             arguments={
                 "x-message-ttl": retry_delay_ms,
-                "x-dead-letter-exchange": self.exchange.name,
+                "x-dead-letter-exchange": self.retry_exchange.name,
+                "x-dead-letter-routing-key": retry_return_routing_key,
             },
         )
 
@@ -106,10 +109,30 @@ class EventBus:
 
         for key in routing_keys:
             await queue.bind(self.exchange, routing_key=key)
-            await retry_queue.bind(self.retry_exchange, routing_key=key)
 
-        await dlq.bind(self.retry_exchange, routing_key=f"{queue_name}.dlq")
+        await retry_queue.bind(self.retry_exchange, routing_key=retry_routing_key)
+        await queue.bind(self.retry_exchange, routing_key=retry_return_routing_key)
+        await dlq.bind(
+            self.retry_exchange,
+            routing_key=self._dlq_routing_key(queue_name),
+        )
         return queue
+
+    @staticmethod
+    def _queue_route_id(queue_name: str) -> str:
+        return hashlib.sha256(queue_name.encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def _retry_routing_key(queue_name: str) -> str:
+        return f"dcs.retry.{EventBus._queue_route_id(queue_name)}"
+
+    @staticmethod
+    def _retry_return_routing_key(queue_name: str) -> str:
+        return f"dcs.retry.{EventBus._queue_route_id(queue_name)}.return"
+
+    @staticmethod
+    def _dlq_routing_key(queue_name: str) -> str:
+        return f"dcs.retry.{EventBus._queue_route_id(queue_name)}.dlq"
 
     @staticmethod
     def _death_count(headers: dict | None, queue_name: str) -> int:
@@ -124,6 +147,42 @@ class EventBus:
                 except (TypeError, ValueError):
                     pass
         return count
+
+    def _retry_count(self, headers: dict | None, queue_name: str) -> int:
+        headers = headers or {}
+        dead_letter_count = self._death_count(headers, queue_name)
+        if self.RETRY_COUNT_HEADER not in headers:
+            return dead_letter_count
+
+        try:
+            return max(int(headers[self.RETRY_COUNT_HEADER]), dead_letter_count)
+        except (TypeError, ValueError):
+            return dead_letter_count
+
+    async def _publish_to_retry(
+        self,
+        message: aio_pika.IncomingMessage,
+        queue_name: str,
+        retry_count: int,
+        reason: str,
+    ) -> None:
+        if not self.retry_exchange:
+            raise RuntimeError("EventBus not connected")
+
+        headers = dict(message.headers or {})
+        headers[self.RETRY_COUNT_HEADER] = retry_count
+        headers["retry_reason"] = reason
+
+        await self.retry_exchange.publish(
+            aio_pika.Message(
+                body=message.body,
+                headers=headers,
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                content_type=message.content_type,
+                correlation_id=message.correlation_id,
+            ),
+            routing_key=self._retry_routing_key(queue_name),
+        )
 
     async def _dead_letter_to_dlq(
         self,
@@ -145,7 +204,7 @@ class EventBus:
                 content_type=message.content_type,
                 correlation_id=message.correlation_id,
             ),
-            routing_key=f"{queue_name}.dlq",
+            routing_key=self._dlq_routing_key(queue_name),
         )
 
     async def subscribe(
@@ -181,7 +240,7 @@ class EventBus:
         print(f"subscribed queue={queue.name}, keys={routing_keys}")
 
         async def _on_message(message: aio_pika.IncomingMessage):
-            retry_count = self._death_count(message.headers, queue.name)
+            retry_count = self._retry_count(message.headers, queue.name)
             if queue_name and retry_count >= max_retries:
                 await self._dead_letter_to_dlq(
                     message,
@@ -199,7 +258,29 @@ class EventBus:
             except Exception as exc:
                 print(f"message failed queue={queue.name} exc={exc}")
                 if queue_name:
-                    await message.reject(requeue=False)
+                    next_retry_count = retry_count + 1
+                    if next_retry_count >= max_retries:
+                        await self._dead_letter_to_dlq(
+                            message,
+                            queue.name,
+                            f"max retries exceeded ({next_retry_count}/{max_retries})",
+                        )
+                        print(
+                            f"moved to DLQ queue={queue.name} "
+                            f"retries={next_retry_count}"
+                        )
+                    else:
+                        await self._publish_to_retry(
+                            message,
+                            queue.name,
+                            next_retry_count,
+                            str(exc),
+                        )
+                        print(
+                            f"sent to retry queue={queue.name} "
+                            f"retries={next_retry_count}"
+                        )
+                    await message.ack()
                 else:
                     await message.nack(requeue=True)
                 return

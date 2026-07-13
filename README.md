@@ -116,10 +116,10 @@ QA_Pipeline/scripts/run_pipeline.py
 
 每个阶段的详细判定规则见 `QA_PHASE_DECISION_RULES.md`。
 
-默认情况下，流水线会在进入各阶段前读取 `metadata.json`，只处理
-`quality.labels` 中包含 `完全正常` 的 episode。采集员已经标为其他质量标签
-的 episode 会被跳过，以减少无效检查和服务器负载。需要完整审计时可使用
-`--disable-quality-label-filter`，或用 `--quality-label` 指定其他标签。
+质量标签策略由第 1 阶段负责报告，不再作为进入后续阶段的过滤条件：
+`quality.labels` 中包含 `完全正常` 的 episode 视为正常，`测试任务` 视为有意
+采集的测试数据。缺失标签或非允许标签的 episode 会写出 finding，但同一个
+episode 仍会继续进入第 2/3/4/5 等其他已选择阶段。
 
 扫描阶段会跳过隐藏目录，例如 `.fr-*`。这些目录不会作为 episode 处理，但会
 作为 `hidden_directory_skipped` 写入实时和最终报告，便于排查 NAS 或同步工具
@@ -294,14 +294,14 @@ http://<server-ip>:4131
 只读 HTML；`qa_control_dashboard.py` 是服务器级控制台，负责：
 
 - 从页面启动 date-range 或 task-folder run；
-- 设置 `date_from`、`date_to`、`phases`、`workers`、`batch_size`、质量标签过滤等参数；
+- 设置 `date_from`、`date_to`、`phases`、`workers`、`batch_size` 等参数；
 - 查看当前 run 的阶段进度、日志、episode/finding 数和中文报告；
 - 管理 event listener 的启动、停止、重启和日期过滤；
 - 汇总最近 event listener job 的问题、设备故障和采集人员/设备组合；
 - 展示“连续失败组合”告警，并允许 reviewer 标记已解决。
 
-控制台启动 run 时，默认仍遵守 `quality.labels` 过滤，只处理 `完全正常` 数据；
-需要完整审计时可勾选或传入禁用质量标签过滤。
+控制台启动 run 时不按 `quality.labels` 过滤 episode。正常/测试标签按规则处理，
+缺失或非允许标签由第 1 阶段报告，其他已选择阶段仍会继续检查同一个 episode。
 
 ### 中文工作时段报告
 
@@ -349,6 +349,18 @@ QA_Pipeline/configs/report_rule_explanations_zh.json
 Event listener 用于持续监听新采集 episode 并提交 QA job。服务器控制台会显示
 pending/running/done job 数、最近问题 job、问题类型汇总，以及工作时段中文报告。
 
+Verified episode 稳定后，listener 默认运行 `1,2,3,6,7`。其中 Phase 6 使用
+`video_only + sidecar`，在左右 wrist-view 目录生成 `video_rotated_180.mp4`。
+Listener 会关闭 exact-event job 的 quality-label 预过滤，确保每个 UMI event 都能进入
+Phase 6；非 UMI episode 仍会标记为 not applicable。Job 标记为 `done` 前会检查 Phase 6
+状态、metadata receipt 和两个 sidecar 文件。可通过 `PHASES`、`PHASE6_PROFILE`、
+`PHASE6_VIDEO_OUTPUT_MODE` 和 `PHASE6_SIDECAR_FILENAME` 覆盖默认值，已经运行的
+listener 需要 restart 后才会使用新配置。
+
+控制台还可以分别设置 `Event/NAS path prefixes` 和 `Server verified mount`：前者是
+verified event payload 中携带的 NAS 路径前缀，后者是处理服务器实际挂载 verified 数据的
+路径。Listener 只替换匹配的前缀，episode 后续相对路径保持不变，因此不依赖本地测试路径。
+
 控制台左侧 Issues 面板会检测明显连续失败：
 
 - 以 `task + robot + operator + date` 为组合；
@@ -393,6 +405,35 @@ Excel 工作簿包含 summary、episodes、exact findings、issue counts 和 tas
 UMI 检测会使用 metadata 中的 robot 值、episode 名称中的 robot token，以及路径上下文。非 UMI episode 会被跳过，并产生 pass/info finding。
 
 第 6 阶段不运行 IK。它执行 UMI raw-data assessment、trajectory preprocessing 和 world-frame export。UMI 处理可能较慢，因为它可能需要打开视频、复制/转换 episode 文件夹，并使用 FFmpeg。
+
+第 6 阶段支持两个明确的 profile：`full` 保留完整处理流程；`video_only`
+只处理配置指定的左右腕部视频。`sidecar` 输出模式保留原始 `video.mp4`，并在同一目录
+生成 `video_rotated_180.mp4`：
+
+```json
+"phase6_umi_processing": {
+  "profile": "video_only",
+  "video": {
+    "output_mode": "sidecar",
+    "sidecar_filename": "video_rotated_180.mp4",
+    "orientation_correction": {
+      "observation.image.left_wrist_view": 180,
+      "observation.image.right_wrist_view": 180
+    }
+  }
+}
+```
+
+sidecar 模式会原地更新 episode 的 `metadata.json`，但不会修改原始视频、timestamps、
+CSV 或触觉视频。已完成步骤记录在 `metadata.json.data_pipeline.completed_procedures`。
+后续切换到 `full` 时，流水线会直接复用 sidecar，不会再次编码旋转，只执行尚未完成的步骤。
+
+本地 video-only 测试配置和命令：
+
+```bash
+QA_PIPELINE_CONFIG=QA_Pipeline/configs/quality_rules_umi_video_only.json \
+python3 QA_Pipeline/scripts/run_pipeline.py --roots /path/to/umi/data --phases 6
+```
 
 第 6 阶段默认输出目录：
 

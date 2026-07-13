@@ -130,3 +130,7 @@ emit_event("task.created", {"task_id": 1})
 ## 架构
 
 TOPIC 交换机，不同队列名各自收到完整消息副本，互不抢占。发布和监听均通过 `event_center.events` exchange 进行。
+
+默认 `listen_event()` 使用 RabbitMQ 匿名队列，`durable=False`、`auto_delete=True`，进程退出后队列自动删除，不会留下随机持久队列。
+
+显式传入 `queue_name` 或使用 `subscribe_events()` 时会创建具名持久队列。具名队列的失败重试由 SDK 主动投递到私有 retry routing key：handler 失败后进入本队列自己的 `.retry` 队列，TTL 到期后只回到本队列，不会重新发布到主事件交换机广播给其他订阅方。主队列不挂 DLX，因此 broker 侧消息 TTL 策略过期时会按 RabbitMQ 默认行为丢弃消息，而不是进入 SDK 重试管道。
