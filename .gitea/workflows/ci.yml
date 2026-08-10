@@ -19,10 +19,18 @@ jobs:
     runs-on: datapipeline-ci
     timeout-minutes: 45
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: 从内网 Gitea 检出精确提交
+        env:
+          CI_SERVER_URL: ${{ gitea.server_url }}
+          CI_REPOSITORY: ${{ gitea.repository }}
+          CI_COMMIT_SHA: ${{ gitea.sha }}
+          CI_JOB_TOKEN: ${{ gitea.token }}
+        run: |
+          git init .
+          git remote add origin "$CI_SERVER_URL/$CI_REPOSITORY.git"
+          auth="$(printf 'x-access-token:%s' "$CI_JOB_TOKEN" | base64 -w0)"
+          git -c "http.extraHeader=Authorization: Basic $auth" fetch --no-tags --depth=1 origin "$CI_COMMIT_SHA"
+          git checkout --detach FETCH_HEAD
 
       - name: 创建隔离测试环境
         run: |

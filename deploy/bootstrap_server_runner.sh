@@ -44,7 +44,7 @@ if [[ "$(stat -c '%a' "$TOKEN_FILE")" != "600" ]]; then
   echo "注册令牌文件权限必须为 600。"
   exit 1
 fi
-for command_name in bwrap curl git install node python3 systemctl tar; do
+for command_name in bwrap curl git install python3 systemctl tar; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "服务器缺少必要命令：$command_name。未进行安装，请联系维护者。"
     exit 1

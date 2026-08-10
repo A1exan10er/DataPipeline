@@ -18,6 +18,8 @@ args=(
   --ro-bind /lib /lib
   --ro-bind /lib64 /lib64
   --ro-bind /etc /etc
+  --dir /run
+  --dir /run/systemd
   --proc /proc
   --dev /dev
   --tmpfs /tmp
@@ -38,9 +40,12 @@ args=(
   --setenv PATH /usr/local/bin:/usr/bin:/bin
 )
 
+if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+  args+=(--ro-bind /run/systemd/resolve /run/systemd/resolve)
+fi
+
 if [[ -S "$RUNTIME_DIR/bus" ]]; then
   args+=(
-    --dir /run
     --dir /run/user
     --dir "$RUNTIME_DIR"
     --ro-bind "$RUNTIME_DIR/bus" "$RUNTIME_DIR/bus"
