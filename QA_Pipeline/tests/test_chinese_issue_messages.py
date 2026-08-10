@@ -13,8 +13,19 @@ QA_PIPELINE_ROOT = PROJECT_ROOT / "QA_Pipeline"
 if str(QA_PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(QA_PIPELINE_ROOT))
 
-from QA_Pipeline.scripts.generate_work_session_report import build_cumulative_report, load_config, load_rule_explanations
-from QA_Pipeline.scripts.pipeline.issue_messages_zh import details_summary_zh, issue_location_zh
+from QA_Pipeline.scripts.generate_work_session_report import (
+    build_cumulative_report,
+    load_config,
+    load_rule_explanations,
+    render_markdown,
+    render_markdown_html,
+)
+from QA_Pipeline.scripts.pipeline.issue_messages_zh import (
+    details_summary_zh,
+    finding_presentation_zh,
+    issue_location_zh,
+    issue_title_zh,
+)
 from QA_Pipeline.scripts.pipeline.qa_dcs_notifier import DcsIssueNotifier
 
 
@@ -124,11 +135,13 @@ def run_report_chinese_field_tests() -> None:
                 """,
                 (episode_path, json.dumps(sample_event()["details"])),
             )
+        report_config = load_config(QA_PIPELINE_ROOT / "configs" / "work_session_report.json")
         report = build_cumulative_report(
             db_path,
-            load_config(QA_PIPELINE_ROOT / "configs" / "work_session_report.json"),
+            report_config,
             rule_config=load_rule_explanations(QA_PIPELINE_ROOT / "configs" / "report_rule_explanations_zh.json"),
         )
+        markdown = render_markdown(report, report_config)
     operator_index = report["operator_issue_episodes"][0]
     affected_episode = report["affected_episodes"][0]
     assert_equal(operator_index["issue_title_zh"], "视频有效帧率低于预期", "operator index has Chinese issue title")
@@ -136,6 +149,17 @@ def run_report_chinese_field_tests() -> None:
     assert_contains(operator_index["details_summary_zh"], "帧率偏离比例：40.0%", "operator index has Chinese evidence")
     assert_contains(operator_index["details_summary_zh"], "位置：右腕右侧触觉视频", "operator index has readable location")
     assert_contains(affected_episode["top_issues_zh"], "视频有效帧率低于预期", "affected episode has Chinese top issue")
+    assert_contains(
+        markdown,
+        "/event-listener/work-session-report-issue.html?",
+        "main report links operator issues to complete drill-down",
+    )
+    assert_contains(markdown, "条问题记录 / 1 个问题 episode", "operator link explains both count units")
+    assert_contains(
+        markdown,
+        "点击具体问题可查看问题含义、判定方法、检测阈值",
+        "main report tells readers how to inspect complete evidence",
+    )
 
 
 def run_detail_summary_tests() -> None:
@@ -152,12 +176,48 @@ def run_detail_summary_tests() -> None:
         "左腕右侧触觉视频",
         "nested segment location is detected",
     )
+    presentation = finding_presentation_zh(
+        {
+            "check_name": "operator_standstill_middle",
+            "details": {
+                "source_modality": "observation.state.joint_position",
+                "start_ms": 12000,
+                "end_ms": 28000,
+                "duration_ms": 16000,
+            },
+        }
+    )
+    assert_contains(presentation["time_range_zh"], "12.00–28.00 秒", "time range is human readable")
+    assert_contains(presentation["trigger_reason_zh"], "报告条件", "presentation explains why finding was reported")
+
+
+def run_fallback_and_markdown_tests() -> None:
+    assert_equal(
+        issue_title_zh("slow_motion_cause_uncertain"),
+        "持续低速原因不确定",
+        "configured action title beats generic fallback",
+    )
+    unknown_title = issue_title_zh("future_detector_check")
+    assert_contains(unknown_title, "future_detector_check", "unknown issue keeps its technical identity")
+    if unknown_title == "数据质检异常":
+        raise AssertionError("unknown issue must not collapse to the old generic title")
+
+    rendered = render_markdown_html(
+        "# 中文标题\n\n## 小节\n\n- **问题**：`episode_0001`\n\n"
+        "[内部链接](/safe)\n\n[危险链接](javascript:alert(1))\n\n<script>alert(1)</script>\n"
+    )
+    assert_contains(rendered, "<h1>中文标题</h1>", "Markdown heading renders as HTML")
+    assert_contains(rendered, "<strong>问题</strong>", "Markdown bold renders as HTML")
+    assert_contains(rendered, 'href=\"/safe\"', "safe report link is retained")
+    assert_equal("javascript:" in rendered, False, "unsafe link protocol is removed")
+    assert_contains(rendered, "&lt;script&gt;", "raw HTML is escaped")
 
 
 def main() -> None:
     run_dcs_payload_tests()
     run_report_chinese_field_tests()
     run_detail_summary_tests()
+    run_fallback_and_markdown_tests()
 
 
 if __name__ == "__main__":

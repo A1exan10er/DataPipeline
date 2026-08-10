@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local sample/raw episodes and generated NAS reports can be large or private.
+docs/normal/
+docs/raw/
+docs/slow/
+nas_slow_analysis*/

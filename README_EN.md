@@ -415,6 +415,23 @@ standstill_trim_plan.jsonl
 standstill_trim_summary.md
 ```
 
+## Standalone Unusual Duration Check
+
+Unusually long and short `完全正常` episodes can be indexed without the event
+listener, QA phases, or a dashboard request:
+
+```bash
+datapipeline-env/bin/python Werkzeuge/check_unusual_episode_durations.py scan \
+  /mnt/nas/database/verified --full
+datapipeline-env/bin/python Werkzeuge/check_unusual_episode_durations.py report
+```
+
+Results stay under `outputs/duration_anomalies/`; the verified source tree is
+read-only. The generated HTML report groups candidates by task/date/operator
+and lists long episodes first. See
+`Werkzeuge/docs/DURATION_ANOMALY_CHECK.md` for incremental scans, CSV export,
+status, and nightly scheduling.
+
 ## Server Deployment Notes
 
 When deploying to the server, exclude test samples and generated outputs. The

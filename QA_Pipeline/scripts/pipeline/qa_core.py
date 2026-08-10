@@ -351,15 +351,29 @@ def infer_context(roots: list[Path], episode_path: Path, metadata: dict) -> dict
     """Infer task, date, operator, robot, and controller from path and metadata."""
     relative_parts, root = _relative_episode_parts(roots, episode_path)
     date_index = _find_date_index(relative_parts)
-    date = relative_parts[date_index] if date_index is not None else ""
-    operator = _operator_from_parts(relative_parts, date_index)
+    absolute_parts = Path(episode_path).resolve(strict=False).parts
+    absolute_date_index = _find_date_index(absolute_parts)
+    date = first_present(
+        relative_parts[date_index] if date_index is not None else "",
+        absolute_parts[absolute_date_index] if absolute_date_index is not None else "",
+    )
+    operator = first_present(
+        metadata.get("operator"),
+        metadata.get("username"),
+        _operator_from_parts(relative_parts, date_index),
+        _operator_from_parts(absolute_parts, absolute_date_index),
+    )
     task_folder = _task_from_parts(relative_parts, root, date_index)
     robot = first_present(
         metadata.get("robot"),
         _robot_from_episode_name(Path(episode_path).name),
         _robot_from_layout_parts(relative_parts, date_index),
     )
-    controller = first_present(metadata.get("controller"), metadata.get("controller_type"))
+    controller = first_present(
+        metadata.get("controller"),
+        metadata.get("controller_type"),
+        metadata.get("teleop_type"),
+    )
     if not controller:
         controller = _controller_from_episode_name(Path(episode_path).name)
     return {
@@ -369,6 +383,13 @@ def infer_context(roots: list[Path], episode_path: Path, metadata: dict) -> dict
         "robot": robot,
         "controller": controller,
     }
+
+
+def operator_from_episode_path(episode_path: str | Path) -> str:
+    """Recover an operator from a standard date/operator episode path."""
+    parts = Path(episode_path).parts
+    date_index = _find_date_index(parts)
+    return _operator_from_parts(parts, date_index)
 
 
 def severity_rank(severity: str) -> int:

@@ -1,0 +1,30 @@
+log:
+  level: info
+
+runner:
+  file: /runner/.runner
+  capacity: 1
+  timeout: 90m
+  shutdown_timeout: 5m
+  fetch_timeout: 5s
+  fetch_interval: 2s
+  fetch_interval_max: 10s
+  labels:
+    - "datapipeline-prod:host"
+
+cache:
+  enabled: false
+
+container:
+  require_docker: false
+  valid_volumes: []
+
+host:
+  workdir_parent: /runner/work
+
+health_check:
+  enabled: true
+  min_free_disk_space_mb: 20480
+
+metrics:
+  enabled: false
