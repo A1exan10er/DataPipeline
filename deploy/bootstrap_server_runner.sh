@@ -8,10 +8,12 @@ DEPLOY_ROOT="/home/xinzhi/DataPipeline-deploy"
 PERSISTENT_ROOT="/home/xinzhi/DataPipeline"
 SERVICE_DIR="/home/xinzhi/.config/systemd/user"
 TOKEN_FILE=""
+RUNNER_BINARY_FILE=""
+CHECKSUM_FILE=""
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-  echo "用法：$0 --token-file /安全路径/runner-token [--instance URL]"
+  echo "用法：$0 --token-file /安全路径/runner-token [--instance URL] [--runner-binary FILE --checksum-file FILE]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -22,6 +24,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --instance)
       INSTANCE_URL="${2:-}"
+      shift 2
+      ;;
+    --runner-binary)
+      RUNNER_BINARY_FILE="${2:-}"
+      shift 2
+      ;;
+    --checksum-file)
+      CHECKSUM_FILE="${2:-}"
       shift 2
       ;;
     *)
@@ -43,6 +53,12 @@ fi
 if [[ "$(stat -c '%a' "$TOKEN_FILE")" != "600" ]]; then
   echo "注册令牌文件权限必须为 600。"
   exit 1
+fi
+if [[ -n "$RUNNER_BINARY_FILE" || -n "$CHECKSUM_FILE" ]]; then
+  if [[ ! -f "$RUNNER_BINARY_FILE" || ! -f "$CHECKSUM_FILE" ]]; then
+    echo "离线安装必须同时提供 runner二进制和 checksums.txt。"
+    exit 2
+  fi
 fi
 for command_name in bwrap curl git install python3 systemctl tar; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -67,8 +83,13 @@ checksum_url="https://gitea.com/gitea/runner/releases/download/v${RUNNER_VERSION
 temporary_binary="$RUNNER_ROOT/.gitea-runner.tmp.$$"
 temporary_checksums="$RUNNER_ROOT/.checksums.tmp.$$"
 trap 'rm -f -- "$temporary_binary" "$temporary_checksums"' EXIT
-curl --fail --location --show-error --output "$temporary_binary" "$runner_url"
-curl --fail --location --show-error --output "$temporary_checksums" "$checksum_url"
+if [[ -n "$RUNNER_BINARY_FILE" ]]; then
+  install -m 0600 "$RUNNER_BINARY_FILE" "$temporary_binary"
+  install -m 0600 "$CHECKSUM_FILE" "$temporary_checksums"
+else
+  curl --fail --location --show-error --output "$temporary_binary" "$runner_url"
+  curl --fail --location --show-error --output "$temporary_checksums" "$checksum_url"
+fi
 expected="$(awk -v name="gitea-runner-${RUNNER_VERSION}-linux-amd64" '$2 == name {print $1}' "$temporary_checksums")"
 actual="$(sha256sum "$temporary_binary" | awk '{print $1}')"
 if [[ -z "$expected" || "$actual" != "$expected" ]]; then
