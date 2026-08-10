@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly DataPipeline duration-anomaly reconciliation
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=duration-anomaly.service
+
+[Install]
+WantedBy=timers.target

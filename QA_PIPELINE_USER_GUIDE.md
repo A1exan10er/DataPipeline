@@ -296,6 +296,82 @@ output directory. `qa_control_dashboard.py` is a server control surface that can
 - generate or refresh Chinese work-session reports;
 - show device failure summaries and consecutive-failure warnings.
 
+### Local mixed-robot dashboard test
+
+On Ubuntu, `tmux` is optional for the event listener. When it is unavailable,
+the control script uses a validated PID-managed background process, and the
+dashboard supervisor restores an enabled listener after a crash or reboot. The local sample path is passed
+through `--verified-root`; it is not hard-coded in the dashboard. Treat the
+sample root as read-only and write databases, logs, and reports only under
+`outputs/`.
+
+```bash
+cd /home/tianyu/Projects/DataPipeline
+
+export QA_LOCAL_SAMPLE_ROOT="/home/tianyu/Projects/DataPipeline/Test_Folder_For_DataPipeline/Random_Test_Samples"
+
+QA_PYTHON="$PWD/datapipeline-env/bin/python"
+
+"$QA_PYTHON" QA_Pipeline/scripts/qa_control_dashboard.py \
+  --host 127.0.0.1 \
+  --port 4131 \
+  --verified-root "$QA_LOCAL_SAMPLE_ROOT" \
+  --output-root "$PWD/outputs/dashboard_local_samples" \
+  --registry-db "$PWD/outputs/dashboard_manager/local_sample_runs.db" \
+  --qa-python "$QA_PYTHON"
+```
+
+Open `http://127.0.0.1:4131`. In **Start Run**:
+
+1. Select **Task folder**.
+2. Click **Use configured data root**.
+3. Click **Severe report preset**.
+4. Confirm phases `1,2,7`, full audit, and continue after fail.
+5. Click the primary **Start** button.
+6. Open the new run from the run table and check its logs and
+   **Severe operator QA report** section.
+
+The severe report lists selected QA evidence linked to operator episodes; it
+does not make an employment decision. An empty ranking from untouched samples
+is valid and proves compatibility, not positive detection. Use disposable
+controlled data outside the sample root to prove positive detection. Server
+deployment must exclude both `Test_Folder_For_DataPipeline/` and `outputs/`.
+
+In **Run Detail**, the severe-report criterion cards show the English and
+Chinese meaning and configured thresholds. The operator ranking distinguishes
+named and unknown-operator evidence. For completed historical runs, use
+**Regenerate report / 重新生成报告** to rebuild only the report from the existing
+read-only QA database; this does not rerun phases or update episode rows.
+
+The **Top Issues** table is broader than the severe ranking: it includes every
+non-pass finding. Click an issue name to trace it by operator, then inspect its
+affected episode paths, source messages, measured `details`, severity, and
+status. **Episodes With Issues** remains available as a collapsed fallback.
+The **Latest Event Episodes** table uses server-side pages (20 rows by default)
+so a large event-listener history does not produce one excessively long page.
+
+Dashboard-started runs default to **Pause and resume** with
+`Resource wait seconds = 0`. If the resource guard detects unsafe load or
+memory, the run waits indefinitely and resumes after recovery. To use bounded
+waiting followed by phase retries instead, enter a positive wait duration and
+set the retry count and delay. **Stop phase and retry** skips the recovery wait
+and immediately enters the same phase-retry loop.
+
+The Start Run form defaults to operator-focused phases `1,2,7` and enables
+**Continue selected phases after an earlier failure**, ensuring that Phase 7
+still assesses episodes already flagged by Phase 1 or Phase 2.
+
+For one operator over an inclusive date window, set **Mode = Date range**,
+enter `Date from`, `Date to`, and an exact **Operator filter**. The filter is
+applied during discovery using the standard date/operator path, before phases
+run, so unrelated operators do not consume QA processing time.
+
+Stopped or failed dashboard-started runs expose **Resume** in the run table.
+Resume keeps the original date, task, and operator scope; reuses the same
+SQLite database, output directory, run ID, and log; removes `--force-rerun`;
+and skips episode phases already recorded as complete. It never creates a new
+run or silently changes the selection scope.
+
 In Run Detail, `中文质检报告` can generate:
 
 - `当前运行累计报告`: a cumulative report over the current run DB, useful while
@@ -517,6 +593,9 @@ Pass cases:
 - image timestamp rows and primary action rows differ by no more than configured
   absolute threshold;
 - duration is not an extreme task-level outlier.
+- non-demo duration does not exceed the task catalog's training limit;
+- duration is not an extreme upper-tail value within the configured task and
+  robot comparison group.
 
 Main not-pass cases:
 
@@ -533,6 +612,17 @@ Main not-pass cases:
 | `duration_absolute_too_short` | Duration less than 20% of task median | fail |
 | `duration_absolute_too_short` | Duration less than 40% of task median | needs_review |
 | `duration_absolute_too_long` | Duration greater than 250% of task median | needs_review |
+| `duration_extreme_long` | Duration is at least 4x the task+robot median and also passes the configured upper-tail IQR test; group size is at least 5 | fail |
+| `duration_training_limit_exceeded` | Non-demo duration exceeds the task maximum | needs_review; fail at maximum + 30 seconds |
+
+Phase 2 loads the task time-range catalog once per run from the URL configured
+under `task_catalog`. It writes the effective catalog, source, timestamp, and
+SHA-256 hash to `task_time_ranges_snapshot.json` in the run output. If the
+service is unavailable or returns an invalid schema, it uses
+`QA_Pipeline/configs/task_time_ranges_fallback.json`; tasks absent from both
+sources default to a non-demo 120-second maximum and fail at 150 seconds.
+Exact `training_duration_limit.task_overrides` take precedence. Tasks marked
+`is_demo=true` are exempt from this absolute pre-training limit by default.
 
 The video/action threshold is configured in:
 
@@ -777,8 +867,9 @@ QA_Pipeline/scripts/pipeline/phase7_standstill.py
 
 Purpose:
 
-Detect episodes where the operator stopped for too long at the beginning,
-middle, or end of the recording.
+Detect episodes where motion stopped for too long or continued at an extremely
+slow speed. Aligned action commands are used to separate operator-associated
+motion from likely equipment response problems.
 
 Run:
 
@@ -809,6 +900,15 @@ Method:
 - allow stillness up to `stillness_buffer_ms`;
 - classify longer still segments as `leading`, `middle`, or `trailing`;
 - also check total excess stillness ratio and minimum useful motion duration.
+- calculate one-second rolling EEF path speed rather than counting individual
+  low-velocity samples;
+- detect moving slow intervals between 0.1 and 3.0 cm/s that last at least 15
+  seconds and cover at least 1.5 cm;
+- use the primary active hand for single-hand motion and require all active
+  hands to be slow for dual-hand motion;
+- suppress configured gripper/joint/raw-rotation task activity that can make
+  translational EEF speed misleading;
+- compare aligned action and observation motion to assign a cause.
 
 Main not-pass cases:
 
@@ -821,11 +921,20 @@ Main not-pass cases:
 | `operator_standstill_motion_too_short` | Useful non-still motion is below minimum | fail |
 | `standstill_motion_source_missing` | No configured motion source found | warning |
 | `standstill_motion_source_invalid` | Motion source exists but timestamps/rows are invalid | needs_review |
+| `operator_sustained_slow_motion` | Observation and aligned commands are both persistently slow | fail |
+| `equipment_motion_response_slow` | Commands move normally but observed response remains slow | fail; equipment QA only |
+| `slow_motion_cause_uncertain` | Slow observation lacks decisive aligned command evidence | needs_review |
+| `equipment_motion_response_stalled` | Commands move normally but observed response is stalled | fail; equipment QA only |
+| `standstill_cause_uncertain` | Standstill lacks decisive aligned command evidence | needs_review |
 
 Phase 7 is report-only. It writes findings to SQLite and reports, but it does
-not trim video or rewrite CSV files. Thresholds live under `phase7_standstill`
-in `QA_Pipeline/configs/quality_rules.json` and are surfaced in Chinese
-work-session reports through `检测规则说明.csv` and the dashboard rule popup.
+not trim video or rewrite CSV files. Standstill thresholds live under
+`phase7_standstill`; slow-motion thresholds live under `phase7_slow_motion` in
+`QA_Pipeline/configs/quality_rules.json`. Operator-associated fail findings can
+enter the configured severe operator evidence report. Equipment-associated
+findings remain visible in normal QA and dashboard reports for repair work but
+are deliberately excluded from operator ranking. Missing or mixed action
+evidence is review-only, so the report does not silently assign blame.
 
 ## Standstill Trim Planner
 

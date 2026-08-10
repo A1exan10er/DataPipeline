@@ -357,6 +357,21 @@ Phase 6；非 UMI episode 仍会标记为 not applicable。Job 标记为 `done` 
 `PHASE6_VIDEO_OUTPUT_MODE` 和 `PHASE6_SIDECAR_FILENAME` 覆盖默认值，已经运行的
 listener 需要 restart 后才会使用新配置。
 
+Listener 不再强制依赖 `tmux`。控制脚本默认使用 `auto`：系统有 `tmux` 时继续沿用
+原有会话托管；没有 `tmux` 时改用带 PID 校验的独立后台进程。控制台会记录服务的
+期望状态和最后一次有效配置；如果服务器重启或 listener 意外退出，只要控制台服务
+已经恢复且期望状态仍为“运行”，它会自动重新启动 listener。也可在服务器终端执行：
+
+```bash
+QA_Pipeline/scripts/event_listener_control.sh start
+QA_Pipeline/scripts/event_listener_control.sh status
+QA_Pipeline/scripts/event_listener_control.sh restart
+QA_Pipeline/scripts/event_listener_control.sh stop
+```
+
+如需明确禁用 `tmux`，在命令前设置 `EVENT_LISTENER_BACKEND=process`。控制台现在显示
+“实时检测服务”整体状态和实际托管方式，不再把 `tmux` 状态误当成 listener 状态。
+
 控制台还可以分别设置 `Event/NAS path prefixes` 和 `Server verified mount`：前者是
 verified event payload 中携带的 NAS 路径前缀，后者是处理服务器实际挂载 verified 数据的
 路径。Listener 只替换匹配的前缀，episode 后续相对路径保持不变，因此不依赖本地测试路径。
@@ -503,6 +518,22 @@ standstill_trim_plan.csv
 standstill_trim_plan.jsonl
 standstill_trim_summary.md
 ```
+
+## 独立 Episode 时长异常检查
+
+无需启动实时 listener、QA phase 或 dashboard 请求，即可索引唯一标签为
+`完全正常` 的异常偏长和偏短 episode：
+
+```bash
+datapipeline-env/bin/python Werkzeuge/check_unusual_episode_durations.py scan \
+  /mnt/nas/database/verified --full
+datapipeline-env/bin/python Werkzeuge/check_unusual_episode_durations.py report
+```
+
+结果只写入 `outputs/duration_anomalies/`，verified 源目录保持只读。生成的 HTML
+报告按任务、日期和操作员汇总，并优先列出异常偏长 episode。增量扫描、CSV
+导出、状态检查和夜间定时配置见
+`Werkzeuge/docs/DURATION_ANOMALY_CHECK.md`。
 
 ## 服务器部署说明
 

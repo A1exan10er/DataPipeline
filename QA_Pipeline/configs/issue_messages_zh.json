@@ -1,7 +1,7 @@
 {
   "default": {
-    "title_zh": "数据质检异常",
-    "summary_zh": "该 episode 触发了质检异常，请查看质检详情确认具体原因。",
+    "title_zh": "未配置的问题类型",
+    "summary_zh": "检测到“{issue_title}”，该 episode 的结果不符合此项质检要求。",
     "operator_action_zh": "请暂停继续采集同类任务，先联系现场负责人或 QA 人员确认是否需要重采或检查设备。"
   },
   "rules": {

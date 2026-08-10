@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timedelta
@@ -22,10 +23,12 @@ from QA_Pipeline.scripts.generate_work_session_report import (
 )
 from QA_Pipeline.scripts import qa_control_dashboard as dashboard
 from QA_Pipeline.scripts.qa_control_dashboard import (
+    api_event_work_session_issue_detail,
     event_work_session_report,
     render_device_failure_detail_html,
     render_device_failure_summary_html,
     render_event_device_failure_report_html,
+    render_event_work_session_issue_html,
     render_event_work_session_report_html,
     work_session_report_payload,
 )
@@ -151,6 +154,43 @@ def main() -> None:
         saved = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
         markdown = (report_dir / "半日质检报告.md").read_text(encoding="utf-8")
         assert_equal("device_failure_summary" in saved, True, "saved report.json includes device summary")
+        assert_equal(saved["operator_issue_breakdown"][0]["finding_count"], 5, "saved report has structured operator issue counts")
+        assert_equal(bool(saved["operator_issue_details"][0]["findings"]), True, "saved report has per-finding evidence snapshot")
+        event_db = root / "event-source.db"
+        event_episode = str(root / "collector-event" / "20260728" / "operator" / "episode_event")
+        with sqlite3.connect(event_db) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE episodes (
+                    episode_path TEXT PRIMARY KEY, task TEXT, date TEXT, operator TEXT,
+                    robot TEXT, controller TEXT, final_status TEXT, training_ready INTEGER,
+                    last_updated TEXT
+                );
+                CREATE TABLE findings (
+                    id INTEGER PRIMARY KEY, episode_path TEXT, phase INTEGER, check_name TEXT,
+                    severity TEXT, status TEXT, message TEXT, details TEXT
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO episodes VALUES (?, 'task', '20260728', 'operator', 'arx5', 'gello', 'fail', 0, ?)",
+                (event_episode, now.isoformat()),
+            )
+            conn.execute(
+                "INSERT INTO findings VALUES (1, ?, 3, 'abnormal_fps_loss', 'major', 'fail', 'fps low', ?)",
+                (event_episode, json.dumps({"modality": "observation.image.left", "deviation_ratio": 0.4})),
+            )
+        with patch.object(dashboard, "event_listener_report_jobs", return_value=[{"db_path": str(event_db)}]):
+            event_report = dashboard.build_event_work_session_report(
+                SessionWindow("custom", "测试事件", now - timedelta(hours=1), now + timedelta(hours=1)),
+                load_config(DEFAULT_CONFIG),
+            )
+        assert_equal(len(event_report["rule_explanations"]), 1, "event report snapshots rule explanations")
+        assert_equal(
+            bool(event_report["operator_issue_episodes"][0].get("threshold_summary")),
+            True,
+            "event report enriches operator evidence with actual thresholds",
+        )
         payload = work_session_report_payload(report_dir)
         assert_equal(payload["device_failure_summary"][0]["collector_id"], "collector-modified", "HTML payload includes device summary")
         assert_equal("## 二、设备故障统计" in markdown, True, "Markdown includes device summary section")
@@ -181,10 +221,41 @@ def main() -> None:
             assert_equal(event_work_session_report("../outside"), {}, "report key rejects path traversal")
             main_page = render_event_work_session_report_html(report_dir.name)
             detail_page = render_event_device_failure_report_html(report_dir.name)
+            issue_data = api_event_work_session_issue_detail(
+                {
+                    "report": [report_dir.name],
+                    "operator": ["operator"],
+                    "check_name": ["frame_drop_ratio"],
+                    "page": ["1"],
+                    "page_size": ["1"],
+                }
+            )
+            issue_page = render_event_work_session_issue_html(
+                {
+                    "report": [report_dir.name],
+                    "operator": ["operator"],
+                    "check_name": ["frame_drop_ratio"],
+                }
+            )
             expected_query = dashboard.event_report_url("", report_dir.name).removeprefix("?")
+            assert_equal(
+                '<article class="work-session-report">' in main_page,
+                True,
+                "main HTML renders Markdown as structured content",
+            )
+            assert_equal("<pre>#" in main_page, False, "main HTML does not show raw Markdown headings")
+            assert_equal("operatorIssueModal" in main_page, True, "main page includes operator issue modal")
+            assert_equal("/work-session-report-issue.html?" in main_page, True, "operator issues are clickable")
+            assert_equal("采集人员问题明细" in main_page, False, "flat eight-sample section is removed")
             assert_equal(expected_query in main_page, True, "main page carries report context to detail URL")
             assert_equal(expected_query in detail_page, True, "detail page carries report context back")
             assert_equal("collector-modified" in detail_page, True, "detail page reads selected report JSON")
+            assert_equal(issue_data["detail_level"], "完整快照", "issue API uses immutable complete snapshot")
+            assert_equal(issue_data["summary"]["affected_episode_count"], 2, "issue API counts distinct episodes")
+            assert_equal(issue_data["pagination"]["page_size"], 1, "issue API applies bounded pagination")
+            assert_equal(len(issue_data["episodes"]), 1, "issue API returns one requested page")
+            assert_equal("这个问题是什么意思" in issue_page, True, "fallback detail page explains issue")
+            assert_equal("受影响的 episode 与检测证据" in issue_page, True, "fallback detail page lists evidence")
 
 
 if __name__ == "__main__":

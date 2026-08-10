@@ -5,6 +5,8 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Callable
 
+from scripts.pipeline.qa_config import config_value
+from scripts.pipeline.task_catalog import TaskCatalog, resolve_task_policy
 from scripts.pipeline.qa_core import (
     EpisodeState,
     Finding,
@@ -19,6 +21,13 @@ from scripts.pipeline.qa_core import (
 
 
 PHASE_NUMBER = 2
+_TASK_CATALOG: TaskCatalog | None = None
+
+
+def set_task_catalog(catalog: TaskCatalog | None) -> None:
+    """Set the immutable catalog prepared once for the current pipeline run."""
+    global _TASK_CATALOG
+    _TASK_CATALOG = catalog
 
 
 def run_phase(
@@ -58,6 +67,18 @@ def run_phase(
         state.metrics["p2_duration_iqr_distance"] = iqr_distance
     for state, finding in _check_duration_absolute(pending):
         findings_by_episode[str(state.episode_path)].append(finding)
+    for state, finding in _check_training_duration_limit(pending, _TASK_CATALOG):
+        findings_by_episode[str(state.episode_path)].append(finding)
+    extreme_findings, skipped_missing_groups = _check_duration_extreme_long(pending)
+    for state, finding in extreme_findings:
+        findings_by_episode[str(state.episode_path)].append(finding)
+    if skipped_missing_groups:
+        print(
+            f" skipped extreme-long check for {skipped_missing_groups} episode(s) "
+            "with missing grouping values;",
+            end="",
+            flush=True,
+        )
     print(" done.")
     for state in pending:
         _finish_state(state, db_path, findings_by_episode[str(state.episode_path)])
@@ -159,6 +180,18 @@ def _run_phase_parallel(
         state.metrics["p2_duration_iqr_distance"] = iqr_distance
     for state, finding in _check_duration_absolute(pending):
         findings_by_episode[str(state.episode_path)].append(finding)
+    for state, finding in _check_training_duration_limit(pending, _TASK_CATALOG):
+        findings_by_episode[str(state.episode_path)].append(finding)
+    extreme_findings, skipped_missing_groups = _check_duration_extreme_long(pending)
+    for state, finding in extreme_findings:
+        findings_by_episode[str(state.episode_path)].append(finding)
+    if skipped_missing_groups:
+        print(
+            f" skipped extreme-long check for {skipped_missing_groups} episode(s) "
+            "with missing grouping values;",
+            end="",
+            flush=True,
+        )
     print(" done.")
 
     for state in pending:
@@ -452,6 +485,185 @@ def _check_duration_absolute(
                 ))
 
     return results
+
+
+def _check_duration_extreme_long(
+    states: list[EpisodeState],
+    settings: dict[str, Any] | None = None,
+) -> tuple[list[tuple[EpisodeState, Finding]], int]:
+    """Find severe upper-tail duration outliers in configurable groups."""
+    configured = (
+        settings
+        if settings is not None
+        else config_value(
+            ["phase2_duration", "extreme_long"],
+            {
+                "enabled": True,
+                "group_by": ["task", "robot"],
+                "min_group_size": 5,
+                "ratio_fail": 4.0,
+                "iqr_distance_fail": 5.0,
+            },
+        )
+    )
+    if not isinstance(configured, dict):
+        raise RuntimeError("phase2_duration.extreme_long must be a JSON object")
+    if not configured.get("enabled", True):
+        return [], 0
+
+    group_by = configured.get("group_by", ["task", "robot"])
+    if not isinstance(group_by, list) or not group_by or not all(
+        isinstance(field, str) and field.strip() for field in group_by
+    ):
+        raise RuntimeError("phase2_duration.extreme_long.group_by must be a non-empty string list")
+    group_by = [field.strip() for field in group_by]
+    allowed_fields = {"task", "robot", "controller", "operator", "date"}
+    unsupported = [field for field in group_by if field not in allowed_fields]
+    if unsupported:
+        raise RuntimeError(
+            "phase2_duration.extreme_long.group_by contains unsupported field(s): "
+            + ", ".join(unsupported)
+        )
+    try:
+        min_group_size = int(configured.get("min_group_size", 5))
+        ratio_fail = float(configured.get("ratio_fail", 4.0))
+        iqr_distance_fail = float(configured.get("iqr_distance_fail", 5.0))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("phase2_duration.extreme_long thresholds must be numeric") from exc
+    if min_group_size < 1 or ratio_fail <= 0 or iqr_distance_fail < 0:
+        raise RuntimeError("phase2_duration.extreme_long thresholds are out of range")
+
+    grouped: dict[tuple[str, ...], list[tuple[EpisodeState, float]]] = {}
+    skipped_missing = 0
+    for state in states:
+        duration_value = state.metadata.get("duration_seconds")
+        if not is_positive_number(duration_value):
+            continue
+        values = tuple(_duration_group_value(state, field) for field in group_by)
+        if any(not value for value in values):
+            skipped_missing += 1
+            continue
+        grouped.setdefault(values, []).append((state, float(duration_value)))
+
+    results: list[tuple[EpisodeState, Finding]] = []
+    for group_values, members in grouped.items():
+        if len(members) < min_group_size:
+            continue
+        durations = sorted(duration for _, duration in members)
+        median = _median(durations)
+        if median <= 0:
+            continue
+        iqr = _iqr(durations)
+        for state, duration in members:
+            ratio_to_median = duration / median
+            if ratio_to_median < ratio_fail:
+                continue
+            upper_iqr_distance = (duration - median) / iqr if iqr > 0 else None
+            if iqr > 0 and upper_iqr_distance is not None and upper_iqr_distance < iqr_distance_fail:
+                continue
+            results.append(
+                (
+                    state,
+                    _finding(
+                        state,
+                        "duration_extreme_long",
+                        "major",
+                        "fail",
+                        "Episode duration is extremely long for its comparison group.",
+                        {
+                            "duration_seconds": duration,
+                            "group_median_seconds": median,
+                            "ratio_to_median": ratio_to_median,
+                            "group_iqr_seconds": iqr,
+                            "upper_iqr_distance": upper_iqr_distance,
+                            "group_size": len(members),
+                            "group_by": group_by,
+                            "group_values": dict(zip(group_by, group_values)),
+                            "ratio_fail": ratio_fail,
+                            "iqr_distance_fail": iqr_distance_fail,
+                        },
+                    ),
+                )
+            )
+    return results, skipped_missing
+
+
+def _check_training_duration_limit(
+    states: list[EpisodeState],
+    catalog: TaskCatalog | None,
+    settings: dict[str, Any] | None = None,
+) -> list[tuple[EpisodeState, Finding]]:
+    """Apply the absolute pre-training duration policy independently of peers."""
+    configured = (
+        settings
+        if settings is not None
+        else config_value(["phase2_duration", "training_duration_limit"], {})
+    )
+    if not isinstance(configured, dict):
+        raise RuntimeError("phase2_duration.training_duration_limit must be a JSON object")
+    if not configured.get("enabled", True):
+        return []
+    try:
+        fail_offset = float(configured.get("fail_offset_seconds", 30.0))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("training_duration_limit.fail_offset_seconds must be numeric") from exc
+    if fail_offset < 0:
+        raise RuntimeError("training_duration_limit.fail_offset_seconds must not be negative")
+    demo_exempt = bool(configured.get("demo_exempt", True))
+    results: list[tuple[EpisodeState, Finding]] = []
+    for state in states:
+        duration = state.metadata.get("duration_seconds")
+        if not is_positive_number(duration):
+            continue
+        task_key = str(first_present(state.task, state.metadata.get("task_key"), "")).strip()
+        policy = resolve_task_policy(task_key, state.metadata, catalog)
+        if policy["is_demo"] and demo_exempt:
+            continue
+        maximum = float(policy["max_duration_seconds"])
+        fail_threshold = maximum + fail_offset
+        duration_value = float(duration)
+        if duration_value <= maximum:
+            continue
+        severity, status = (
+            ("major", "fail")
+            if duration_value >= fail_threshold
+            else ("minor", "needs_review")
+        )
+        details = {
+            "duration_seconds": duration_value,
+            "task": task_key,
+            "is_demo": bool(policy["is_demo"]),
+            "max_duration_seconds": maximum,
+            "fail_duration_seconds": fail_threshold,
+            "fail_offset_seconds": fail_offset,
+            "policy_source": policy["source"],
+            "catalog_missing": bool(policy["catalog_missing"]),
+            "catalog_source": catalog.source if catalog is not None else "unavailable",
+            "catalog_sha256": catalog.sha256 if catalog is not None else "",
+        }
+        results.append(
+            (
+                state,
+                _finding(
+                    state,
+                    "duration_training_limit_exceeded",
+                    severity,
+                    status,
+                    (
+                        "Episode duration exceeds the configured pre-training limit."
+                        if status == "needs_review"
+                        else "Episode duration significantly exceeds the configured pre-training limit."
+                    ),
+                    details,
+                ),
+            )
+        )
+    return results
+
+
+def _duration_group_value(state: EpisodeState, field: str) -> str:
+    value = first_present(getattr(state, field, None), state.metadata.get(field))
+    return str(value).strip() if value is not None else ""
 
 
 def _pending_states(states: list[EpisodeState]) -> list[EpisodeState]:

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from scripts.pipeline.qa_config import config_value
+from scripts.pipeline import slow_motion
 from scripts.pipeline.qa_core import (
     EpisodeState,
     Finding,
@@ -69,7 +70,7 @@ def run_phase(
     processed = 0
     for state in pending:
         _ensure_metadata(state)
-        findings, metrics = _episode_findings(state.episode_path, settings)
+        findings, metrics = _episode_findings(state.episode_path, state.task, settings)
         state.metrics.update(metrics)
         _finish_state(state, db_path, findings)
         processed += 1
@@ -88,7 +89,7 @@ def _run_phase_parallel(
 ) -> list[EpisodeState]:
     if not pending:
         return states
-    args = [(str(state.episode_path), settings) for state in pending]
+    args = [(str(state.episode_path), state.task, settings) for state in pending]
     states_by_path = {str(state.episode_path): state for state in pending}
     with Pool(processes=workers) as pool:
         for index, (episode_path_str, finding_dicts, metrics) in enumerate(pool.imap_unordered(_worker, args), start=1):
@@ -101,9 +102,9 @@ def _run_phase_parallel(
     return states
 
 
-def _worker(args: tuple[str, StandstillSettings]) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
-    episode_path_str, settings = args
-    findings, metrics = _episode_findings(Path(episode_path_str), settings)
+def _worker(args: tuple[str, str, StandstillSettings]) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    episode_path_str, task, settings = args
+    findings, metrics = _episode_findings(Path(episode_path_str), task, settings)
     return (
         episode_path_str,
         [
@@ -122,13 +123,22 @@ def _worker(args: tuple[str, StandstillSettings]) -> tuple[str, list[dict[str, A
     )
 
 
-def _episode_findings(episode_path: Path, settings: StandstillSettings) -> tuple[list[Finding], dict[str, Any]]:
+def _episode_findings(
+    episode_path: Path,
+    task: str,
+    settings: StandstillSettings,
+) -> tuple[list[Finding], dict[str, Any]]:
     metrics = _initial_metrics()
+    slow_items, slow_metrics, attributor = slow_motion.analyze_episode(episode_path, task)
+    metrics.update(slow_metrics)
     if not settings.enabled:
-        return [], metrics
+        return [_slow_finding(episode_path, item) for item in slow_items], metrics
     series, source_error = _load_motion_series(episode_path, settings)
     if series is None:
-        return [_finding(episode_path, "standstill_motion_source_missing", "minor", "warning", source_error)], metrics
+        return [
+            _finding(episode_path, "standstill_motion_source_missing", "minor", "warning", source_error),
+            *[_slow_finding(episode_path, item) for item in slow_items],
+        ], metrics
 
     duration_ms = series.timestamps_ms[-1] - series.timestamps_ms[0] if len(series.timestamps_ms) >= 2 else 0.0
     if duration_ms <= 0:
@@ -140,7 +150,8 @@ def _episode_findings(episode_path: Path, settings: StandstillSettings) -> tuple
                 "needs_review",
                 "Motion source has insufficient monotonic timestamp data for standstill detection.",
                 {"source_modality": series.modality, "row_count": len(series.timestamps_ms)},
-            )
+            ),
+            *[_slow_finding(episode_path, item) for item in slow_items],
         ], metrics
 
     segments = _detect_segments(series, settings)
@@ -162,10 +173,33 @@ def _episode_findings(episode_path: Path, settings: StandstillSettings) -> tuple
         }
     )
 
-    findings = _segment_findings(episode_path, series, segments, settings)
-    summary = _summary_finding(episode_path, series, segments, duration_ms, total_excess_ms, excess_ratio, useful_motion_ms, settings)
+    findings, attributed = _segment_findings(
+        episode_path, series, segments, settings, attributor
+    )
+    operator_segments = [segment for segment, cause in attributed if cause == "operator_associated"]
+    operator_excess = sum(segment.excess_ms for segment in operator_segments)
+    operator_ratio = operator_excess / duration_ms if duration_ms > 0 else 0.0
+    operator_useful = max(0.0, duration_ms - sum(segment.duration_ms for segment in operator_segments))
+    summary = _summary_finding(
+        episode_path,
+        series,
+        operator_segments,
+        duration_ms,
+        operator_excess,
+        operator_ratio,
+        operator_useful,
+        settings,
+    )
     if summary is not None:
         findings.append(summary)
+    for cause in ("equipment_associated", "uncertain"):
+        cause_segments = [segment for segment, item_cause in attributed if item_cause == cause]
+        cause_summary = _non_operator_summary_finding(
+            episode_path, series, cause_segments, duration_ms, settings, cause
+        )
+        if cause_summary is not None:
+            findings.append(cause_summary)
+    findings.extend(_slow_finding(episode_path, item) for item in slow_items)
     return findings, metrics
 
 
@@ -278,18 +312,36 @@ def _segment_findings(
     series: MotionSeries,
     segments: list[StandstillSegment],
     settings: StandstillSettings,
-) -> list[Finding]:
+    attributor: slow_motion.IntervalAttributor | None,
+) -> tuple[list[Finding], list[tuple[StandstillSegment, str]]]:
     findings = []
+    attributed = []
     for index, segment in enumerate(segments, start=1):
-        check_name = f"operator_standstill_{segment.location}"
         severity, status = _segment_status(segment.duration_ms, settings)
+        cause, cause_evidence = (
+            attributor.cause(segment.stop_start_ms, segment.stop_end_ms)
+            if attributor is not None
+            else ("uncertain", {"reason": "action_attribution_unavailable"})
+        )
+        attributed.append((segment, cause))
+        if cause == "operator_associated":
+            check_name = f"operator_standstill_{segment.location}"
+            message = f"Operator standstill detected in {segment.location} part of episode."
+        elif cause == "equipment_associated":
+            check_name = "equipment_motion_response_stalled"
+            message = "Observed robot motion is stalled while commanded motion is normal."
+        else:
+            check_name = "standstill_cause_uncertain"
+            message = "Standstill was detected but its cause is uncertain."
+            if status == "fail":
+                status = "needs_review"
         findings.append(
             _finding(
                 episode_path,
                 check_name,
                 severity,
                 status,
-                f"Operator standstill detected in {segment.location} part of episode.",
+                message,
                 {
                     "source_modality": series.modality,
                     "stop_start_ms": segment.stop_start_ms,
@@ -301,10 +353,63 @@ def _segment_findings(
                     "total_segments": len(segments),
                     "motion_delta_threshold": settings.motion_delta_threshold,
                     "stillness_buffer_ms": settings.stillness_buffer_ms,
+                    "cause": cause,
+                    "cause_evidence": cause_evidence,
                 },
             )
         )
-    return findings
+    return findings, attributed
+
+
+def _non_operator_summary_finding(
+    episode_path: Path,
+    series: MotionSeries,
+    segments: list[StandstillSegment],
+    duration_ms: float,
+    settings: StandstillSettings,
+    cause: str,
+) -> Finding | None:
+    if not segments or duration_ms <= 0:
+        return None
+    excess = sum(segment.excess_ms for segment in segments)
+    ratio = excess / duration_ms
+    useful = max(0.0, duration_ms - sum(segment.duration_ms for segment in segments))
+    is_fail = useful < settings.min_useful_motion_ms or ratio >= settings.fail_excess_ratio
+    is_review = ratio >= settings.review_excess_ratio
+    if not is_fail and not is_review:
+        return None
+    details = _summary_details(
+        series, segments, duration_ms, excess, ratio, useful, settings
+    )
+    details["cause"] = cause
+    if cause == "equipment_associated":
+        return _finding(
+            episode_path,
+            "equipment_motion_response_stalled",
+            "major",
+            "fail" if is_fail else "needs_review",
+            "Equipment response stalls occupy too much of the episode.",
+            details,
+        )
+    return _finding(
+        episode_path,
+        "standstill_cause_uncertain",
+        "major",
+        "needs_review",
+        "Excessive standstill was detected but its cause is uncertain.",
+        details,
+    )
+
+
+def _slow_finding(episode_path: Path, item: dict[str, Any]) -> Finding:
+    return _finding(
+        episode_path,
+        str(item["check_name"]),
+        str(item["severity"]),
+        str(item["status"]),
+        str(item["message"]),
+        item.get("details") if isinstance(item.get("details"), dict) else {},
+    )
 
 
 def _summary_finding(

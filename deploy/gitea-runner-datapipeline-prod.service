@@ -1,0 +1,22 @@
+[Unit]
+Description=DataPipeline Gitea 生产部署 Runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/xinzhi/.local/share/gitea-runner-datapipeline-prod/run-runner.sh
+Restart=always
+RestartSec=10
+TimeoutStopSec=310
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/xinzhi/.local/share/gitea-runner-datapipeline-prod
+ReadWritePaths=/home/xinzhi/DataPipeline-deploy
+ReadWritePaths=/home/xinzhi/DataPipeline/outputs
+ReadWritePaths=/home/xinzhi/.config/systemd/user
+
+[Install]
+WantedBy=default.target

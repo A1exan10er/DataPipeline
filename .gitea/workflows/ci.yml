@@ -1,0 +1,49 @@
+name: DataPipeline CI
+
+on:
+  push:
+    branches:
+      - dev
+      - "feature/**"
+      - "release/**"
+  pull_request:
+    branches:
+      - dev
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: datapipeline-ci
+    timeout-minutes: 45
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 创建隔离测试环境
+        run: |
+          /usr/bin/python3 -m venv .ci-venv
+          .ci-venv/bin/python -m pip install --upgrade pip
+          .ci-venv/bin/python -m pip install -r QA_Pipeline/requirements.txt
+
+      - name: 静态检查
+        run: |
+          bash -n QA_Pipeline/scripts/event_listener_control.sh
+          .ci-venv/bin/python -m compileall -q \
+            QA_Pipeline/scripts \
+            Werkzeuge \
+            data_slow_movement_detection/scripts
+          .ci-venv/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for path in Path("QA_Pipeline/configs").glob("*.json"):
+              json.loads(path.read_text(encoding="utf-8"))
+          PY
+
+      - name: 项目测试
+        run: .ci-venv/bin/python -m pytest -q

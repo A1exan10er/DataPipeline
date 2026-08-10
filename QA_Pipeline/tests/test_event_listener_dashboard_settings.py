@@ -89,3 +89,47 @@ def test_dashboard_rejects_relative_server_mount() -> None:
                 "phase6_sidecar_filename": "video_rotated_180.mp4",
             },
         )
+
+
+def test_event_listener_status_reports_process_backend(monkeypatch, tmp_path: Path) -> None:
+    enabled_file = tmp_path / "listener.enabled"
+    error_file = tmp_path / "listener-last-error.txt"
+    enabled_file.write_text("enabled\n", encoding="utf-8")
+    error_file.write_text("上一次启动失败", encoding="utf-8")
+
+    monkeypatch.setattr(dashboard, "EVENT_LISTENER_ENABLED_FILE", enabled_file)
+    monkeypatch.setattr(dashboard, "EVENT_LISTENER_ERROR_FILE", error_file)
+    monkeypatch.setattr(dashboard, "EVENT_JOB_DB", tmp_path / "missing.db")
+    monkeypatch.setattr(
+        dashboard,
+        "event_listener_process_info",
+        lambda: (4321, ["python", "Werkzeuge/listen_episode_verified.py", "serve"]),
+    )
+    monkeypatch.setattr(dashboard, "tmux_session_running", lambda _session: False)
+    monkeypatch.setattr(dashboard, "directory_size", lambda *_args, **_kwargs: "0 B")
+    monkeypatch.setattr(dashboard, "event_listener_settings", lambda: {"workers": "1"})
+
+    status = dashboard.event_listener_status()
+
+    assert status["running"] is True
+    assert status["manager"] == "process"
+    assert status["pid"] == 4321
+    assert status["desired_running"] is True
+    assert status["tmux_running"] is False
+    assert status["last_start_error"] == "上一次启动失败"
+
+
+def test_event_listener_status_keeps_tmux_compatibility(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(dashboard, "EVENT_LISTENER_ENABLED_FILE", tmp_path / "disabled")
+    monkeypatch.setattr(dashboard, "EVENT_LISTENER_ERROR_FILE", tmp_path / "no-error")
+    monkeypatch.setattr(dashboard, "EVENT_JOB_DB", tmp_path / "missing.db")
+    monkeypatch.setattr(dashboard, "event_listener_process_info", lambda: (None, []))
+    monkeypatch.setattr(dashboard, "tmux_session_running", lambda _session: True)
+    monkeypatch.setattr(dashboard, "directory_size", lambda *_args, **_kwargs: "0 B")
+    monkeypatch.setattr(dashboard, "event_listener_settings", lambda: {})
+
+    status = dashboard.event_listener_status()
+
+    assert status["running"] is True
+    assert status["manager"] == "tmux"
+    assert status["tmux_running"] is True

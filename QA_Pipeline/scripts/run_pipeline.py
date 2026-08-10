@@ -26,11 +26,22 @@ from scripts.pipeline import (
     phase5_robot_state,
     phase6_umi_processing,
     phase7_standstill,
+    task_catalog,
 )
 try:
     from QA_Pipeline.scripts.generate_dashboard import generate_dashboard
 except ModuleNotFoundError:
     from scripts.generate_dashboard import generate_dashboard
+try:
+    from QA_Pipeline.scripts.generate_operator_severe_report import (
+        DEFAULT_CONFIG_PATH as DEFAULT_OPERATOR_SEVERE_CONFIG_PATH,
+        generate_operator_severe_report,
+    )
+except ModuleNotFoundError:
+    from scripts.generate_operator_severe_report import (
+        DEFAULT_CONFIG_PATH as DEFAULT_OPERATOR_SEVERE_CONFIG_PATH,
+        generate_operator_severe_report,
+    )
 from scripts.pipeline.qa_core import (
     EpisodeState,
     Finding,
@@ -42,6 +53,7 @@ from scripts.pipeline.qa_core import (
     init_db,
     load_episode_state,
     load_metadata,
+    operator_from_episode_path,
     prune_db_to_episode_paths,
     replace_discovery_findings,
     save_findings,
@@ -130,6 +142,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     db_path = Path(args.db_path)
     output_dir = Path(args.output_dir)
+    phase2_duration.set_task_catalog(None)
+    if not args.dry_run and 2 in active_phases:
+        try:
+            phase2_duration.set_task_catalog(task_catalog.prepare_task_catalog(output_dir))
+        except RuntimeError as exc:
+            _print_error(f"Could not prepare task duration catalog: {exc}")
+            return 1
     if args.episode_list:
         episodes = _read_episode_list(Path(args.episode_list))
         missing_episodes = [episode for episode in episodes if not episode.exists()]
@@ -169,6 +188,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if task_lower in str(episode_path).lower()
             ]
             print(f"After --task filter ({args.task}): {len(episodes)} episodes", flush=True)
+        if args.operator:
+            episodes = [
+                episode_path for episode_path in episodes
+                if _episode_matches_operator_filter(episode_path, args.operator)
+            ]
+            print(f"After --operator filter ({args.operator}): {len(episodes)} episodes", flush=True)
         if args.max_episodes is not None:
             episodes = episodes[: args.max_episodes]
         discovery_findings = []
@@ -227,6 +252,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if task_lower in str(episode_path).lower()
                 ]
                 print(f"After --task filter ({args.task}): {len(episodes)} episodes", flush=True)
+            if args.operator:
+                episodes = [
+                    episode_path for episode_path in episodes
+                    if _episode_matches_operator_filter(episode_path, args.operator)
+                ]
+                print(f"After --operator filter ({args.operator}): {len(episodes)} episodes", flush=True)
             if args.max_episodes is not None:
                 episodes = episodes[: args.max_episodes]
             discovery_findings = _discovery_findings(discovery.skipped_hidden_dirs)
@@ -311,6 +342,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         report_paths.extend(_export_reports(db_path, monitor.run_dir / "final"))
     for report_path in report_paths:
         print(f"Wrote report: {report_path}")
+    if not _maybe_generate_operator_severe_report(args, db_path, output_dir):
+        return 1
     _print_final_summary(states, output_dir)
     return 0
 
@@ -328,6 +361,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--db-path", default="outputs/qa_pipeline.db", help="SQLite state database path.")
     parser.add_argument("--output-dir", default="outputs", help="Directory for exported reports.")
+    parser.add_argument(
+        "--generate-operator-severe-report",
+        action="store_true",
+        help="Generate the configured operator severe-QA evidence report after a successful run.",
+    )
+    parser.add_argument(
+        "--operator-severe-config",
+        default=str(DEFAULT_OPERATOR_SEVERE_CONFIG_PATH),
+        help="Operator severe-report JSON config path.",
+    )
     parser.add_argument("--phases", default=None, help="Comma-separated phase numbers to run, e.g. 1,2.")
     parser.add_argument("--max-episodes", type=int, default=None, help="Maximum number of episodes to process.")
     parser.add_argument(
@@ -388,6 +431,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=None,
         help="Only process episodes whose task name contains this string "
         "(case-insensitive). Filters after discovery.",
+    )
+    parser.add_argument(
+        "--operator",
+        type=str,
+        default=None,
+        help=(
+            "Only process episodes whose standard date/operator path has this exact "
+            "operator name (case-insensitive). Combines with date and task filters."
+        ),
     )
     parser.add_argument(
         "--quality-label",
@@ -642,6 +694,8 @@ def _run_batched(
         report_paths.extend(_export_reports(db_path, monitor.run_dir / "final"))
     for report_path in report_paths:
         print(f"Wrote report: {report_path}")
+    if not _maybe_generate_operator_severe_report(args, db_path, output_dir):
+        return 1
     _print_db_final_summary(db_path, output_dir)
     return 0
 
@@ -669,7 +723,10 @@ def _run_streaming_discovery(
     )
     if streaming_mode == "group-aware":
         if 2 in phases:
-            print("Streaming group-aware mode: Phase 2 task groups are kept together.")
+            print(
+                "Streaming group-aware mode: Phase 2 task groups are kept together "
+                "(including all task+robot subgroups)."
+            )
         elif 3 in phases:
             print("Streaming group-aware mode: Phase 3 task+robot groups are kept together.")
     elif any(phase in phases for phase in (2, 3)):
@@ -817,6 +874,16 @@ def _run_streaming_discovery(
                     last_report,
                 )
                 continue
+            if args.operator and not _episode_matches_operator_filter(episode_path, args.operator):
+                last_report = _print_streaming_progress(
+                    scanned,
+                    selected,
+                    processed,
+                    skipped_completed,
+                    started,
+                    last_report,
+                )
+                continue
             if _streaming_episode_completed(db_path, episode_path, phases, args.force_rerun):
                 skipped_completed += 1
                 last_report = _print_streaming_progress(
@@ -883,6 +950,8 @@ def _run_streaming_discovery(
         report_paths.extend(_export_reports(db_path, monitor.run_dir / "final"))
     for report_path in report_paths:
         print(f"Wrote report: {report_path}")
+    if not _maybe_generate_operator_severe_report(args, db_path, output_dir):
+        return 1
     print(
         "Streaming discovery complete: "
         f"scanned={scanned}, selected={selected}, processed={processed}, "
@@ -1039,6 +1108,13 @@ def _episode_path_date(episode_path: Path) -> str | None:
     return None
 
 
+def _episode_matches_operator_filter(episode_path: Path, operator: str) -> bool:
+    expected = str(operator or "").strip().casefold()
+    if not expected:
+        return True
+    return operator_from_episode_path(episode_path).strip().casefold() == expected
+
+
 def _streaming_episode_completed(
     db_path: Path,
     episode_path: Path,
@@ -1169,7 +1245,10 @@ def _make_group_aware_batch_plan(
         "Outlier groups will not be split across batches."
     ]
     if 2 in phases:
-        warnings.append("Phase 2 group-aware batching uses complete task groups.")
+        warnings.append(
+            "Phase 2 group-aware batching uses complete task groups, including all "
+            "task+robot subgroups required by the extreme-long check."
+        )
     elif 3 in phases:
         warnings.append("Phase 3 group-aware batching uses complete task+robot groups.")
     if oversized_groups:
@@ -1236,12 +1315,13 @@ def _print_live_dashboard_command(args: argparse.Namespace, db_path: Path, outpu
 
 def _episode_selection_cache_meta(args: argparse.Namespace, roots: list[Path]) -> dict:
     return {
-        "version": 2,
+        "version": 3,
         "roots": [str(root) for root in roots],
         "date": args.date or "",
         "date_from": args.date_from or "",
         "date_to": args.date_to or "",
         "task": args.task or "",
+        "operator": args.operator or "",
         "max_episodes": args.max_episodes,
     }
 
@@ -1592,7 +1672,7 @@ def _run_phase(
         overall_total,
     )
     phase_start = time.time()
-    if phase_number in (1, 2, 3, 4, 5, 6):
+    if phase_number in (1, 2, 3, 4, 5, 6, 7):
         runner(runnable, db_path, progress_callback=callback, workers=workers)
     else:
         runner(runnable, db_path, progress_callback=callback)
@@ -1715,6 +1795,28 @@ def _export_reports(db_path: Path, output_dir: Path) -> list[Path]:
     export_summary_md(db_path, summary_md)
     generate_dashboard(db_path, dashboard_html)
     return [quality_report, findings_jsonl, summary_md, dashboard_html]
+
+
+def _maybe_generate_operator_severe_report(
+    args: argparse.Namespace,
+    db_path: Path,
+    output_dir: Path,
+) -> bool:
+    """Generate the optional severe report after all normal exports succeed."""
+    if args.dry_run or not args.generate_operator_severe_report:
+        return True
+    try:
+        paths = generate_operator_severe_report(
+            db_path,
+            output_dir,
+            Path(args.operator_severe_config),
+        )
+    except Exception as exc:
+        _print_error(f"Operator severe report generation failed: {exc}")
+        return False
+    for path in paths:
+        print(f"Wrote operator severe report: {path}")
+    return True
 
 
 def _print_final_summary(states: list[EpisodeState], output_dir: Path) -> None:

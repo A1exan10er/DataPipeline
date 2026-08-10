@@ -1,0 +1,3352 @@
+{
+  "items": {
+    "1": {
+      "is_demo": false
+    },
+    "Add_task_for_test_tube_cleaning_and_collection_0703": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 30.0
+    },
+    "Add_task_for_test_tube_cleaning_and_collection_0708": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Add_task_for_test_tube_cleaning_and_collection_513": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 30.0
+    },
+    "Add_water_to_the_test_tube_with_a_dropper_then_put_it_back_on_the_rack_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Add_water_to_the_test_tube_with_a_dropper_then_put_it_back_on_the_rack_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "Arrange_the_simulated_fruits": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Arrange_the_simulated_fruits_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Arrange_the_simulated_fruits_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Assemble_gears_on_the_conveyor_belt": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Assemble_multiple_screws_and_store_them": {
+      "is_demo": true
+    },
+    "Assemble_the_first_layer_of_the_storage_rack": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Bind_and_secure_the_socks_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Binding_socks_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Cear_both_drawer_layers_into_the_box": {
+      "is_demo": true
+    },
+    "Classification_of_building_block_colors_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Classification_of_building_block_colors_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Classification_of_building_block_colors_umi": {
+      "is_demo": false
+    },
+    "Clean_the_plate": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Clean_the_plate_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Clean_the_plate_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 80.0,
+      "min_duration_seconds": 50.0
+    },
+    "Clean_the_porcelain_bowl_on_the_plate_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Cleaning_and_Putting_Away_Desk_Trash_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 8.0
+    },
+    "Clear_both_drawer_layers_into_the_box": {
+      "is_demo": true
+    },
+    "Continuously_inject_liquid_using_a_dropper": {
+      "is_demo": false
+    },
+    "Draw_salt_water_with_a_dropper_UMI": {
+      "is_demo": false
+    },
+    "Flatten_clay_with_the_porcelain_spoon_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Fold_the_sketch_paper": {
+      "is_demo": false
+    },
+    "Fold_underwear": {
+      "is_demo": false
+    },
+    "Fold_underwear_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Folded_underpants": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Folding_clothes_stacked_order_umi": {
+      "is_demo": false
+    },
+    "Folding_trousers": {
+      "is_demo": false
+    },
+    "Folding_trousers_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Folding_trousers_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Grab_blocks_behind_cover": {
+      "is_demo": true,
+      "max_duration_seconds": 50.0,
+      "min_duration_seconds": 20.0
+    },
+    "Insert_board_card": {
+      "is_demo": true,
+      "max_duration_seconds": 35.0,
+      "min_duration_seconds": 15.0
+    },
+    "Install_the_metal_connector_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Lemon_tea_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 100.0
+    },
+    "Mixing_colors_on_the_palette_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Mixing_colors_on_the_palette_UR": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Mixing_colors_on_the_palette_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 3.0
+    },
+    "Mold_the_clay_into_geometric_shapes": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Move_chips_from_plate_paper_cup": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Move_chips_from_plate_paper_cup_0708": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Move_the_pot_to_the_corner": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Move_the_pot_to_the_corner_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 35.0
+    },
+    "Move_the_resin_plate_to_the_center": {
+      "is_demo": false
+    },
+    "OFFLINE_COLLECTION": {
+      "is_demo": true
+    },
+    "Open_drawer_put_socks_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Open_the_covered_teacup": {
+      "is_demo": false
+    },
+    "Open_the_covered_teacup_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Open_the_paint_box": {
+      "is_demo": false
+    },
+    "Open_the_paint_box_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Paper_cup_packaged_imitation_rice_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Parts_assembly": {
+      "is_demo": true
+    },
+    "Pierce_the_clay": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Place_test_tube_upright_test_tube_rack_ARX_513": {
+      "is_demo": true,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Place_the_building_blocks_into_the_pot_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 4.0
+    },
+    "Plece_the_teacup_on_the_white_plastic_board": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Plece_the_teacup_on_the_white_plastic_board_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Press_clay_onto_the_white_plastic_board_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "Put_Away_Markers_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "Put_Away_Markers_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "Put_into_paper_bags_arx": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Put_teacup_lid_into_the_plate_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Put_the_USB_cable_into_the_tool_box": {
+      "is_demo": false
+    },
+    "Put_the_USB_cable_into_the_tool_box_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 6.0
+    },
+    "Put_the_block_inside_the_box_Franka": {
+      "is_demo": true
+    },
+    "Put_the_metal_connectors_into_the_toolbox": {
+      "is_demo": false
+    },
+    "Put_the_metal_connectors_into_the_toolbox_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Put_the_metal_connectors_into_the_toolbox_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Put_the_short_sleeves_into_black_plastic_bag_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Put_the_shorts_sleeve_shirt_into_the_black_plastic_bag_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Put_the_shorts_sleeve_shirt_into_the_black_plastic_bag_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Put_the_socks_into_the_paper_box_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 60.0
+    },
+    "Put_the_socks_into_the_paper_box_umi": {
+      "is_demo": false
+    },
+    "Put_the_socks_into_the_porcelain_bowl_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Put_the_teacup_on_the_small_square_plate_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Put_the_toothpaste_toothbrush_into_the_wash_basin": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Put_the_toothpaste_toothbrush_into_the_wash_basin_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Put_the_toothpaste_toothbrush_into_the_wash_basin_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Put_the_toothpaste_toothbrush_into_the_wash_basin_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Put_the_underwear_into_the_drawer": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 7.0
+    },
+    "Roll_the_short_sleeves": {
+      "is_demo": false
+    },
+    "Roll_the_short_sleeves_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Roll_up_unfold_the_sketch_paper_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Roll_up_unfold_the_sketch_paper_umi": {
+      "is_demo": false
+    },
+    "Scoop_the_simulated_rice": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Scoop_water_into_the_bowl_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Scoop_water_into_the_bowl_umi": {
+      "is_demo": false
+    },
+    "Screw_light_bulb_until_it_lights_up": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Shake_the_black_spray_paint_can": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Shake_the_black_spray_paint_can_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Shake_the_black_spray_paint_can_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Shake_the_black_spray_paint_can_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Shape_a_ball_out_of_clay": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Socks_wrapped_around_batteries_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Squeeze_the_toothpaste": {
+      "is_demo": false
+    },
+    "Squeeze_the_toothpaste_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Squeeze_the_toothpaste_umi": {
+      "is_demo": false
+    },
+    "Stack_paper_cup_demo_UMI": {
+      "is_demo": true,
+      "max_duration_seconds": 50.0,
+      "min_duration_seconds": 10.0
+    },
+    "Stack_the_plates_three_layers": {
+      "is_demo": false
+    },
+    "Stack_three_plates": {
+      "is_demo": false
+    },
+    "Stack_three_plates_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "Stack_three_plates_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 45.0
+    },
+    "Storage_furniture_organizer_box__UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "Storage_furniture_organizer_box_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "Take_the_blocks_out_of_the_bots": {
+      "is_demo": false
+    },
+    "Take_the_blocks_out_of_the_box": {
+      "is_demo": false
+    },
+    "Take_the_blocks_out_of_the_pot": {
+      "is_demo": true
+    },
+    "Take_the_test_tube": {
+      "is_demo": false
+    },
+    "Tashi_demo_v1": {
+      "is_demo": true
+    },
+    "Test_Task_John_Wick": {
+      "is_demo": false
+    },
+    "The_brush_is_inserted_into_the_paper_cup_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "The_folder_is_on_the_bookshelf_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "The_folder_is_on_the_bookshelf_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "The_folder_is_on_the_bookshelf_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "Tie_the_shorts_white_a_string_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Transfer_fruit_container_aloha_513": {
+      "is_demo": true,
+      "max_duration_seconds": 100.0,
+      "min_duration_seconds": 50.0
+    },
+    "Transfer_fruit_container_flexiv_513": {
+      "is_demo": true,
+      "max_duration_seconds": 100.0,
+      "min_duration_seconds": 50.0
+    },
+    "Underwear_roll_storage_umi": {
+      "is_demo": false
+    },
+    "Unfold_the_shopping_bag_then_fold": {
+      "is_demo": false
+    },
+    "Unfold_the_shopping_bag_then_fold_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "Unfold_the_shopping_bag_then_fold_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 100.0
+    },
+    "Use_a_dropper_to_absorb_water": {
+      "is_demo": false
+    },
+    "Use_a_dropper_to_absorb_water_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "Use_a_dropper_to_absorb_water_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 50.0
+    },
+    "Use_a_dropper_to_absorb_water_UR": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "Workshop_Plastic_Parts_Box_Sorting_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "Workshop_Plastic_Parts_Box_Sorting_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "Workshop_Plastic_Parts_Box_Sorting_UR": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "Wrap_the_USB_cable": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "Wrap_the_USB_cable_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 10.0
+    },
+    "arrange_flowers_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "arrange_flowers_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "arrange_flowers_UR": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "assemble_bactory_umi": {
+      "is_demo": false
+    },
+    "assemble_gears": {
+      "is_demo": true,
+      "max_duration_seconds": 90.0,
+      "min_duration_seconds": 40.0
+    },
+    "assemble_gears_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 50.0
+    },
+    "assemble_the_battery": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 10.0
+    },
+    "assemble_the_box_demo": {
+      "is_demo": true
+    },
+    "assemble_the_remote_control_demo": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "assemble_the_remotecontraller_put_into_drawer_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "assemble_the_remotecontraller_put_into_drawer_umi": {
+      "is_demo": false
+    },
+    "bag_covers_the_box": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "bag_covers_the_box_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "bag_the_fruit": {
+      "is_demo": false
+    },
+    "bag_the_fruit_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 6.0
+    },
+    "bag_the_shirts": {
+      "is_demo": false
+    },
+    "bag_the_shirts_umi": {
+      "is_demo": false
+    },
+    "beaker_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "beaker_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "beaker_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "beaker_pour_liquid_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "beaker_pour_liquid_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "beaker_pour_liquid_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "bit_replace_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "bit_replace_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "bit_replace_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_single_layer_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_single_layer_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_single_layer_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_store_in_box_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_store_in_box_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_store_in_box_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_take_out_box_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_take_out_box_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_take_out_box_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_wall_build_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_wall_build_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "block_wall_build_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "brush_clean_glass_beaker_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "brush_clean_glass_beaker_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "brush_pickup_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "brush_pickup_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "brush_pickup_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "brush_the_whiteplasticboard_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "brush_water_on_the_clay": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "brush_water_on_the_clay_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "brush_water_on_the_clay_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 50.0
+    },
+    "building_block_collect_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "building_block_collect_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "building_block_collect_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "cable_fix_with_clamp_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "cable_fix_with_clamp_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "carlight_port_pick_insert_reset": {
+      "is_demo": true,
+      "max_duration_seconds": 40.0,
+      "min_duration_seconds": 20.0
+    },
+    "carlights_pick_and_insert": {
+      "is_demo": true,
+      "max_duration_seconds": 40.0,
+      "min_duration_seconds": 10.0
+    },
+    "carton_transfer_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "carton_transfer_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "carton_transfer_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "categorize_the_tools": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "ceramic_bowl_align_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "ceramic_bowl_align_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "ceramic_bowl_align_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "charger_box_put_in_carton_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "charger_box_put_in_carton_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "charger_box_put_in_carton_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "classify_cables": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "classify_cables_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "classify_items": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "classify_spoons_and_chopsticks_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "classify_spoons_and_chopsticks_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "classify_spoons_and_chopsticks_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "classify_the_battery_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 80.0,
+      "min_duration_seconds": 50.0
+    },
+    "classify_the_battery_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 50.0
+    },
+    "classify_the_battery_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 80.0,
+      "min_duration_seconds": 50.0
+    },
+    "classify_the_plates_umi": {
+      "is_demo": false
+    },
+    "classify_the_simulated_fruits_by_type": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 4.0
+    },
+    "classify_the_simulated_fruits_by_type_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "classify_the_simulated_fruits_by_type_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "clean_the_chemistry_suit_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 30.0
+    },
+    "clean_the_drain_pen": {
+      "is_demo": false
+    },
+    "clean_the_shredded_paper_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "clean_the_shredded_paper_umi": {
+      "is_demo": false
+    },
+    "clean_the_table": {
+      "is_demo": false
+    },
+    "clean_the_table_UMI": {
+      "is_demo": false
+    },
+    "clear_water_pour_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "clear_water_pour_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "clear_water_pour_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "clip_chips": {
+      "is_demo": false
+    },
+    "clip_chips_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "clip_chips_ARX_513": {
+      "is_demo": true,
+      "max_duration_seconds": 15.0,
+      "min_duration_seconds": 8.0
+    },
+    "clip_chips_umi": {
+      "is_demo": false
+    },
+    "close_the_drawer": {
+      "is_demo": false
+    },
+    "clothes_stack_split_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "clothes_stack_split_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "contact_ground": {
+      "is_demo": false
+    },
+    "continuely_press_the_button": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 2.0
+    },
+    "continuely_press_the_button_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "cover_target_with_towel": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "cover_the_whiteboard_by_sketchpaper": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "cover_the_whiteboard_by_sketchpaper_umi": {
+      "is_demo": false
+    },
+    "cup_lid_cover_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "cup_lid_cover_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "dabaojimu": {
+      "is_demo": false
+    },
+    "dakaichouti": {
+      "is_demo": false
+    },
+    "demo_arrange_blocks": {
+      "is_demo": true
+    },
+    "demo_gear_test": {
+      "is_demo": true
+    },
+    "die_cups": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "dipping_the_brush_in_water_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "draw_a_circle_on_the_whiteboard": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "draw_a_circle_on_the_whiteboard_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "draw_a_circle_on_the_whiteboard_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "draw_a_circle_on_the_whiteboard_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "drawer_pull_open_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "drawer_pull_open_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "drawer_pull_open_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "dropper_continuously_drips_liquid_10_times_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 4.0
+    },
+    "duijimu": {
+      "is_demo": false
+    },
+    "e2e_test_task": {
+      "is_demo": false
+    },
+    "egg_boil_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_boil_without_noodle_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 300.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_multi_layer_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_multi_layer_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_multi_layer_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_put_in_egg_tray_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_put_in_egg_tray_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_put_in_egg_tray_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_single_layer_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_single_layer_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_single_layer_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_load_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_load_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_load_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_split_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_split_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_split_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_stack_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_stack_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_stack_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_unload_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_unload_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "egg_tray_unload_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "eraser_pack_bag_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "eraser_pack_bag_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "eraser_pack_bag_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fk": {
+      "is_demo": false
+    },
+    "flatten_the_clay_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_all_clothes_then_put_into_bag": {
+      "is_demo": false
+    },
+    "fold_all_clothes_then_put_into_bag_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_cloth_level1": {
+      "is_demo": true
+    },
+    "fold_cloth_level2": {
+      "is_demo": true
+    },
+    "fold_clothes": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_clothes_Aloha": {
+      "is_demo": true
+    },
+    "fold_clothes_Aloha_tactile": {
+      "is_demo": true,
+      "max_duration_seconds": 20.0,
+      "min_duration_seconds": 15.0
+    },
+    "fold_clothes_put_inorder": {
+      "is_demo": false
+    },
+    "fold_clothes_put_inorder_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_clothes_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_pant": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_pants_level1": {
+      "is_demo": false
+    },
+    "fold_pants_level2": {
+      "is_demo": false
+    },
+    "fold_pants_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_the_clothes_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 8.0
+    },
+    "fold_the_clothes_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 9.0
+    },
+    "fold_the_clothes_advances": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_the_flat_cardboard": {
+      "is_demo": false
+    },
+    "fold_the_flat_cardboard_ALOHA_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 10.0
+    },
+    "fold_the_flat_cardboard_ALOHA_DEMO_V2": {
+      "is_demo": true,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 10.0
+    },
+    "fold_the_flat_cardboard_ALOHA_DEMO_V3": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "fold_the_flat_cardboard_ARX_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 10.0
+    },
+    "fold_the_flat_cardboard_umi": {
+      "is_demo": false
+    },
+    "fold_the_large_black_plastic_bag": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_towel_eval_demo": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_towels": {
+      "is_demo": false
+    },
+    "fold_towels_Aloha": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fold_towels_Aloha_tactile": {
+      "is_demo": true,
+      "max_duration_seconds": 16.0,
+      "min_duration_seconds": 12.0
+    },
+    "fold_towels_UMI": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 30.0
+    },
+    "fold_towels_from_box": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "fold_towels_part1": {
+      "is_demo": false,
+      "max_duration_seconds": 10.0,
+      "min_duration_seconds": 5.0
+    },
+    "fold_towels_part2": {
+      "is_demo": false,
+      "max_duration_seconds": 8.0,
+      "min_duration_seconds": 3.0
+    },
+    "folder_open_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "folder_open_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "folding_windmill_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "folding_windmill_UMI": {
+      "is_demo": false
+    },
+    "fragile_fruits_collection": {
+      "is_demo": true
+    },
+    "fragile_toufou_collection_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 420.0,
+      "min_duration_seconds": 60.0
+    },
+    "fruits_collection_flexiv": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "fruits_collection_flexiv_0707": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "garbage_pack_transport_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "garbage_pack_transport_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "garbage_pack_transport_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "gear_assblem": {
+      "is_demo": true
+    },
+    "grasp_grapes_to_tray_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "grasp_grapes_to_tray_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "grasp_grapes_to_tray_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "hand_bottle_to_another_person": {
+      "is_demo": false
+    },
+    "hang_the_cup_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "hanoi_tower_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 60.0
+    },
+    "hold_power_strip_and_press_button": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "hold_power_strip_and_press_button_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "hold_the_tray_with_both_hands_Aloha": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "hold_the_tray_with_both_hands_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "inhale_the_liquid_into_the_test_tube_UMI": {
+      "is_demo": false
+    },
+    "insert_board": {
+      "is_demo": true,
+      "max_duration_seconds": 20.0,
+      "min_duration_seconds": 15.0
+    },
+    "insert_car_wire": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "insert_four_screw_FeiXi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "insert_hdmi": {
+      "is_demo": false
+    },
+    "insert_usb": {
+      "is_demo": false
+    },
+    "inserting_the_keyhole": {
+      "is_demo": false
+    },
+    "item_classification": {
+      "is_demo": false,
+      "max_duration_seconds": 90.0,
+      "min_duration_seconds": 10.0
+    },
+    "jiaohua": {
+      "is_demo": false
+    },
+    "lay_the_chemistry_suit": {
+      "is_demo": false
+    },
+    "lemon_pick_lemon_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 40.0,
+      "min_duration_seconds": 20.0
+    },
+    "lift_bottle": {
+      "is_demo": true,
+      "max_duration_seconds": 28.0,
+      "min_duration_seconds": 15.0
+    },
+    "lightbulb_insertion_513": {
+      "is_demo": true,
+      "max_duration_seconds": 30.0,
+      "min_duration_seconds": 10.0
+    },
+    "lint_roller_remove_dirt_Aloha": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "lint_roller_remove_dirt_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 10.0
+    },
+    "long_pants_roll_storage_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "long_pants_roll_storage_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "long_wire_combed_straighten_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "long_wire_combed_straighten_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "long_wire_combed_straighten_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "make_paper_airplane": {
+      "is_demo": false
+    },
+    "make_paper_airplane_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 20.0
+    },
+    "material_weight_sim_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "material_weight_sim_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "material_weight_sim_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "metal_part_wipe_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "metal_part_wipe_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "metal_part_wipe_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "metal_sheet_sort_stack_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "metal_sheet_sort_stack_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "metal_sheet_sort_stack_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "metal_workpiece_layer_stack_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "metal_workpiece_layer_stack_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "mix_color_and_draw_umi": {
+      "is_demo": false
+    },
+    "mix_the_particles": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "mix_the_particles_UR": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "move_usb": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "move_usb_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "move_usb_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "multi_box_side_by_side_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "multi_box_side_by_side_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "multi_box_side_by_side_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "multi_plug_sort_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "multi_plug_sort_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "multi_plug_sort_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "new_employee_test": {
+      "is_demo": false,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 1.0
+    },
+    "open_and_close_the_box": {
+      "is_demo": false
+    },
+    "open_and_close_the_box_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "open_clamp_and_fix_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "open_clamp_and_fix_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "open_clamp_and_fix_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "open_lock_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 1.0
+    },
+    "open_lunch_box_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "open_lunch_box_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "open_the_bottle_lip": {
+      "is_demo": true,
+      "max_duration_seconds": 20.0,
+      "min_duration_seconds": 1.0
+    },
+    "open_the_lid_of_a_teacup_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "open_the_lock": {
+      "is_demo": false,
+      "max_duration_seconds": 1.0,
+      "min_duration_seconds": 1.0
+    },
+    "organize_the_cable": {
+      "is_demo": false
+    },
+    "organize_the_cable_UMI": {
+      "is_demo": false
+    },
+    "organize_the_cable_demo": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pack_eggs_UMI": {
+      "is_demo": false
+    },
+    "pack_in_hole_complex": {
+      "is_demo": false
+    },
+    "pack_in_hole_single": {
+      "is_demo": false
+    },
+    "pack_schoolbag": {
+      "is_demo": true,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 10.0
+    },
+    "pack_the_items": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pack_the_items_double": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "packaging_metal_joint": {
+      "is_demo": false
+    },
+    "pag_in_hole_hil": {
+      "is_demo": false
+    },
+    "paint_on_paper": {
+      "is_demo": false
+    },
+    "paintbrush_clean_sim_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "paintbrush_clean_sim_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "paintbrush_clean_sim_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pair_two_socks": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pair_two_socks_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "pair_two_socks_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 90.0
+    },
+    "pair_two_socks_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 50.0
+    },
+    "palette_pickup_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "palette_pickup_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "paper_cups_pyramid": {
+      "is_demo": false
+    },
+    "paper_cups_pyramid_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "paper_cups_pyramid_UR": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "paper_cups_pyramid_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "paper_cups_pyramid_umi": {
+      "is_demo": false
+    },
+    "paper_fold_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "paper_fold_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "peg_in_hole_hil": {
+      "is_demo": false
+    },
+    "pen_container_multi_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pen_container_multi_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pen_container_multi_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pic_red": {
+      "is_demo": false
+    },
+    "pick_and_place": {
+      "is_demo": false
+    },
+    "pick_blue": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_blue_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_cookie": {
+      "is_demo": false
+    },
+    "pick_cookie_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_cookie_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_cube_from_conveyot_belt": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_cup": {
+      "is_demo": false
+    },
+    "pick_cup_demo_Aloha": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "pick_cup_demo_flexiv": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "pick_green": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_green_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_in_hole": {
+      "is_demo": false
+    },
+    "pick_orange": {
+      "is_demo": false
+    },
+    "pick_orange_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_orange_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_up": {
+      "is_demo": false
+    },
+    "pick_up_fruits_Aloha_0703": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_up_fruits_flexiv": {
+      "is_demo": true,
+      "max_duration_seconds": 45.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_yellow": {
+      "is_demo": false
+    },
+    "pick_yellow_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pick_yellow_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "place_bowls_and_spoons": {
+      "is_demo": false
+    },
+    "place_bowls_and_spoons_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "place_bowls_and_spoons_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "place_ceramic_plates": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 30.0
+    },
+    "place_cups_on_the_plate_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "place_cups_on_the_plate_umi": {
+      "is_demo": false
+    },
+    "place_egg_demo": {
+      "is_demo": true,
+      "max_duration_seconds": 25.0,
+      "min_duration_seconds": 10.0
+    },
+    "place_foam_mats_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "place_foam_mats_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "play_toys_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "plece_the_porcelain_bowl_on_the_plate_UMI": {
+      "is_demo": false
+    },
+    "plug_and_unplug_the_plug": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 8.0
+    },
+    "plug_and_unplug_the_plug_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "plug_network_cable": {
+      "is_demo": false
+    },
+    "plug_network_cable_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "plug_network_cable_demo": {
+      "is_demo": true
+    },
+    "plug_the_cord_into_outlet": {
+      "is_demo": true,
+      "max_duration_seconds": 30.0,
+      "min_duration_seconds": 15.0
+    },
+    "plug_usb_light": {
+      "is_demo": false,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 15.0
+    },
+    "plug_usb_light_UR": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 20.0
+    },
+    "plug_usb_light_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 30.0
+    },
+    "plug_usb_lizi": {
+      "is_demo": true
+    },
+    "plug_usb_white": {
+      "is_demo": true
+    },
+    "potted_plant_arrange_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "potted_plant_arrange_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pour_the_rice_into_pot_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pour_the_rice_into_pot_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 6.0
+    },
+    "pour_the_salt_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pour_the_salt_umi": {
+      "is_demo": false
+    },
+    "pour_the_salt_umi_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pour_water_into_teacup_umi": {
+      "is_demo": false
+    },
+    "press_the_button": {
+      "is_demo": false,
+      "max_duration_seconds": 90.0,
+      "min_duration_seconds": 10.0
+    },
+    "pull_cups": {
+      "is_demo": false
+    },
+    "pull_out_tissue_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pull_out_tissue_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pull_tissue": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pull_tissue_UR": {
+      "is_demo": false,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 30.0
+    },
+    "push_the_cube_with_a_marker": {
+      "is_demo": false,
+      "max_duration_seconds": 90.0,
+      "min_duration_seconds": 10.0
+    },
+    "put_and_assemble_toys": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_battery_into_box": {
+      "is_demo": false
+    },
+    "put_battery_into_box_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "put_battery_into_box_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_battery_into_box_and_close": {
+      "is_demo": false
+    },
+    "put_battery_into_box_and_close_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "put_battery_into_box_umi": {
+      "is_demo": false
+    },
+    "put_battery_on_plate": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_battery_on_plate_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "put_blocks_on_the_shelf_by_color": {
+      "is_demo": false
+    },
+    "put_books_on_the_shelf_umi": {
+      "is_demo": false
+    },
+    "put_clay_into_box": {
+      "is_demo": false
+    },
+    "put_clay_on_plate": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_cups_in_line": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_cups_in_line_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "put_cups_in_line_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "put_cups_in_line_UR": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "put_cups_in_line_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "put_cups_on_the_plate": {
+      "is_demo": false
+    },
+    "put_cups_on_the_plate_umi": {
+      "is_demo": false
+    },
+    "put_cylinder_by_hardness": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "put_cylinder_by_hardness_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_cylinder_by_hardness_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_foam_into_bowl_umi": {
+      "is_demo": false
+    },
+    "put_food_into_pot_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_fruits_together": {
+      "is_demo": true,
+      "max_duration_seconds": 40.0,
+      "min_duration_seconds": 15.0
+    },
+    "put_in_pen_container_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "put_in_pen_container_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_in_pen_container_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_items_by_shape": {
+      "is_demo": false
+    },
+    "put_items_by_weight": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_joints_into_box": {
+      "is_demo": false
+    },
+    "put_joints_into_box_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "put_joints_into_box_UMI": {
+      "is_demo": false
+    },
+    "put_keys_on_hook_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_keys_on_hook_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_keys_on_hook_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_on_shoelaces": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "put_on_shoelaces_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "put_peg_into_hole_inorder": {
+      "is_demo": false
+    },
+    "put_plates_into_box": {
+      "is_demo": false
+    },
+    "put_plates_into_box_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_plates_into_box_umi": {
+      "is_demo": false
+    },
+    "put_the_books_back_Aloha": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "put_the_books_back_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_the_books_back_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_the_pen_in_the_pen_bag_UMI": {
+      "is_demo": false
+    },
+    "put_the_rubber_animal_toys_into_box": {
+      "is_demo": false
+    },
+    "put_the_rubber_animal_toys_into_box_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "put_the_rubber_animal_toys_into_box_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "put_the_rubber_animal_toys_into_box_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "put_the_shirts_into_shopping_bag": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_the_shirts_into_shopping_bag_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "put_the_socks_in": {
+      "is_demo": false,
+      "max_duration_seconds": 240.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_the_socks_in_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_the_stationery_into_the_pencil_case": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_the_stationery_into_the_pencil_case_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "put_the_stationery_into_the_pencil_case_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "put_things_into_bags": {
+      "is_demo": false
+    },
+    "put_tools_into_toolbox": {
+      "is_demo": false
+    },
+    "put_toys_into_pot": {
+      "is_demo": false
+    },
+    "put_toys_into_pot_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 1.0
+    },
+    "put_tuberack_on_plate_single_arm": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "put_tuberack_on_plate_single_arm_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 50.0
+    },
+    "put_tuberack_on_plate_single_arm_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "put_tuberack_on_plate_single_arm_UR": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "put_tuberack_on_plate_umi": {
+      "is_demo": false
+    },
+    "put_waste_components_into_blackbag_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "put_waste_components_into_blackbag_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pyy_test_test_test": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "pyy_test_test_test1": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "qwer": {
+      "is_demo": false
+    },
+    "remote_shift_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "remote_shift_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "remote_shift_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "rotate_the_nob": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "scan_towel": {
+      "is_demo": false
+    },
+    "scarf_fold_storage_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "scarf_fold_storage_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "scattered_screw_collect_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "scattered_screw_collect_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "scattered_screw_collect_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "screw_body": {
+      "is_demo": false,
+      "max_duration_seconds": 10.0,
+      "min_duration_seconds": 1.0
+    },
+    "screw_classify_storage_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "screw_classify_storage_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "screw_classify_storage_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "screw_count_check_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "screw_count_check_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "screw_count_check_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "screw_head": {
+      "is_demo": false,
+      "max_duration_seconds": 10.0,
+      "min_duration_seconds": 1.0
+    },
+    "screw_transfer_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "screw_transfer_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "screw_transfer_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "search_material_in_box_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "search_material_in_box_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "secure_the_cables": {
+      "is_demo": false
+    },
+    "shake_the_bottle": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "shielded_wire_arrange_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "shielded_wire_arrange_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "shielded_wire_arrange_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "shirts_layered_with_long_pants": {
+      "is_demo": false
+    },
+    "shirts_layered_with_long_pants_umi": {
+      "is_demo": false
+    },
+    "small_fixed_part_knock_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "small_fixed_part_knock_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "small_goods_sort_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "small_goods_sort_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "small_goods_sort_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "small_workpiece_transfer_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "small_workpiece_transfer_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "small_workpiece_transfer_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "sort_bottles": {
+      "is_demo": false,
+      "max_duration_seconds": 90.0,
+      "min_duration_seconds": 10.0
+    },
+    "sort_bottles_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "sort_bottles_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "sort_cables_and_put_into_drawer_umi": {
+      "is_demo": false
+    },
+    "sort_the_rubber_animal_toys": {
+      "is_demo": false
+    },
+    "sort_the_test_tubes_by_height": {
+      "is_demo": false
+    },
+    "sort_the_test_tubes_by_height_single_arm": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "sorting_cubes_size": {
+      "is_demo": false
+    },
+    "special_shaped_material_sort_by_shape_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "special_shaped_material_sort_by_shape_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "special_shaped_material_sort_by_shape_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "spice_bottle_pour_op_close_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "spice_bottle_pour_op_close_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "spray_paint": {
+      "is_demo": false
+    },
+    "spread_towel_flat": {
+      "is_demo": false
+    },
+    "square_block_grasp_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "square_block_grasp_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "square_block_grasp_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "stack_3D_printed_waste_parts": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 3.0
+    },
+    "stack_3D_printed_waste_parts_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 50.0
+    },
+    "stack_3D_printed_waste_parts_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "stack_blocks_and_dismantle_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 100.0,
+      "min_duration_seconds": 70.0
+    },
+    "stack_blocks_and_dismantle_ur": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 4.0
+    },
+    "stack_cups_reversely_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "stack_cups_reversely_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "stack_cups_reversely_ur": {
+      "is_demo": false
+    },
+    "stack_lunch_boxes_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "stack_paper_cup_DEMO": {
+      "is_demo": true,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 10.0
+    },
+    "stack_scattered_hangers_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "stack_scattered_hangers_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "stack_scattered_hangers_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "stack_the_box": {
+      "is_demo": false
+    },
+    "stack_the_box_umi": {
+      "is_demo": false
+    },
+    "stacking_blocks_ALOHA": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "stacking_blocks_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "stacking_blocks_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 50.0
+    },
+    "store_the_metaljoints_into_box_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "take_all_the_items_out_of_the_drawer": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 4.0
+    },
+    "take_all_the_items_out_of_the_drawer_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "take_all_the_items_out_of_the_drawer_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "take_all_the_items_out_of_the_drawer_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 50.0
+    },
+    "take_in_screws": {
+      "is_demo": false,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 20.0
+    },
+    "take_plastic_cube_from_drawer_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tape_measure_pickup_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tape_measure_pickup_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tape_measure_pull_out_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tape_measure_pull_out_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tape_measure_pull_out_test_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tape_measure_pull_out_test_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tape_measure_retract_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tape_measure_retract_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tashizhihang_demo_v11": {
+      "is_demo": true
+    },
+    "task_test": {
+      "is_demo": false,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 1.0
+    },
+    "test": {
+      "is_demo": false,
+      "max_duration_seconds": 2.0,
+      "min_duration_seconds": 1.0
+    },
+    "test_auto": {
+      "is_demo": false
+    },
+    "test_auto_prefix": {
+      "is_demo": false
+    },
+    "test_ceshi1": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "test_ceshi11": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "test_task": {
+      "is_demo": false
+    },
+    "test_task_with_time_range": {
+      "is_demo": false,
+      "max_duration_seconds": 123.0,
+      "min_duration_seconds": 12.0
+    },
+    "test_test_test": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "thread_needle": {
+      "is_demo": false
+    },
+    "thread_the_needle": {
+      "is_demo": false
+    },
+    "thread_the_needle_UMI": {
+      "is_demo": false
+    },
+    "through_needle_lift_bag": {
+      "is_demo": false
+    },
+    "tighten_different_screws": {
+      "is_demo": false
+    },
+    "tighten_different_screws_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 240.0,
+      "min_duration_seconds": 40.0
+    },
+    "tighten_screws": {
+      "is_demo": false
+    },
+    "tighten_screws_hil": {
+      "is_demo": false
+    },
+    "tighten_screws_umi_wu": {
+      "is_demo": true,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 10.0
+    },
+    "tighten_srews_in_order": {
+      "is_demo": false
+    },
+    "tighten_srews_in_order_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tool_classify_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tool_classify_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tool_classify_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tool_position_calibrate_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tool_position_calibrate_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tool_position_calibrate_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "toolbox_transport_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "toolbox_transport_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "transfer_blocks_by_shopping_bag_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "transfer_eggs": {
+      "is_demo": false
+    },
+    "transfer_the_test_tube": {
+      "is_demo": false
+    },
+    "transmit_the_chemistry_suit": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "trash_can_sleeve_bag_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "trash_can_sleeve_bag_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "trash_can_sleeve_bag_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_carry_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_carry_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_load_unload_cups_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_load_unload_cups_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_load_unload_cups_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_pick_up_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_pick_up_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_place_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_place_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_place_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_stack_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tray_stack_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "tube_collection_xsqeccv": {
+      "is_demo": true,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 20.0
+    },
+    "turn_the_bottle_cap": {
+      "is_demo": false
+    },
+    "umi_pick_cup": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "unfasten_the_shelaces_on_bag": {
+      "is_demo": false
+    },
+    "unlock_case": {
+      "is_demo": true,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 20.0
+    },
+    "unlock_case_v2": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 30.0
+    },
+    "unlock_case_v3": {
+      "is_demo": true,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 30.0
+    },
+    "unlock_case_v4": {
+      "is_demo": true,
+      "max_duration_seconds": 60.0,
+      "min_duration_seconds": 30.0
+    },
+    "unlock_case_v5": {
+      "is_demo": true,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "unscrew_the_cap": {
+      "is_demo": false
+    },
+    "usb_light_test": {
+      "is_demo": false
+    },
+    "usb_light_test_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "usb_light_test_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "usb_wire_dust_clean_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "usb_wire_dust_clean_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "using_knife": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "water_cup_fill_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "water_cup_fill_SINGLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "water_cup_fill_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "water_the_fiowers_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 90.0
+    },
+    "water_the_fiowers_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 80.0,
+      "min_duration_seconds": 50.0
+    },
+    "weigh_eggs_and_put_into_plate": {
+      "is_demo": false
+    },
+    "weigh_eggs_and_put_into_plate_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "weigh_eggs_and_put_into_plate_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 150.0,
+      "min_duration_seconds": 50.0
+    },
+    "weigh_eggs_and_put_into_plate_umi": {
+      "is_demo": false
+    },
+    "white_board_wopeing_xsqeccv": {
+      "is_demo": true,
+      "max_duration_seconds": 40.0,
+      "min_duration_seconds": 20.0
+    },
+    "wipe_surfaces": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "wipe_the_items": {
+      "is_demo": false
+    },
+    "wipe_the_pot_with_towel_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "wipe_the_pot_with_towel_umi": {
+      "is_demo": false
+    },
+    "wipe_the_table_with_a_towel": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 10.0
+    },
+    "wipe_the_table_with_a_towel_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "wipe_the_table_with_a_towel_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 30.0
+    },
+    "wipe_the_white_plastic_board": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "wipe_the_white_plastic_board_ARX": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "wipe_the_white_plastic_board_Aloha": {
+      "is_demo": true,
+      "max_duration_seconds": 20.0,
+      "min_duration_seconds": 10.0
+    },
+    "wipe_the_white_plastic_board_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 130.0,
+      "min_duration_seconds": 60.0
+    },
+    "wipe_the_white_plastic_board_flexiv": {
+      "is_demo": false,
+      "max_duration_seconds": 180.0,
+      "min_duration_seconds": 50.0
+    },
+    "wipe_the_wihteboard_umi": {
+      "is_demo": false
+    },
+    "wipe_the_wihteboard_ur": {
+      "is_demo": false
+    },
+    "wipe_whiteboard": {
+      "is_demo": false
+    },
+    "wipe_whiteboard_umi": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "wrap_3Dprintedparts_with_clay": {
+      "is_demo": false
+    },
+    "wrap_item_with_bubble_wrap_DOUBLE_ARM": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "wrap_item_with_bubble_wrap_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 20.0
+    },
+    "wrap_remotecontrol_with_towel": {
+      "is_demo": false
+    },
+    "wrap_remotecontrol_with_towel_UMI": {
+      "is_demo": false,
+      "max_duration_seconds": 120.0,
+      "min_duration_seconds": 60.0
+    },
+    "write_numbers_and_put_items": {
+      "is_demo": false
+    }
+  },
+  "total": 739
+}

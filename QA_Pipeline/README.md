@@ -15,12 +15,12 @@ Implemented phases:
 
 ```text
 1  structure, metadata, required files, labels, task/robot consistency
-2  duration, frame/row counts, video/action length alignment, duration outliers
+2  duration, frame/row counts, task training limits, alignment, duration outliers
 3  timestamps, FPS, frame drops, cross-camera start/end alignment
 4  video health: openability, properties, black/white/frozen sampled frames
 5  robot state/action reasonableness, limits, steps, velocity, jitter, EEF jumps
 6  UMI-specific validation, preprocessing, and world-frame export
-7  standstill/operator-idle detection using motion source time series
+7  attributed standstill and sustained slow-motion detection
 ```
 
 From the repository root, activate the virtual environment first:
@@ -43,6 +43,53 @@ python3 QA_Pipeline/scripts/run_pipeline.py \
   --batch-mode group-aware \
   --run-id verified-p1-p2 \
   --force-rerun
+```
+
+## Operator severe-QA evidence report
+
+Use a separate database and output directory for each one-week or two-week
+window. The optional report ranks operators by affected episode frequency and
+retains episode paths, measured values, source checks, and reasons as QA
+evidence. It does not itself make an employment decision.
+
+```bash
+DATE_FROM=20260706
+DATE_TO=20260719
+RUN_DIR="outputs/operator_severe_${DATE_FROM}_${DATE_TO}"
+
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --date-from "${DATE_FROM}" \
+  --date-to "${DATE_TO}" \
+  --operator operator_name \
+  --db-path "${RUN_DIR}/qa_pipeline.db" \
+  --output-dir "${RUN_DIR}" \
+  --phases 1,2,7 \
+  --batch-size 5000 \
+  --batch-mode auto \
+  --workers 3 \
+  --continue-after-fail \
+  --disable-quality-label-filter \
+  --generate-operator-severe-report \
+  --operator-severe-config QA_Pipeline/configs/operator_severe_report.json
+```
+
+`--continue-after-fail` is needed to collect findings from later selected
+phases after an earlier severe failure. `--disable-quality-label-filter`
+includes all quality labels; it can be omitted when a run intentionally
+includes only the normal quality label. Add other phase numbers whenever the
+configured criteria depend on those phases. Omit `--operator` to process all
+operators; when supplied, it is an exact case-insensitive operator name from
+the standard date/operator path.
+
+The same report can be regenerated from a completed window database without
+rerunning pipeline phases:
+
+```bash
+python3 QA_Pipeline/scripts/generate_operator_severe_report.py \
+  --db-path "${RUN_DIR}/qa_pipeline.db" \
+  --output-dir "${RUN_DIR}" \
+  --config QA_Pipeline/configs/operator_severe_report.json
 ```
 
 Current default behavior:
