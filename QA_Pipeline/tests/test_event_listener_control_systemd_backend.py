@@ -10,6 +10,45 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONTROL_SCRIPT = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listener_control.sh"
 
 
+def test_systemd_explicit_dcs_config_overrides_saved_runner_path(tmp_path: Path) -> None:
+    captured = tmp_path / "captured-config"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        '#!/usr/bin/env bash\nprintf "%s" "$DCS_CONFIG_FILE" > "$CAPTURED_CONFIG"\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    settings = tmp_path / "listener-settings.env"
+    settings.write_text(
+        "DCS_CONFIG_FILE=/runner/home/DataPipeline/dcp-sdk/dcs_config.json\n",
+        encoding="utf-8",
+    )
+    production_config = "/home/xinzhi/DataPipeline/dcp-sdk/dcs_config.json"
+    env = os.environ.copy()
+    env.update(
+        {
+            "CAPTURED_CONFIG": str(captured),
+            "DCS_CONFIG_FILE": production_config,
+            "EVENT_LISTENER_SETTINGS_FILE": str(settings),
+            "EVENT_LISTENER_USE_SAVED_SETTINGS": "1",
+            "QA_PYTHON": str(fake_python),
+            "TASK_DB_ENV_FILE": str(tmp_path / "missing-task-db-env"),
+        }
+    )
+    completed = subprocess.run(
+        [str(CONTROL_SCRIPT), "serve"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout
+    assert captured.read_text(encoding="utf-8") == production_config
+
+
 def test_systemd_backend_start_status_and_stop(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
