@@ -245,6 +245,7 @@ class EventListener:
     ):
         self._routing_keys = list(routing_keys)
         self._handler = handler
+        self._explicit_queue_name = queue_name is not None
         self._queue_name = queue_name or f"dcs_sdk.listener.{uuid.uuid4().hex[:8]}"
         self._max_retries = max_retries
         self._retry_delay_ms = retry_delay_ms
@@ -330,18 +331,24 @@ class EventListener:
                     raw_event.event,
                 )
 
+        # When no explicit queue_name was provided, pass None so that
+        # subscribe() creates an anonymous auto_delete queue — avoiding
+        # durable queue leaks when temporary listeners exit.
+        subscribe_queue_name = self._queue_name if self._explicit_queue_name else None
+
         await self._bus.subscribe(
             _dispatch,
-            queue_name=self._queue_name,
+            queue_name=subscribe_queue_name,
             routing_keys=self._routing_keys,
             max_retries=self._max_retries,
             retry_delay_ms=self._retry_delay_ms,
         )
 
         logger.info(
-            "EventListener subscribed queue=%s keys=%s",
+            "EventListener subscribed queue=%s keys=%s explicit=%s",
             self._queue_name,
             self._routing_keys,
+            self._explicit_queue_name,
         )
 
 

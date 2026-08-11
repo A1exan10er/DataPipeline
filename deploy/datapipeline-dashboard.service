@@ -1,0 +1,20 @@
+[Unit]
+Description=DataPipeline QA 控制台
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/xinzhi/DataPipeline-deploy/current
+Environment=PYTHONUNBUFFERED=1
+Environment=EVENT_LISTENER_BACKEND=systemd
+Environment=EVENT_LISTENER_SYSTEMD_SERVICE=datapipeline-event-listener.service
+Environment=QA_PYTHON=/home/xinzhi/DataPipeline-deploy/current/datapipeline-env/bin/python
+Environment=DCS_CONFIG_FILE=/home/xinzhi/DataPipeline/dcp-sdk/dcs_config.json
+ExecStart=/home/xinzhi/DataPipeline-deploy/current/datapipeline-env/bin/python QA_Pipeline/scripts/qa_control_dashboard.py --host 0.0.0.0 --port 4131
+Restart=always
+RestartSec=5
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

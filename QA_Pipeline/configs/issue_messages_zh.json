@@ -1,0 +1,119 @@
+{
+  "default": {
+    "title_zh": "未配置的问题类型",
+    "summary_zh": "检测到“{issue_title}”，该 episode 的结果不符合此项质检要求。",
+    "operator_action_zh": "请暂停继续采集同类任务，先联系现场负责人或 QA 人员确认是否需要重采或检查设备。"
+  },
+  "rules": {
+    "abnormal_fps_loss": {
+      "title_zh": "视频有效帧率低于预期",
+      "summary_zh": "视频或触觉视频的实际有效帧率明显低于期望帧率，通常表示采集过程中存在丢帧、设备负载过高或链路不稳定。",
+      "operator_action_zh": "请检查对应相机或触觉采集设备是否正常连接，确认采集机器负载是否过高；问题未确认前，建议暂停继续采集同一任务。"
+    },
+    "abnormal_fps_gain": {
+      "title_zh": "视频有效帧率高于预期",
+      "summary_zh": "视频实际帧率明显高于配置期望值，可能是采集配置或时间戳记录异常。",
+      "operator_action_zh": "请确认采集配置是否正确，并联系 QA 或工具链负责人复查时间戳。"
+    },
+    "frame_drop_ratio": {
+      "title_zh": "视频丢帧比例过高",
+      "summary_zh": "视频或触觉视频的丢帧比例超过阈值，会影响数据时序完整性和训练质量。",
+      "operator_action_zh": "请检查对应采集设备、连接线和机器负载；如持续出现，请停止该设备采集并通知设备维护人员。"
+    },
+    "frame_drop_consecutive": {
+      "title_zh": "连续丢帧过多",
+      "summary_zh": "视频或触觉视频存在连续多帧丢失，说明局部时间段内数据缺口明显。",
+      "operator_action_zh": "请检查对应采集设备和采集机器负载；若同一设备连续出现，请优先处理设备问题后再继续采集。"
+    },
+    "consecutive_drops_outlier": {
+      "title_zh": "连续丢帧异常偏高",
+      "summary_zh": "该 episode 的连续丢帧长度相对正常数据明显偏高，可能存在设备链路或采集端性能问题。",
+      "operator_action_zh": "请检查对应相机或触觉设备的连接和采集机器负载，必要时联系设备维护人员。"
+    },
+    "modality_alignment_start": {
+      "title_zh": "多模态开头未对齐",
+      "summary_zh": "不同模态在 episode 开头处时间或帧数不一致，可能导致训练样本切片错位。",
+      "operator_action_zh": "请暂停复用该 episode，联系 QA 或工具链负责人确认是否需要裁剪、重对齐或重采。"
+    },
+    "modality_alignment_end": {
+      "title_zh": "多模态结尾未对齐",
+      "summary_zh": "不同模态在 episode 结尾处时间或帧数不一致，可能导致训练样本切片错位。",
+      "operator_action_zh": "请暂停复用该 episode，联系 QA 或工具链负责人确认是否需要裁剪、重对齐或重采。"
+    },
+    "modality_frame_count_misaligned": {
+      "title_zh": "不同模态帧数不一致",
+      "summary_zh": "同一 episode 内不同图像、状态或动作模态的帧数差异超过允许范围，可能导致训练数据错位。",
+      "operator_action_zh": "请联系 QA 或工具链负责人检查采集同步和数据完整性，确认是否需要重对齐或重采。"
+    },
+    "duration_under_5s": {
+      "title_zh": "episode 时长低于 5 秒",
+      "summary_zh": "episode 总时长过短，通常是误触发、提前停止或无效采集。",
+      "operator_action_zh": "请确认是否误采；如任务未完整完成，请重新采集。"
+    },
+    "duration_absolute_too_short": {
+      "title_zh": "episode 时长过短",
+      "summary_zh": "episode 总时长明显低于该任务的正常范围，可能是动作未完成或提前结束。",
+      "operator_action_zh": "请确认任务动作是否完整完成；如未完成，请重新采集。"
+    },
+    "duration_frames_fps_inconsistent": {
+      "title_zh": "时长、帧数与帧率不一致",
+      "summary_zh": "metadata 中记录的 episode 时长、总帧数和帧率无法相互对应，可能存在记录错误或数据缺失。",
+      "operator_action_zh": "请联系 QA 或工具链负责人复查 metadata、视频帧数和时间戳。"
+    },
+    "duration_task_outlier": {
+      "title_zh": "episode 时长相对任务异常",
+      "summary_zh": "episode 时长与同任务其他数据相比偏离明显，可能存在采集流程差异或动作未完成。",
+      "operator_action_zh": "请确认本次动作流程是否和标准流程一致，必要时重新采集。"
+    },
+    "operator_standstill_leading": {
+      "title_zh": "开头静止过长",
+      "summary_zh": "episode 开头阶段采集人员长时间未产生有效运动，可能包含无效等待片段。",
+      "operator_action_zh": "请在开始采集后尽快进入任务动作，避免开头长时间静止；必要时重新采集。"
+    },
+    "operator_standstill_middle": {
+      "title_zh": "中段静止过长",
+      "summary_zh": "episode 中间阶段采集人员长时间未产生有效运动，可能表示任务中断或无效等待。",
+      "operator_action_zh": "请保持任务动作连续，避免中途长时间停顿；如确实中断，请重新采集。"
+    },
+    "operator_standstill_trailing": {
+      "title_zh": "结尾静止过长",
+      "summary_zh": "episode 结尾阶段采集人员长时间未产生有效运动，可能包含无效等待片段。",
+      "operator_action_zh": "请在任务完成后及时结束采集，避免结尾长时间静止；必要时重新采集。"
+    },
+    "operator_standstill_excessive": {
+      "title_zh": "总静止占比过高",
+      "summary_zh": "episode 中静止时间占比过高，有效动作内容不足。",
+      "operator_action_zh": "请确认任务过程中是否有长时间等待或停顿；如有效动作不足，请重新采集。"
+    },
+    "operator_standstill_motion_too_short": {
+      "title_zh": "有效运动时长过短",
+      "summary_zh": "扣除静止片段后，episode 中有效动作时长过短，通常不适合作为训练数据。",
+      "operator_action_zh": "请重新采集完整动作过程，并避免长时间静止。"
+    },
+    "quality_labels_missing": {
+      "title_zh": "缺少采集质量标签",
+      "summary_zh": "metadata 中缺少质量标签，可能表示采集或标注流程没有完成。",
+      "operator_action_zh": "请确认采集结束流程和标签写入是否正常，必要时补充标签或重新提交数据。"
+    },
+    "quality_label_unexpected": {
+      "title_zh": "采集质量标签非正常",
+      "summary_zh": "采集质量标签不是允许的正常标签，需要人工确认是否可用。",
+      "operator_action_zh": "请确认该 episode 是否确实存在采集问题，并按现场流程标注或重采。"
+    },
+    "state_csv_row_count_mismatch": {
+      "title_zh": "状态数据行数与预期不一致",
+      "summary_zh": "状态 CSV 的数据行数与 episode 时长和采样频率计算出的预期值不一致。",
+      "operator_action_zh": "请联系 QA 或工具链负责人检查状态数据采集是否完整。"
+    },
+    "timestamps_not_monotonic": {
+      "title_zh": "时间戳顺序异常",
+      "summary_zh": "时间戳没有按单调递增排列，会影响多模态对齐、回放和训练采样。",
+      "operator_action_zh": "请暂停使用该 episode，并联系 QA 或工具链负责人排查采集端时间戳。"
+    },
+    "timestamps_raw_inconsistency": {
+      "title_zh": "原始时间戳不一致",
+      "summary_zh": "原始时间戳数据存在不一致，可能影响对齐判断。",
+      "operator_action_zh": "请联系 QA 或工具链负责人复查该 episode。"
+    }
+  }
+}

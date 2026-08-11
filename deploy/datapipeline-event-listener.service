@@ -1,0 +1,24 @@
+[Unit]
+Description=DataPipeline 实时 Episode 质量检测
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/xinzhi/DataPipeline-deploy/current
+Environment=PYTHONUNBUFFERED=1
+Environment=EVENT_LISTENER_BACKEND=systemd
+Environment=EVENT_LISTENER_USE_SAVED_SETTINGS=1
+Environment=QA_PYTHON=/home/xinzhi/DataPipeline-deploy/current/datapipeline-env/bin/python
+Environment=DCS_CONFIG_FILE=/home/xinzhi/DataPipeline/dcp-sdk/dcs_config.json
+ExecStart=/home/xinzhi/DataPipeline-deploy/current/QA_Pipeline/scripts/event_listener_control.sh serve
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+KillMode=control-group
+Nice=5
+CPUWeight=25
+IOWeight=25
+
+[Install]
+WantedBy=default.target

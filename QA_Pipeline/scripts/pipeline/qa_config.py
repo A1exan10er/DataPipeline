@@ -13,6 +13,12 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "quality
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "task_catalog": {
+        "enabled": True,
+        "url": "http://192.168.50.209:7777/api/v1/admin/tasks/get_all_task_time_range_public",
+        "timeout_seconds": 5.0,
+        "fallback_path": "configs/task_time_ranges_fallback.json",
+    },
     "phase1_metadata": {
         "checksum": {
             "required": True,
@@ -38,15 +44,37 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "dual_arm": ["arx", "arx5", "aloha", "piper", "aloha_piper"],
             "umi": ["umi"],
         },
+        "quality_labels": {
+            "normal_labels": ["完全正常"],
+            "allowed_non_error_labels": ["测试任务"],
+            "missing_status": "fail",
+            "unexpected_status": "needs_review",
+        },
     },
     "phase2_duration": {
         "length_alignment": {
             "max_video_action_difference": 3,
         },
+        "extreme_long": {
+            "enabled": True,
+            "group_by": ["task", "robot"],
+            "min_group_size": 5,
+            "ratio_fail": 4.0,
+            "iqr_distance_fail": 5.0,
+        },
+        "training_duration_limit": {
+            "enabled": True,
+            "default_max_duration_seconds": 120.0,
+            "fail_offset_seconds": 30.0,
+            "demo_exempt": True,
+            "task_overrides": {},
+        },
     },
     "phase3_timestamp": {
         "abnormal_fps": {
             "loss_fail_ratio": 0.10,
+            "normal_video_loss_fail_ratio": 0.10,
+            "tactile_video_loss_fail_ratio": 0.15,
             "gain_warning_ratio": 0.10,
         },
         "frame_drops": {
@@ -71,8 +99,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "phase6_umi_processing": {
         "enabled": True,
+        "profile": "full",
         "output_root": "outputs/umi_processed",
         "suffix": "_w_world_base",
+        "video_only_suffix": "_video_aligned",
         "overwrite": True,
         "keep_intermediate": False,
         "skip_assessment": False,
@@ -83,6 +113,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "trajectory_pass_labels": ["smooth"],
         "trajectory_nonpass_status": "fail",
         "run_executability": False,
+        "video": {
+            "ffmpeg_threads": 2,
+            "preprocess_preset": "veryfast",
+            "output_mode": "derived_copy",
+            "sidecar_filename": "video_rotated_180.mp4",
+            "orientation_correction": {
+                "observation.image.left_wrist_view": 180,
+                "observation.image.right_wrist_view": 180,
+            },
+        },
         "ik": {
             "robots": None,
             "arm": "both",
@@ -118,6 +158,32 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "action.eef_pose",
         ],
     },
+    "phase7_slow_motion": {
+        "enabled": True,
+        "observation_modality": "observation.state.eef_pose",
+        "action_modalities": ["actions.eef_pose", "action.eef_pose"],
+        "window_seconds": 1.0,
+        "min_speed_cm_s": 0.1,
+        "max_speed_cm_s": 3.0,
+        "merge_gap_seconds": 2.0,
+        "min_duration_seconds": 15.0,
+        "min_segment_path_cm": 1.5,
+        "active_hand_min_path_cm": 1.0,
+        "active_hand_min_ratio": 0.2,
+        "action_slow_fraction": 0.8,
+        "action_normal_fraction": 0.8,
+        "alignment_tolerance_ms": 500.0,
+        "gripper_activity_gate": True,
+        "gripper_window_min_motion": 0.03,
+        "gripper_window_min_avg_speed": 0.002,
+        "gripper_slow_min_duration_seconds": 15.0,
+        "joint_rotation_min_window_motion": 1.5,
+        "joint_rotation_min_avg_speed": 0.1,
+        "raw_rotation_task_patterns": ["*rice*", "*pour*", "*tea*", "*cup*", "*water*"],
+        "raw_rotation_min_window_motion": 1.0,
+        "raw_rotation_min_avg_speed": 0.07,
+        "task_overrides": {},
+    },
     "standstill_trim": {
         "enabled": True,
         "motion_delta_threshold_rad": 0.001,
@@ -152,7 +218,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "trajectory_not_smooth",
             "ik_executability_failed",
         ],
-        "exclude_check_names": ["timestamps_raw_inconsistency"],
+        "exclude_check_names": ["timestamps_raw_inconsistency", "quality_label_unexpected"],
     },
 }
 

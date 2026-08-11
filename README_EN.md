@@ -320,6 +320,74 @@ Phase 6 does not run IK. It performs UMI raw-data assessment, trajectory
 preprocessing, and world-frame export. UMI processing can be slow because it may
 open videos, copy/transform episode folders, and use FFmpeg.
 
+Phase 6 supports two explicit profiles. `full` preserves the complete workflow.
+`video_only` rotates only the configured wrist videos by 180 degrees. Its
+`sidecar` output mode preserves `video.mp4` and writes
+`video_rotated_180.mp4` beside it:
+
+```json
+"phase6_umi_processing": {
+  "profile": "video_only",
+  "video": {
+    "output_mode": "sidecar",
+    "sidecar_filename": "video_rotated_180.mp4",
+    "orientation_correction": {
+      "observation.image.left_wrist_view": 180,
+      "observation.image.right_wrist_view": 180
+    }
+  }
+}
+```
+
+In sidecar mode, the episode's `metadata.json` is updated in place, but original
+videos, timestamps, CSV files, and tactile videos are not modified. Completed procedures are recorded under
+`metadata.json.data_pipeline.completed_procedures`. A later `full` run reuses the
+sidecars without re-encoding them, creates canonical rotated videos in its derived
+output, and runs the remaining procedures. Receipts are accepted only when their
+version, configuration hash, and expected output files still match.
+
+Local video-only test configuration and command:
+
+```bash
+QA_PIPELINE_CONFIG=QA_Pipeline/configs/quality_rules_umi_video_only.json \
+python3 QA_Pipeline/scripts/run_pipeline.py --roots /path/to/umi/data --phases 6
+```
+
+### Real-time verified episodes
+
+The DCS verified-episode listener runs new UMI sidecars after the episode tree is
+stable. Its worker defaults are:
+
+```text
+phases: 1,2,3,6,7
+Phase 6 profile: video_only
+video output: sidecar
+sidecar filename: video_rotated_180.mp4
+```
+
+The control dashboard exposes both sides of the server path mapping. `Event/NAS
+path prefixes` are the prefixes carried by verified-event payloads, while `Server
+verified mount` is the path where those episodes are mounted on the processing
+server. The listener replaces only the matched prefix and retains the rest of the
+episode path.
+
+`event_listener_control.sh` also disables the quality-label prefilter for exact
+verified-event jobs, ensuring Phase 6 sees every UMI event. Phase 6 still marks
+non-UMI episodes as not applicable. Before a listener job is marked `done`, the
+worker verifies the Phase 6 database status, metadata receipt, and both wrist
+sidecars. The stability wait prevents processing videos that are still being
+written.
+
+These defaults can be overridden before starting or restarting the listener:
+
+```bash
+PHASES=1,2,3,6,7 \
+PHASE6_PROFILE=video_only \
+PHASE6_VIDEO_OUTPUT_MODE=sidecar \
+PHASE6_SIDECAR_FILENAME=video_rotated_180.mp4 \
+QA_Pipeline/scripts/event_listener_control.sh start
+```
+
 Default Phase 6 output root:
 
 ```text
@@ -346,6 +414,23 @@ standstill_trim_plan.csv
 standstill_trim_plan.jsonl
 standstill_trim_summary.md
 ```
+
+## Standalone Unusual Duration Check
+
+Unusually long and short `完全正常` episodes can be indexed without the event
+listener, QA phases, or a dashboard request:
+
+```bash
+datapipeline-env/bin/python Werkzeuge/check_unusual_episode_durations.py scan \
+  /mnt/nas/database/verified --full
+datapipeline-env/bin/python Werkzeuge/check_unusual_episode_durations.py report
+```
+
+Results stay under `outputs/duration_anomalies/`; the verified source tree is
+read-only. The generated HTML report groups candidates by task/date/operator
+and lists long episodes first. See
+`Werkzeuge/docs/DURATION_ANOMALY_CHECK.md` for incremental scans, CSV export,
+status, and nightly scheduling.
 
 ## Server Deployment Notes
 

@@ -1,0 +1,85 @@
+name: 测试并部署 DataPipeline
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "要部署的 master 提交（完整 40 位 SHA）"
+        required: true
+        type: string
+      legacy_dashboard_service:
+        description: "首次部署时旧 dashboard 的 user-systemd 服务名；没有或未知可留空"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: datapipeline-ci
+    timeout-minutes: 45
+    steps:
+      - name: 从内网 Gitea 检出精确提交
+        env:
+          CI_SERVER_URL: ${{ gitea.server_url }}
+          CI_REPOSITORY: ${{ gitea.repository }}
+          CI_COMMIT_SHA: ${{ gitea.sha }}
+          CI_JOB_TOKEN: ${{ gitea.token }}
+        run: |
+          git init .
+          git remote add origin "$CI_SERVER_URL/$CI_REPOSITORY.git"
+          auth="$(printf 'x-access-token:%s' "$CI_JOB_TOKEN" | base64 -w0)"
+          git -c "http.extraHeader=Authorization: Basic $auth" fetch --no-tags origin master "$CI_COMMIT_SHA"
+          git checkout --detach "$CI_COMMIT_SHA"
+
+      - name: 创建隔离测试环境
+        run: |
+          /usr/bin/python3 -m venv .ci-venv
+          .ci-venv/bin/python -m pip install --upgrade pip
+          .ci-venv/bin/python -m pip install -r QA_Pipeline/requirements.txt
+
+      - name: 静态检查和项目测试
+        run: |
+          bash -n \
+            QA_Pipeline/scripts/event_listener_control.sh \
+            deploy/bootstrap_server_runner.sh \
+            deploy/build_server_runner_bundle.sh \
+            deploy/deploy_datapipeline.sh \
+            deploy/discover_legacy_dashboard.sh
+          .ci-venv/bin/python -m compileall -q QA_Pipeline/scripts Werkzeuge data_slow_movement_detection/scripts
+          .ci-venv/bin/python -m pytest -q
+
+  deploy:
+    needs: test
+    runs-on: datapipeline-prod
+    timeout-minutes: 90
+    steps:
+      - name: 从内网 Gitea 检出待部署提交
+        env:
+          CI_SERVER_URL: ${{ gitea.server_url }}
+          CI_REPOSITORY: ${{ gitea.repository }}
+          CI_COMMIT_SHA: ${{ gitea.sha }}
+          CI_JOB_TOKEN: ${{ gitea.token }}
+        run: |
+          git init .
+          git remote add origin "$CI_SERVER_URL/$CI_REPOSITORY.git"
+          auth="$(printf 'x-access-token:%s' "$CI_JOB_TOKEN" | base64 -w0)"
+          git -c "http.extraHeader=Authorization: Basic $auth" fetch --no-tags origin master "$CI_COMMIT_SHA"
+          git checkout --detach "$CI_COMMIT_SHA"
+
+      - name: 校验并部署
+        env:
+          PUSH_SHA: ${{ gitea.sha }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          DEPLOY_ROOT: /home/xinzhi/DataPipeline-deploy
+          PERSISTENT_OUTPUTS: /home/xinzhi/DataPipeline/outputs
+          SYSTEMD_USER_DIR: /home/xinzhi/.config/systemd/user
+          DEPLOY_START_EVENT_LISTENER: "1"
+          LEGACY_DASHBOARD_SERVICE_NAME: ${{ inputs.legacy_dashboard_service }}
+        run: |
+          TARGET_SHA="${REQUESTED_SHA:-$PUSH_SHA}"
+          bash deploy/deploy_datapipeline.sh "$TARGET_SHA"

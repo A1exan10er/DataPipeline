@@ -76,6 +76,7 @@ QA_Pipeline/requirements.txt
 - `opencv-python-headless`：第 4 阶段视频检查；
 - `scipy`：UMI 处理；
 - `openpyxl`：仅手动 Excel 导出需要，正常 QA 运行不需要；
+- `pytest`：仅开发/回归测试需要，正常 QA 运行和 dashboard 不需要；
 - 主机上的 `ffmpeg` 和 `ffprobe`：UMI 视频处理。
 
 将 Python 依赖安装到仓库虚拟环境：
@@ -108,16 +109,17 @@ QA_Pipeline/scripts/run_pipeline.py
 4  视频健康：可打开性、视频属性、黑/白/冻结采样帧
 5  机器人状态/action 合理性和静止检查
 6  UMI 专用验证、预处理和 world-frame 导出
+7  操作员静止/有效运动检查：开头、中段、结尾静止和总静止占比
 ```
 
 所有阶段都可以通过 `--phases` 选择性运行。
 
 每个阶段的详细判定规则见 `QA_PHASE_DECISION_RULES.md`。
 
-默认情况下，流水线会在进入各阶段前读取 `metadata.json`，只处理
-`quality.labels` 中包含 `完全正常` 的 episode。采集员已经标为其他质量标签
-的 episode 会被跳过，以减少无效检查和服务器负载。需要完整审计时可使用
-`--disable-quality-label-filter`，或用 `--quality-label` 指定其他标签。
+质量标签策略由第 1 阶段负责报告，不再作为进入后续阶段的过滤条件：
+`quality.labels` 中包含 `完全正常` 的 episode 视为正常，`测试任务` 视为有意
+采集的测试数据。缺失标签或非允许标签的 episode 会写出 finding，但同一个
+episode 仍会继续进入第 2/3/4/5 等其他已选择阶段。
 
 扫描阶段会跳过隐藏目录，例如 `.fr-*`。这些目录不会作为 episode 处理，但会
 作为 `hidden_directory_skipped` 写入实时和最终报告，便于排查 NAS 或同步工具
@@ -272,6 +274,131 @@ HTTP 访问时，页面默认每 5 秒读取一次 JSON 并局部更新内容，
 一次并退出。直接用 `file://` 打开时，浏览器安全限制会阻止读取 JSON；请使用
 `live_dashboard.py --port <port>` 或其他 HTTP 服务访问输出目录。
 
+### 服务器控制 Dashboard
+
+服务器长期运行推荐使用中心控制台：
+
+```bash
+python3 QA_Pipeline/scripts/qa_control_dashboard.py \
+  --host 0.0.0.0 \
+  --port 4131
+```
+
+然后打开：
+
+```text
+http://<server-ip>:4131
+```
+
+该控制台与 `live_dashboard.py` 不同：`live_dashboard.py` 只展示单个输出目录的
+只读 HTML；`qa_control_dashboard.py` 是服务器级控制台，负责：
+
+- 从页面启动 date-range 或 task-folder run；
+- 设置 `date_from`、`date_to`、`phases`、`workers`、`batch_size` 等参数；
+- 查看当前 run 的阶段进度、日志、episode/finding 数和中文报告；
+- 管理 event listener 的启动、停止、重启和日期过滤；
+- 汇总最近 event listener job 的问题、设备故障和采集人员/设备组合；
+- 展示“连续失败组合”告警，并允许 reviewer 标记已解决。
+
+控制台启动 run 时不按 `quality.labels` 过滤 episode。正常/测试标签按规则处理，
+缺失或非允许标签由第 1 阶段报告，其他已选择阶段仍会继续检查同一个 episode。
+
+### 中文工作时段报告
+
+中文报告生成脚本：
+
+```bash
+python3 QA_Pipeline/scripts/generate_work_session_report.py \
+  --db-path outputs/<run>/qa.db \
+  --output-dir outputs/<run>/reports/work_sessions \
+  --session current
+```
+
+输出目录包含：
+
+```text
+半日质检报告.md
+report.json
+核心问题汇总.csv
+问题episode清单.csv
+采集人员问题占比.csv
+采集人员问题episode索引.csv
+检测规则说明.csv
+处理建议.csv
+```
+
+在服务器控制台的 Run Detail 中，`中文质检报告` 可选择：
+
+- `当前运行累计报告`：覆盖当前 run 已经写入 DB 的全部结果，适合多日 run 边跑边看；
+- `最近结束的工作半日`、`当前工作半日`、`今天上午`、`今天下午`：按更新时间窗口生成半日报告。
+
+报告中“主要任务/主要机器人/主要采集人员”后面的括号数字表示该类别下的
+finding 条数，不是去重 episode 数；去重 episode 数见“影响 episode 数”或
+采集人员部分的“问题 episode”。
+
+报告还会写出中文检测规则说明。Dashboard 中的 `查看检测规则说明` 按钮会弹出
+浮层，直接展示命中的问题类型、中文说明、判定标准、阈值和证据字段，reviewer
+无需单独打开 CSV。当前规则说明配置位于：
+
+```text
+QA_Pipeline/configs/report_rule_explanations_zh.json
+```
+
+### Event Listener 与连续失败告警
+
+Event listener 用于持续监听新采集 episode 并提交 QA job。服务器控制台会显示
+pending/running/done job 数、最近问题 job、问题类型汇总，以及工作时段中文报告。
+
+Verified episode 稳定后，listener 默认运行 `1,2,3,6,7`。其中 Phase 6 使用
+`video_only + sidecar`，在左右 wrist-view 目录生成 `video_rotated_180.mp4`。
+Listener 会关闭 exact-event job 的 quality-label 预过滤，确保每个 UMI event 都能进入
+Phase 6；非 UMI episode 仍会标记为 not applicable。Job 标记为 `done` 前会检查 Phase 6
+状态、metadata receipt 和两个 sidecar 文件。可通过 `PHASES`、`PHASE6_PROFILE`、
+`PHASE6_VIDEO_OUTPUT_MODE` 和 `PHASE6_SIDECAR_FILENAME` 覆盖默认值，已经运行的
+listener 需要 restart 后才会使用新配置。
+
+Listener 不再强制依赖 `tmux`。控制脚本默认使用 `auto`：系统有 `tmux` 时继续沿用
+原有会话托管；没有 `tmux` 时改用带 PID 校验的独立后台进程。控制台会记录服务的
+期望状态和最后一次有效配置；如果服务器重启或 listener 意外退出，只要控制台服务
+已经恢复且期望状态仍为“运行”，它会自动重新启动 listener。也可在服务器终端执行：
+
+```bash
+QA_Pipeline/scripts/event_listener_control.sh start
+QA_Pipeline/scripts/event_listener_control.sh status
+QA_Pipeline/scripts/event_listener_control.sh restart
+QA_Pipeline/scripts/event_listener_control.sh stop
+```
+
+如需明确禁用 `tmux`，在命令前设置 `EVENT_LISTENER_BACKEND=process`。控制台现在显示
+“实时检测服务”整体状态和实际托管方式，不再把 `tmux` 状态误当成 listener 状态。
+
+控制台还可以分别设置 `Event/NAS path prefixes` 和 `Server verified mount`：前者是
+verified event payload 中携带的 NAS 路径前缀，后者是处理服务器实际挂载 verified 数据的
+路径。Listener 只替换匹配的前缀，episode 后续相对路径保持不变，因此不依赖本地测试路径。
+
+控制台左侧 Issues 面板会检测明显连续失败：
+
+- 以 `task + robot + operator + date` 为组合；
+- 连续 `fail` episode 达到阈值时出现告警，目前阈值为 5；
+- date 来自 QA DB 的 `date` 字段，缺失时从路径
+  `<verified>/<task>/<robot>/<collector>/<date>/<operator>/episode_...` 推断；
+- 因此同一采集人员、同一任务、同一机器在不同日期出现相同 episode 编号范围，
+  会作为新的独立问题重新检测。
+
+Reviewer 点击 `标记已解决` 后按钮会变成 `确认解决？`；第二次点击才真正提交。
+提交后前端会立即隐藏该组合，后端把同一 `task + robot + operator + date` 下
+当前 unresolved 连续失败段标记为 resolved。后续如果同一天或新日期又产生新的
+连续失败段，达到阈值后会重新出现在 Issues 列表。
+
+### 设备故障统计
+
+中文报告和 event listener 报告会生成设备/采集端维度的 failure summary：
+
+- 只统计 `fail` 和 `needs_review` finding；
+- 按 collector/device 的问题总数排序；
+- 当某个问题类型占该设备问题的大头时，会标记为重点设备风险；
+- Dashboard 主页面显示前若干设备摘要，详情页显示完整 breakdown。
+
 Excel 不属于正常流水线输出。如需从已有 DB 生成 Excel，不需要重新运行 QA：
 
 ```bash
@@ -294,11 +421,83 @@ UMI 检测会使用 metadata 中的 robot 值、episode 名称中的 robot token
 
 第 6 阶段不运行 IK。它执行 UMI raw-data assessment、trajectory preprocessing 和 world-frame export。UMI 处理可能较慢，因为它可能需要打开视频、复制/转换 episode 文件夹，并使用 FFmpeg。
 
+第 6 阶段支持两个明确的 profile：`full` 保留完整处理流程；`video_only`
+只处理配置指定的左右腕部视频。`sidecar` 输出模式保留原始 `video.mp4`，并在同一目录
+生成 `video_rotated_180.mp4`：
+
+```json
+"phase6_umi_processing": {
+  "profile": "video_only",
+  "video": {
+    "output_mode": "sidecar",
+    "sidecar_filename": "video_rotated_180.mp4",
+    "orientation_correction": {
+      "observation.image.left_wrist_view": 180,
+      "observation.image.right_wrist_view": 180
+    }
+  }
+}
+```
+
+sidecar 模式会原地更新 episode 的 `metadata.json`，但不会修改原始视频、timestamps、
+CSV 或触觉视频。已完成步骤记录在 `metadata.json.data_pipeline.completed_procedures`。
+后续切换到 `full` 时，流水线会直接复用 sidecar，不会再次编码旋转，只执行尚未完成的步骤。
+
+本地 video-only 测试配置和命令：
+
+```bash
+QA_PIPELINE_CONFIG=QA_Pipeline/configs/quality_rules_umi_video_only.json \
+python3 QA_Pipeline/scripts/run_pipeline.py --roots /path/to/umi/data --phases 6
+```
+
 第 6 阶段默认输出目录：
 
 ```text
 outputs/umi_processed/
 ```
+
+## 第 7 阶段：操作员静止检测
+
+第 7 阶段是主 QA runner 的一部分，用于检测 episode 中采集人员长时间没有产生
+有效运动的情况。选择方式：
+
+```bash
+--phases 7
+```
+
+它优先从以下运动源读取时间序列：
+
+```text
+observation.state.joint_position
+actions.joint_position
+observation.state.eef_pose
+actions.eef_pose
+action.eef_pose
+```
+
+判定方法：
+
+- 对相邻时间行计算非 gripper 运动列变化；
+- 如果所有运动列变化都小于 `motion_delta_threshold`，该相邻区间视为静止；
+- `stillness_buffer_ms` 以内的静止允许存在；
+- 超过缓冲的静止段会按位置分为开头 `leading`、中段 `middle`、结尾 `trailing`；
+- 同时统计总超额静止占比和有效运动时长。
+
+主要 finding：
+
+```text
+operator_standstill_leading
+operator_standstill_middle
+operator_standstill_trailing
+operator_standstill_excessive
+operator_standstill_motion_too_short
+standstill_motion_source_missing
+standstill_motion_source_invalid
+```
+
+第 7 阶段只写报告和 SQLite finding，不会裁剪视频，也不会修改原始 CSV。阈值来
+自 `QA_Pipeline/configs/quality_rules.json` 的 `phase7_standstill` 配置，并会
+在中文工作时段报告的 `检测规则说明.csv` 和 dashboard 规则弹窗中解释。
 
 ## 静止裁剪规划器
 
@@ -319,6 +518,22 @@ standstill_trim_plan.csv
 standstill_trim_plan.jsonl
 standstill_trim_summary.md
 ```
+
+## 独立 Episode 时长异常检查
+
+无需启动实时 listener、QA phase 或 dashboard 请求，即可索引唯一标签为
+`完全正常` 的异常偏长和偏短 episode：
+
+```bash
+datapipeline-env/bin/python Werkzeuge/check_unusual_episode_durations.py scan \
+  /mnt/nas/database/verified --full
+datapipeline-env/bin/python Werkzeuge/check_unusual_episode_durations.py report
+```
+
+结果只写入 `outputs/duration_anomalies/`，verified 源目录保持只读。生成的 HTML
+报告按任务、日期和操作员汇总，并优先列出异常偏长 episode。增量扫描、CSV
+导出、状态检查和夜间定时配置见
+`Werkzeuge/docs/DURATION_ANOMALY_CHECK.md`。
 
 ## 服务器部署说明
 

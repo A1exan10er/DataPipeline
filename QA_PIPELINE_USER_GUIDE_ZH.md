@@ -1,6 +1,6 @@
 # QA Pipeline 用户指南
 
-最后更新：2026-06-15
+最后更新：2026-06-30
 
 ## 目的
 
@@ -76,17 +76,14 @@ group-aware  保证第 2/3 阶段的离群统计分组不会被切开
 
 Group-aware batching 会避免第 2/3 阶段在不完整分组上计算离群统计。第 2 阶段按 task 分组，因此会把完整 task 放在同一个 batch。第 3 阶段按 task+robot 分组，因此在未选择第 2 阶段时会把完整 task+robot 放在同一个 batch。如果某个完整分组本身大于 `--batch-size`，它会作为一个超出 batch size 的完整 batch 运行，并打印 warning。这是有意行为：优先保证分组统计正确，而不是强行切开分组。
 
-进入详细阶段检查前，runner 会先应用默认质量标签过滤。只有 `metadata.json`
-中 `quality.labels` 包含 `完全正常` 的 episode 会被处理。采集员标为其他质量
-标签的 episode 会被跳过，并在终端汇总跳过原因。该过滤在状态加载和阶段派发
-前执行，因此适用于所有阶段。可用以下参数调整：
+质量标签内容在第 1 阶段检查，不再作为 episode 选择过滤条件。`metadata.json`
+中 `quality.labels` 包含 `完全正常` 的 episode 视为正常；包含 `测试任务` 的
+episode 视为有意采集的测试数据。缺失标签或非允许标签会由第 1 阶段写出明确
+finding，但不会阻止第 2/3/4/5 等其他阶段继续检查同一个 episode。历史参数
+`--quality-label` 和 `--disable-quality-label-filter` 仍被接受以保持兼容，
+但不会过滤 episode。
 
-```text
---quality-label <label>              处理指定质量标签
---disable-quality-label-filter       完整审计时处理所有质量标签
-```
-
-使用 `--force-rerun` 时，会重新计算当前筛选到的 episode 的所选阶段。已有 episode 行会被更新，同一个 `episode_path + phase` 的旧 findings 会被删除并写入新 findings。每次运行开始时，数据库还会按当前 `--roots`、`--date`、`--task`、质量标签过滤和 `--max-episodes` 得到的 episode 集合进行清理，删除当前集合之外的旧 episode 记录，避免旧筛选条件的结果污染当前 dashboard。
+使用 `--force-rerun` 时，会重新计算当前筛选到的 episode 的所选阶段。已有 episode 行会被更新，同一个 `episode_path + phase` 的旧 findings 会被删除并写入新 findings。每次运行开始时，数据库还会按当前 `--roots`、`--date`、`--task` 和 `--max-episodes` 得到的 episode 集合进行清理，删除当前集合之外的旧 episode 记录，避免旧筛选条件的结果污染当前 dashboard。
 
 如果要继续一个中断的运行，复用相同的 `--db-path` 和 `--output-dir`，并且不要传 `--force-rerun`。当前 resume 路径仍会先扫描输入 root，并加载匹配 episode 的状态，然后才能跳过已完成工作。因此在大型 NAS root 上，即使之前的阶段结果已经在 SQLite 中，重新发现 episode 仍可能需要等待。后续应增加真正的 DB-resume 模式来避免全量发现步骤。
 
@@ -221,6 +218,79 @@ Dashboard 展示：
 - 可筛选的 episode 表；
 - 可筛选的具体问题表。
 
+## 服务器控制 Dashboard
+
+服务器上推荐长期运行中心控制台：
+
+```bash
+python3 QA_Pipeline/scripts/qa_control_dashboard.py \
+  --host 0.0.0.0 \
+  --port 4131
+```
+
+打开：
+
+```text
+http://<server-ip>:4131
+```
+
+它和上面的 `live_dashboard.py` 不同。`live_dashboard.py` 只展示某个输出目录；
+`qa_control_dashboard.py` 是服务器控制台，支持：
+
+- 在页面上启动 date-range 或 task-folder run；
+- 设置 `date_from`、`date_to`、`phases`、`workers`、`batch_size`；
+- 查看 run 实时状态、阶段进度、日志和问题 episode；
+- 管理 event listener 的启动、停止、重启和日期过滤；
+- 生成/刷新中文工作时段报告；
+- 查看设备故障统计和连续失败告警。
+
+Run Detail 里的 `中文质检报告` 可以生成：
+
+- `当前运行累计报告`：按当前 run 的 DB 累计结果生成，适合多日 run 边跑边看；
+- 半日报告：按工作时段窗口统计最近或当前半日结果。
+
+报告附件包含：
+
+```text
+半日质检报告.md
+report.json
+核心问题汇总.csv
+问题episode清单.csv
+采集人员问题占比.csv
+采集人员问题episode索引.csv
+检测规则说明.csv
+处理建议.csv
+```
+
+报告正文中类似 `umi(88)`、`pengshasha(21)` 的括号数字表示 finding 条数，不是
+去重 episode 数。去重统计看“影响 episode 数”或采集人员部分的“问题 episode”。
+
+Dashboard 中的 `查看检测规则说明` 会打开浮层，显示命中规则的中文说明、判定
+标准、阈值和证据字段。规则说明配置在：
+
+```text
+QA_Pipeline/configs/report_rule_explanations_zh.json
+```
+
+Issues 面板会检测连续失败组合。组合身份为：
+
+```text
+task + robot + operator + date
+```
+
+date 优先来自 QA DB，缺失时从 episode 路径中的日期目录推断。这样同一
+operator 在不同日期用同一机器做同一任务，即使 episode 编号范围相同，也会
+作为新的独立问题重新检测。
+
+Reviewer 点击 `标记已解决` 后，按钮会变成 `确认解决？`。第二次点击会立即在
+前端隐藏该组合，并在后端把同一 `task + robot + operator + date` 下的当前
+unresolved 连续失败段标记为 resolved。如果后续真的再次出现新的连续失败段，
+达到阈值后会重新出现在 Issues 列表。
+
+设备故障统计只统计 `fail` 和 `needs_review` finding，并按 collector/device
+汇总。若某个设备的问题高度集中在同一 check name，会标记为重点设备风险，便
+于优先排查硬件、相机、采集端负载或连接问题。
+
 ## 运行中的实时状态
 
 查看最新一次运行的实时摘要，不需要手动输入 run-id：
@@ -331,7 +401,7 @@ QA_Pipeline/scripts/pipeline/phase1_metadata.py
 - 必需元数据字段存在且有效；
 - 元数据中的模态有对应文件夹；
 - 必需文件存在且非空；
-- 存在质量标签。
+- 存在质量标签，并包含 `完全正常` 或允许的非错误标签（例如 `测试任务`）。
 
 主要非通过情况：
 
@@ -345,7 +415,8 @@ QA_Pipeline/scripts/pipeline/phase1_metadata.py
 | `required_modality_file_empty` | 必需文件存在但为空 | fail |
 | `parent_path_structure` | 路径不像 `<task>/<date>/<operator>/<episode>` | warning |
 | `checksum_manifest_missing` | `.checksum_manifest` 缺失 | warning |
-| `quality_labels_missing` | `quality.labels` 缺失或为空 | warning |
+| `quality_labels_missing` | `quality.labels` 缺失或为空，表示标注步骤没有完成 | fail |
+| `quality_label_unexpected` | 已有标签但不包含 `完全正常` 或 `测试任务`，先作为内部复核/重复问题统计 | needs_review |
 | `action_modality_singular_name` | 模态/文件夹使用 `action.*` 而不是 `actions.*`，会记录待修复项 | warning |
 | `unknown_modality_detected` | 检测到未知模态名称，会记录供复核 | 默认 pass/info |
 | `task_robot_mismatch` | metadata/name/path 中的机器人来源与 task 文件夹机器人 token 冲突 | 当前第 1 阶段为 fail |
@@ -567,6 +638,107 @@ phase5_robot_state.robots
 aloha gripper range: 0.0 to 0.1 m
 arx5 gripper range: 0.0 to 0.082 m
 ```
+
+## 第 6 阶段：UMI 处理
+
+文件：
+
+```text
+QA_Pipeline/scripts/pipeline/phase6_umi.py
+```
+
+目的：
+
+执行 UMI 专用验证和处理。该阶段只对 UMI episode 有意义；非 UMI episode 会被
+跳过，并产生 pass/info finding。
+
+运行：
+
+```bash
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --phases 6 \
+  --db-path outputs/qa_umi/qa.db \
+  --output-dir outputs/qa_umi
+```
+
+主要工作：
+
+- 根据 metadata、episode 名称 token、task 名称和路径上下文识别 UMI episode；
+- 调用 `DataProcessUMI` 下的 UMI 工具；
+- 执行 raw-data assessment 和 trajectory preprocessing；
+- 导出 world-frame 数据，供后续 UMI 工作流使用；
+- 将处理产物写入配置的 UMI 输出目录，不修改 NAS 原始 episode。
+
+注意事项：
+
+- 第 6 阶段可能打开视频、复制/转换 episode 数据，并使用 FFmpeg，因此比元数据
+  和时间戳阶段慢；
+- 它目前不走普通 multiprocessing 路径，即使设置了 `--workers`，UMI episode
+  也会顺序处理；
+- 大规模运行时通常建议先跑第 1-5 阶段或第 1-7 阶段，再只对需要 UMI 处理的
+  数据运行第 6 阶段。
+
+主要非通过情况包括 UMI 必需输入缺失、UMI 轨迹无效或处理失败、处理脚本异常，
+以及 UMI 专用验证失败。
+
+## 第 7 阶段：操作员静止/有效运动检测
+
+文件：
+
+```text
+QA_Pipeline/scripts/pipeline/phase7_standstill.py
+```
+
+目的：
+
+检测 episode 开头、中段或结尾是否存在采集人员长时间没有产生有效运动的情况。
+
+运行：
+
+```bash
+python3 QA_Pipeline/scripts/run_pipeline.py \
+  --roots /mnt/nas/database/verified \
+  --phases 7 \
+  --db-path outputs/qa_phase7/qa.db \
+  --output-dir outputs/qa_phase7
+```
+
+运动源优先级：
+
+```text
+observation.state.joint_position
+actions.joint_position
+observation.state.eef_pose
+actions.eef_pose
+action.eef_pose
+```
+
+判定方法：
+
+- 比较相邻运动数据行；
+- 运动检测时忽略 gripper 列；
+- 如果所有选中的非 gripper 运动列变化都小于 `motion_delta_threshold`，该时间
+  区间视为静止；
+- `stillness_buffer_ms` 以内的静止允许存在；
+- 更长静止段按位置分为开头 `leading`、中段 `middle`、结尾 `trailing`；
+- 同时检查总超额静止占比和最小有效运动时长。
+
+主要非通过情况：
+
+| Check | 含义 | 状态影响 |
+| --- | --- | --- |
+| `operator_standstill_leading` | 开头静止过长 | 按时长 warning / needs_review / fail |
+| `operator_standstill_middle` | 中段静止过长 | 按时长 warning / needs_review / fail |
+| `operator_standstill_trailing` | 结尾静止过长 | 按时长 warning / needs_review / fail |
+| `operator_standstill_excessive` | 总超额静止占比过高 | needs_review / fail |
+| `operator_standstill_motion_too_short` | 有效非静止运动时长过短 | fail |
+| `standstill_motion_source_missing` | 未找到配置的运动源 | warning |
+| `standstill_motion_source_invalid` | 运动源存在但时间戳或行数据无效 | needs_review |
+
+第 7 阶段只生成报告和 SQLite finding，不会裁剪视频，也不会重写 CSV。阈值位于
+`QA_Pipeline/configs/quality_rules.json` 的 `phase7_standstill` 配置下，并会
+通过中文工作时段报告的 `检测规则说明.csv` 和 dashboard 规则弹窗展示给 reviewer。
 
 ## 静止裁剪规划器
 

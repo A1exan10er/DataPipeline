@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html as html_lib
 import json
+import re
 import sqlite3
 import sys
 from collections import Counter, defaultdict
@@ -12,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urlencode
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +22,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.pipeline.qa_config import load_quality_config  # noqa: E402
+from scripts.pipeline.qa_dcs_notifier import collector_id_from_episode_path  # noqa: E402
+from scripts.pipeline.issue_messages_zh import (  # noqa: E402
+    details_summary_zh,
+    finding_presentation_zh,
+    issue_location_zh,
+    issue_summary_zh,
+    issue_title_zh,
+)
 
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "work_session_report.json"
@@ -244,6 +255,9 @@ def build_report_from_rows(
     )
     operator_issue_episodes = operator_issue_episode_rows(episode_rows, findings_by_episode, config)
     enrich_rule_fields(operator_issue_episodes, rule_by_check)
+    operator_issue_breakdown = operator_issue_breakdown_rows(episode_rows, findings_by_episode)
+    operator_issue_details = operator_issue_detail_rows(episode_rows, findings_by_episode)
+    device_failures = device_failure_summary_rows(episode_rows, finding_rows)
     actions = action_rows(core_issues, config)
     status_counts = ordered_counter(Counter(row.get("final_status") or "pending" for row in episode_rows), STATUS_ORDER)
     severity_counts = ordered_counter(Counter(row.get("severity") or "unknown" for row in finding_rows), SEVERITY_ORDER)
@@ -275,7 +289,10 @@ def build_report_from_rows(
         "rule_explanations": rule_rows,
         "core_issues": core_issues,
         "operator_issues": operator_issues,
+        "operator_issue_breakdown": operator_issue_breakdown,
         "operator_issue_episodes": operator_issue_episodes,
+        "operator_issue_details": operator_issue_details,
+        "device_failure_summary": device_failures,
         "affected_episodes": affected_episodes,
         "suggested_actions": actions,
         "metadata": {
@@ -342,8 +359,10 @@ def query_findings_for_episodes(conn: sqlite3.Connection, episode_paths: list[st
     for chunk in chunks(episode_paths, 500):
         placeholders = ",".join("?" for _ in chunk)
         rows.extend(
-            dict(row)
-            for row in conn.execute(
+            enrich_finding_zh(row)
+            for row in (
+                dict(row)
+                for row in conn.execute(
                 f"""
                 SELECT f.episode_path, f.phase, f.check_name, f.severity, f.status,
                        f.message, f.details, e.task, e.date, e.operator, e.robot,
@@ -355,8 +374,63 @@ def query_findings_for_episodes(conn: sqlite3.Connection, episode_paths: list[st
                 """,
                 ("pass", *chunk),
             )
+            )
+            if finding_matches_current_report_rules(row)
         )
     return rows
+
+
+def enrich_finding_zh(row: dict[str, Any]) -> dict[str, Any]:
+    details = parse_json_object(row.get("details"))
+    enriched = dict(row)
+    presentation = finding_presentation_zh({**row, "details": details})
+    enriched.update(presentation)
+    # Compatibility aliases retained for existing CSV/API consumers.
+    enriched["message_zh"] = presentation["occurrence_zh"]
+    enriched["details_summary_zh"] = presentation["evidence_summary_zh"]
+    return enriched
+
+
+def finding_matches_current_report_rules(row: dict[str, Any]) -> bool:
+    if str(row.get("check_name") or "") != "abnormal_fps_loss":
+        return True
+    details = parse_json_object(row.get("details"))
+    modality = str(details.get("modality") or "")
+    deviation = float_or_none(details.get("deviation_ratio"))
+    if not modality or deviation is None:
+        return True
+    threshold = current_fps_loss_threshold(modality)
+    return deviation > threshold
+
+
+def current_fps_loss_threshold(modality: str) -> float:
+    quality_config = load_quality_config()
+    abnormal_fps = ((quality_config.get("phase3_timestamp") or {}).get("abnormal_fps") or {})
+    fallback = float_or_none(abnormal_fps.get("loss_fail_ratio"))
+    fallback = 0.10 if fallback is None else fallback
+    key = "tactile_video_loss_fail_ratio" if "tactile" in modality.lower() else "normal_video_loss_fail_ratio"
+    threshold = float_or_none(abnormal_fps.get(key))
+    return fallback if threshold is None else threshold
+
+
+def parse_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number
 
 
 def chunks(values: list[str], size: int) -> list[list[str]]:
@@ -381,7 +455,11 @@ def rule_explanation_rows(check_names: list[str], rule_config: dict[str, Any]) -
         rows.append(
             {
                 "check_name": check_name,
-                "rule_title_zh": str(raw_rule.get("title_zh") or check_name),
+                "issue_title_zh": issue_title_zh(check_name),
+                "rule_title_zh": str(
+                    (specific.get("title_zh") if isinstance(specific, dict) else "")
+                    or issue_title_zh(check_name)
+                ),
                 "phase": str(raw_rule.get("phase") or ""),
                 "description_zh": str(raw_rule.get("description_zh") or ""),
                 "standard_zh": str(raw_rule.get("standard_zh") or ""),
@@ -446,7 +524,7 @@ def core_issue_rows(
             check_name,
             {
                 "check_name": check_name,
-                "issue_label": action.get("label") or check_name,
+                "issue_label": action.get("label") or issue_title_zh(check_name),
                 "severity": severity,
                 "severity_counts": Counter(),
                 "finding_count": 0,
@@ -518,6 +596,7 @@ def affected_episode_rows(
         if not episode_findings:
             continue
         check_names = Counter(finding.get("check_name") or "unknown" for finding in episode_findings)
+        issue_titles = Counter(finding.get("issue_title_zh") or finding.get("check_name") or "unknown" for finding in episode_findings)
         severities = Counter(finding.get("severity") or "unknown" for finding in episode_findings)
         blocks_training = any(
             issue_action(finding.get("check_name") or "", config).get("blocks_training", True)
@@ -536,6 +615,7 @@ def affected_episode_rows(
                 "final_status_label": label_value("status_labels", episode.get("final_status") or "pending", config),
                 "issue_count": len(episode_findings),
                 "top_issues": counter_text(check_names, limit=6),
+                "top_issues_zh": counter_text(issue_titles, limit=6),
                 "severity_summary": counter_text(severities, limit=4),
                 "blocks_training": blocks_training,
                 "last_updated": episode.get("last_updated") or "",
@@ -557,6 +637,7 @@ def operator_issue_rows(
     finding_count_by_operator: Counter[str] = Counter()
     severity_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
     check_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
+    check_title_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
     task_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
     robot_by_operator: dict[str, Counter[str]] = defaultdict(Counter)
     blocking_paths_by_operator: dict[str, set[str]] = defaultdict(set)
@@ -577,6 +658,7 @@ def operator_issue_rows(
             finding_count_by_operator[operator] += 1
             severity_by_operator[operator].update([severity])
             check_by_operator[operator].update([check_name])
+            check_title_by_operator[operator].update([str(finding.get("issue_title_zh") or check_name)])
             if issue_action(check_name, config).get("blocks_training", True):
                 blocking_paths_by_operator[operator].add(episode_path)
 
@@ -596,6 +678,7 @@ def operator_issue_rows(
                 "finding_share_percent": percent_value(finding_count_by_operator[operator], total_findings),
                 "training_blocking_episode_count": len(blocking_paths_by_operator.get(operator, set())),
                 "top_issues": counter_text(check_by_operator[operator], limit=8),
+                "top_issues_zh": counter_text(check_title_by_operator[operator], limit=8),
                 "severity_summary": counter_text(severity_by_operator[operator], limit=4),
                 "top_tasks": counter_text(task_by_operator[operator], limit=5),
                 "top_robots": counter_text(robot_by_operator[operator], limit=5),
@@ -629,12 +712,40 @@ def operator_issue_episode_rows(
         for check_name, check_findings in findings_by_check.items():
             severities = Counter(str(finding.get("severity") or "unknown") for finding in check_findings)
             messages = sorted({str(finding.get("message") or "") for finding in check_findings if finding.get("message")})
+            messages_zh = sorted(
+                {str(finding.get("message_zh") or "") for finding in check_findings if finding.get("message_zh")}
+            )
+            detail_summaries_zh = sorted(
+                {
+                    str(finding.get("details_summary_zh") or "")
+                    for finding in check_findings
+                    if finding.get("details_summary_zh")
+                }
+            )
+            locations_zh = sorted(
+                {str(finding.get("location_zh") or "") for finding in check_findings if finding.get("location_zh")}
+            )
+            trigger_reasons_zh = sorted(
+                {
+                    str(finding.get("trigger_reason_zh") or "")
+                    for finding in check_findings
+                    if finding.get("trigger_reason_zh")
+                }
+            )
+            time_ranges_zh = sorted(
+                {
+                    str(finding.get("time_range_zh") or "")
+                    for finding in check_findings
+                    if finding.get("time_range_zh")
+                }
+            )
             action = issue_action(check_name, config)
             rows.append(
                 {
                     "operator": str(episode.get("operator") or "未填写"),
                     "check_name": check_name,
-                    "issue_label": action.get("label") or check_name,
+                    "issue_title_zh": issue_title_zh(check_name),
+                    "issue_label": action.get("label") or issue_title_zh(check_name),
                     "episode_path": episode_path,
                     "episode_name": Path(episode_path).name,
                     "task": episode.get("task") or "",
@@ -645,12 +756,185 @@ def operator_issue_episode_rows(
                     "finding_count": len(check_findings),
                     "severity_summary": counter_text(severities, limit=4),
                     "blocks_training": bool(action.get("blocks_training", True)),
+                    "messages_zh": " | ".join(messages_zh[:5]),
+                    "occurrence_zh": " | ".join(messages_zh[:5]),
+                    "trigger_reason_zh": " | ".join(trigger_reasons_zh[:5]),
+                    "details_summary_zh": " | ".join(detail_summaries_zh[:5]),
+                    "evidence_summary_zh": " | ".join(detail_summaries_zh[:5]),
+                    "locations_zh": "，".join(locations_zh[:8]),
+                    "time_ranges_zh": "，".join(time_ranges_zh[:8]),
+                    "recommended_action_zh": str(action.get("action") or ""),
                     "messages": " | ".join(messages[:5]),
                     "last_updated": episode.get("last_updated") or "",
                 }
             )
     rows.sort(key=lambda row: (row["operator"], row["check_name"], row["episode_path"]))
     return rows
+
+
+def operator_issue_breakdown_rows(
+    episodes: list[dict[str, Any]],
+    findings_by_episode: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Return stable operator/check counts for interactive report links."""
+    finding_counts: Counter[tuple[str, str]] = Counter()
+    episode_paths: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for episode in episodes:
+        operator = str(episode.get("operator") or "未填写")
+        episode_path = str(episode.get("episode_path") or "")
+        for finding in findings_by_episode.get(episode_path, []):
+            check_name = str(finding.get("check_name") or "unknown")
+            key = (operator, check_name)
+            finding_counts[key] += 1
+            episode_paths[key].add(episode_path)
+    rows = [
+        {
+            "operator": operator,
+            "check_name": check_name,
+            "issue_title_zh": issue_title_zh(check_name),
+            "finding_count": finding_count,
+            "affected_episode_count": len(episode_paths[(operator, check_name)]),
+        }
+        for (operator, check_name), finding_count in finding_counts.items()
+    ]
+    rows.sort(
+        key=lambda row: (
+            row["operator"],
+            -int(row["finding_count"]),
+            -int(row["affected_episode_count"]),
+            row["check_name"],
+        )
+    )
+    return rows
+
+
+def operator_issue_detail_rows(
+    episodes: list[dict[str, Any]],
+    findings_by_episode: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Snapshot complete localized finding evidence for historical drill-down."""
+    rows: list[dict[str, Any]] = []
+    for episode in episodes:
+        episode_path = str(episode.get("episode_path") or "")
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for finding in findings_by_episode.get(episode_path, []):
+            grouped[str(finding.get("check_name") or "unknown")].append(finding)
+        for check_name, findings in grouped.items():
+            finding_details = []
+            for finding in findings:
+                raw_details = parse_json_object(finding.get("details"))
+                presentation = finding_presentation_zh({**finding, "details": raw_details})
+                finding_details.append(
+                    {
+                        "phase": int(finding.get("phase") or 0),
+                        "severity": str(finding.get("severity") or "unknown"),
+                        "status": str(finding.get("status") or "unknown"),
+                        "occurrence_zh": str(presentation.get("occurrence_zh") or ""),
+                        "trigger_reason_zh": str(presentation.get("trigger_reason_zh") or ""),
+                        "location_zh": str(presentation.get("location_zh") or ""),
+                        "time_range_zh": str(presentation.get("time_range_zh") or ""),
+                        "evidence_summary_zh": str(presentation.get("evidence_summary_zh") or ""),
+                        "recommended_action_zh": str(presentation.get("recommended_action_zh") or ""),
+                        "original_message": str(finding.get("message") or ""),
+                        "details": raw_details,
+                    }
+                )
+            rows.append(
+                {
+                    "operator": str(episode.get("operator") or "未填写"),
+                    "check_name": check_name,
+                    "issue_title_zh": issue_title_zh(check_name),
+                    "episode_path": episode_path,
+                    "episode_name": Path(episode_path).name,
+                    "task": str(episode.get("task") or ""),
+                    "date": str(episode.get("date") or ""),
+                    "robot": str(episode.get("robot") or ""),
+                    "controller": str(episode.get("controller") or ""),
+                    "final_status": str(episode.get("final_status") or "pending"),
+                    "source_db": str(episode.get("source_db") or ""),
+                    "finding_count": len(finding_details),
+                    "findings": finding_details,
+                }
+            )
+    rows.sort(key=lambda row: (row["operator"], row["check_name"], row["episode_path"]))
+    return rows
+
+
+def device_failure_summary_rows(
+    episodes: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Group actionable QA failures by authoritative collector metadata."""
+    report_episode_paths = {str(row.get("episode_path") or "") for row in episodes}
+    collector_cache: dict[str, str] = {}
+    checks_by_collector: dict[str, Counter[str]] = defaultdict(Counter)
+    for finding in findings:
+        status = str(finding.get("status") or "").strip().lower().replace("-", "_")
+        episode_path = str(finding.get("episode_path") or "")
+        if status not in {"fail", "needs_review"} or episode_path not in report_episode_paths:
+            continue
+        collector_id = collector_id_for_episode(episode_path, collector_cache)
+        check_name = str(finding.get("check_name") or "unknown")
+        checks_by_collector[collector_id].update([check_name])
+
+    rows = []
+    for collector_id, check_counts in checks_by_collector.items():
+        total = sum(check_counts.values())
+        ordered_checks = sorted(check_counts.items(), key=lambda item: (-item[1], item[0]))
+        dominant_check_name, dominant_count = ordered_checks[0]
+        dominant_percent = round((dominant_count / total) * 100, 1)
+        rows.append(
+            {
+                "collector_id": collector_id,
+                "finding_count": total,
+                "check_name_counts": [
+                    {
+                        "check_name": check_name,
+                        "finding_count": count,
+                        "percent": round((count / total) * 100, 1),
+                    }
+                    for check_name, count in ordered_checks
+                ],
+                "check_name_counts_zh": [
+                    {
+                        "check_name": check_name,
+                        "issue_title_zh": issue_title_zh(check_name),
+                        "finding_count": count,
+                        "percent": round((count / total) * 100, 1),
+                    }
+                    for check_name, count in ordered_checks
+                ],
+                "dominant_check_name": dominant_check_name,
+                "dominant_issue_title_zh": issue_title_zh(dominant_check_name),
+                "dominant_check_count": dominant_count,
+                "dominant_percent": dominant_percent,
+                "hardware_issue_signal": dominant_percent > 70.0,
+            }
+        )
+    rows.sort(key=lambda row: (-row["finding_count"], row["collector_id"]))
+    return rows
+
+
+def collector_id_for_episode(episode_path: str, cache: dict[str, str] | None = None) -> str:
+    """Read collector_id from metadata, falling back to path only on read failure."""
+    lookup_cache = cache if cache is not None else {}
+    if episode_path in lookup_cache:
+        return lookup_cache[episode_path]
+
+    try:
+        with (Path(episode_path) / "metadata.json").open("r", encoding="utf-8") as file_obj:
+            metadata = json.load(file_obj)
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata.json must contain a JSON object")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        collector_id = collector_id_from_episode_path(episode_path) or "unknown_collector"
+    else:
+        raw_collector_id = metadata.get("collector_id")
+        collector_id = raw_collector_id.strip() if isinstance(raw_collector_id, str) else ""
+        collector_id = collector_id or "unknown_collector"
+
+    lookup_cache[episode_path] = collector_id
+    return collector_id
 
 
 def action_rows(core_issues: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -725,14 +1009,11 @@ def ordered_counter(counter: Counter[str], order: Sequence[str]) -> dict[str, in
 
 
 def write_report(output_root: Path, report: dict[str, Any], config: dict[str, Any]) -> Path:
-    start = parse_datetime(report["window"]["start"])
-    label = report["window"]["label"]
-    dirname = f"{start.strftime('%Y-%m-%d')}_{label}"
-    if report["window"]["key"] == "custom":
-        dirname = f"{start.strftime('%Y-%m-%d_%H%M')}_自定义"
-    output_dir = output_root / dirname
+    output_dir = output_root / report_directory_name(report)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    markdown = render_markdown(report, config)
+    report["rendered_html"] = render_markdown_html(markdown)
     (output_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_csv(output_dir / "核心问题汇总.csv", report["core_issues"])
     write_csv(output_dir / "检测规则说明.csv", report.get("rule_explanations", []))
@@ -740,8 +1021,16 @@ def write_report(output_root: Path, report: dict[str, Any], config: dict[str, An
     write_csv(output_dir / "采集人员问题episode索引.csv", report.get("operator_issue_episodes", []))
     write_csv(output_dir / "问题episode清单.csv", report["affected_episodes"])
     write_csv(output_dir / "处理建议.csv", report["suggested_actions"])
-    (output_dir / "半日质检报告.md").write_text(render_markdown(report, config), encoding="utf-8")
+    (output_dir / "半日质检报告.md").write_text(markdown, encoding="utf-8")
     return output_dir
+
+
+def report_directory_name(report: dict[str, Any]) -> str:
+    start = parse_datetime(report["window"]["start"])
+    label = report["window"]["label"]
+    if report["window"]["key"] == "custom":
+        return f"{start.strftime('%Y-%m-%d_%H%M')}_自定义"
+    return f"{start.strftime('%Y-%m-%d')}_{label}"
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -776,34 +1065,81 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
         "## 一、总体情况",
         "",
         f"- 本时段检查 episode：{summary['episode_count']} 条",
-        f"- 非通过 finding：{summary['finding_count']} 条",
+        f"- 非通过问题记录：{summary['finding_count']} 条",
         f"- 存在问题的 episode：{summary['issue_episode_count']} 条",
         f"- 影响训练可用的 episode：{summary['training_blocking_episode_count']} 条",
         f"- 状态分布：{status_line(status_counts, config)}",
         f"- 严重程度分布：{severity_line(severity_counts, config)}",
         "",
-        "## 二、采集人员问题占比",
+        "## 二、设备故障统计",
         "",
-        "说明：本节“主要问题”后括号内数字为该采集人员对应问题类型的 finding 条数；“问题 episode”按 episode 去重统计。",
+        "仅统计状态为“不通过”或“需要复查”的问题记录；设备按问题总数降序排列。",
         "",
     ]
+    device_failures = report.get("device_failure_summary") or []
+    if device_failures:
+        for row in device_failures:
+            lines.append(f"- `{row['collector_id']}`：{row['finding_count']} 条")
+    else:
+        lines.append("- 本时段暂无设备级失败或待复查问题记录。")
+    device_report_url = str(report.get("device_failure_report_url") or "")
+    if device_report_url:
+        lines.extend(["", f"[设备故障统计]({device_report_url})"])
+    lines.append("")
+    lines.extend(
+        [
+            "## 三、采集人员问题占比",
+            "",
+            "说明：本节同时展示每种问题的检测记录数和去重后的问题 episode 数。",
+            "",
+        ]
+    )
     operator_issues = report.get("operator_issues") or []
+    report_key = report_directory_name(report)
+    breakdown_by_operator: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for issue in report.get("operator_issue_breakdown") or []:
+        breakdown_by_operator[str(issue.get("operator") or "未填写")].append(issue)
     if operator_issues:
-        for row in operator_issues[:10]:
+        for row in operator_issues:
+            issue_links = []
+            for issue in breakdown_by_operator.get(str(row.get("operator") or "未填写"), []):
+                detail_query = urlencode(
+                    {
+                        "report": report_key,
+                        "operator": str(issue.get("operator") or "未填写"),
+                        "check_name": str(issue.get("check_name") or "unknown"),
+                    }
+                )
+                label = (
+                    f"{issue.get('issue_title_zh') or issue.get('check_name')} "
+                    f"({int(issue.get('finding_count') or 0)} 条问题记录 / "
+                    f"{int(issue.get('affected_episode_count') or 0)} 个问题 episode)"
+                )
+                issue_links.append(
+                    f"[{label}](/event-listener/work-session-report-issue.html?{detail_query})"
+                )
             lines.append(
                 f"- {row['operator']}：问题 episode {row['issue_episode_count']}/{row['episode_count']} "
                 f"({row['issue_rate_percent']})；占全部问题 episode {row['issue_episode_share_percent']}；"
-                f"finding {row['finding_count']} 条 ({row['finding_share_percent']})；"
-                f"主要问题：{row['top_issues'] or '未填写'}"
+                f"问题记录 {row['finding_count']} 条 ({row['finding_share_percent']})；"
+                f"主要问题：{'，'.join(issue_links) or row.get('top_issues_zh') or row['top_issues'] or '未填写'}"
             )
     else:
         lines.append("- 本时段暂无采集人员问题占比。")
+    if breakdown_by_operator:
+        lines.extend(
+            [
+                "",
+                "点击具体问题可查看问题含义、判定方法、检测阈值以及全部受影响 episode 和检测证据。",
+                "",
+            ]
+        )
     lines.extend(
         [
             "",
-            "可在附件 `采集人员问题episode索引.csv` 中按采集人员、问题类型或 episode 路径筛选具体问题位置。",
+            "可在附件 `采集人员问题episode索引.csv` 中按采集人员、问题类型、中文问题说明、问题位置或 episode 路径筛选具体问题。",
             "",
-            "## 三、检测规则与判定标准",
+            "## 四、检测规则与判定标准",
             "",
         ]
     )
@@ -832,7 +1168,7 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
         lines.append("")
     lines.extend(
         [
-            "## 四、核心问题",
+            "## 五、核心问题",
             "",
             "说明：本节“主要任务/主要机器人/主要采集人员”后括号内数字为该问题类型下的 finding 条数，不是去重 episode 数；去重 episode 数见“影响 episode 数”。",
             "",
@@ -871,7 +1207,7 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
         lines.append("")
 
     actions = report["suggested_actions"]
-    lines.extend(["## 五、处理建议", ""])
+    lines.extend(["## 六、处理建议", ""])
     if actions:
         owner_counts = Counter(action["owner"] for action in actions)
         lines.append(f"- 建议优先处理问题数：{len(actions)} 类")
@@ -886,19 +1222,91 @@ def render_markdown(report: dict[str, Any], config: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## 六、附件",
+            "## 七、附件",
             "",
             "- `核心问题汇总.csv`",
             "- `检测规则说明.csv`",
             "- `采集人员问题占比.csv`",
-            "- `采集人员问题episode索引.csv`",
-            "- `问题episode清单.csv`",
+            "- `采集人员问题episode索引.csv`（含中文问题说明、位置和证据摘要）",
+            "- `问题episode清单.csv`（含中文主要问题）",
             "- `处理建议.csv`",
             "- `report.json`",
             "",
         ]
     )
     return "\n".join(line for line in lines if line is not None) + "\n"
+
+
+def render_markdown_html(markdown: str) -> str:
+    """Safely render the Markdown subset emitted by this report generator."""
+    output = ['<article class="work-session-report">']
+    in_list = False
+    for raw_line in str(markdown or "").splitlines():
+        line = raw_line.rstrip()
+        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+        list_item = re.match(r"^\s*-\s+(.+)$", line)
+        if heading:
+            if in_list:
+                output.append("</ul>")
+                in_list = False
+            level = len(heading.group(1))
+            output.append(f"<h{level}>{_render_inline_markdown(heading.group(2))}</h{level}>")
+        elif list_item:
+            if not in_list:
+                output.append("<ul>")
+                in_list = True
+            output.append(f"<li>{_render_inline_markdown(list_item.group(1))}</li>")
+        elif line.startswith("> "):
+            if in_list:
+                output.append("</ul>")
+                in_list = False
+            output.append(f"<blockquote>{_render_inline_markdown(line[2:])}</blockquote>")
+        elif not line.strip():
+            if in_list:
+                output.append("</ul>")
+                in_list = False
+        else:
+            if in_list:
+                output.append("</ul>")
+                in_list = False
+            output.append(f"<p>{_render_inline_markdown(line)}</p>")
+    if in_list:
+        output.append("</ul>")
+    output.append("</article>")
+    return "\n".join(output)
+
+
+def _render_inline_markdown(value: str) -> str:
+    tokens: list[str] = []
+
+    def token(html_value: str) -> str:
+        tokens.append(html_value)
+        return f"\x00{len(tokens) - 1}\x00"
+
+    def code_replace(match: re.Match[str]) -> str:
+        return token(f"<code>{html_lib.escape(match.group(1), quote=False)}</code>")
+
+    def link_replace(match: re.Match[str]) -> str:
+        label = html_lib.escape(match.group(1), quote=False)
+        href = match.group(2).strip()
+        if not _safe_report_href(href):
+            return label
+        return token(f'<a href="{html_lib.escape(href, quote=True)}">{label}</a>')
+
+    protected = re.sub(r"`([^`]+)`", code_replace, str(value))
+    protected = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", link_replace, protected)
+    escaped = html_lib.escape(protected, quote=False)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    for index, html_value in enumerate(tokens):
+        escaped = escaped.replace(f"\x00{index}\x00", html_value)
+    return escaped
+
+
+def _safe_report_href(value: str) -> bool:
+    lowered = value.strip().lower()
+    if lowered.startswith("//"):
+        return False
+    return lowered.startswith(("/", "#", "https://", "http://"))
 
 
 def status_line(counts: dict[str, int], config: dict[str, Any]) -> str:

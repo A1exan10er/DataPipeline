@@ -50,8 +50,13 @@ VIEWS = ["left_wrist_view", "right_wrist_view"]
 # absolute threshold is independent of the source resolution.
 RESIZE = (256, 256)
 
-# Laplacian-variance threshold: below this a video is flagged as defocused.
+# Defocus thresholds. A single low Laplacian score is too aggressive on
+# low-texture scenes, so the default classifier also requires enough visible
+# edge/contrast evidence before declaring a wrist view defocused.
 DEFAULT_THRESHOLD = 350.0
+DEFAULT_LAP_P90_THRESHOLD = 450.0
+DEFAULT_EDGE_RATIO_MIN = 0.24
+DEFAULT_GRAY_STD_MIN = 68.0
 
 # Number of frames uniformly sampled from each video.
 DEFAULT_NUM_FRAMES = 20
@@ -74,7 +79,7 @@ def score_video(path, num_frames=DEFAULT_NUM_FRAMES):
         return {"error": "no frames"}
 
     idxs = np.linspace(0, total - 1, min(num_frames, total)).astype(int)
-    lap_scores, ten_scores = [], []
+    lap_scores, ten_scores, grad95_scores, edge_ratios, gray_stds = [], [], [], [], []
     for i in idxs:
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(i))
         ok, frame = cap.read()
@@ -85,7 +90,11 @@ def score_video(path, num_frames=DEFAULT_NUM_FRAMES):
         lap_scores.append(cv2.Laplacian(gray, cv2.CV_64F).var())
         gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        mag = np.sqrt(gx ** 2 + gy ** 2)
         ten_scores.append(float(np.mean(gx ** 2 + gy ** 2)))
+        grad95_scores.append(float(np.percentile(mag, 95)))
+        edge_ratios.append(float(np.mean(mag > 30)))
+        gray_stds.append(float(np.std(gray)))
     cap.release()
 
     if not lap_scores:
@@ -93,9 +102,35 @@ def score_video(path, num_frames=DEFAULT_NUM_FRAMES):
 
     return {
         "lap_var": float(np.median(lap_scores)),
+        "lap_var_p90": float(np.percentile(lap_scores, 90)),
         "tenengrad": float(np.median(ten_scores)),
+        "grad95": float(np.median(grad95_scores)),
+        "edge_ratio": float(np.median(edge_ratios)),
+        "gray_std": float(np.median(gray_stds)),
         "frames_scored": len(lap_scores),
     }
+
+
+def is_defocused(
+    metrics,
+    threshold=DEFAULT_THRESHOLD,
+    lap_p90_threshold=DEFAULT_LAP_P90_THRESHOLD,
+    edge_ratio_min=DEFAULT_EDGE_RATIO_MIN,
+    gray_std_min=DEFAULT_GRAY_STD_MIN,
+):
+    """Conservative focus classifier for wrist-view videos."""
+    lap_var = metrics.get("lap_var")
+    lap_p90 = metrics.get("lap_var_p90", lap_var)
+    edge_ratio = metrics.get("edge_ratio", 0.0)
+    gray_std = metrics.get("gray_std", 0.0)
+    return (
+        lap_var is not None
+        and lap_var < threshold
+        and lap_p90 is not None
+        and lap_p90 <= lap_p90_threshold
+        and edge_ratio >= edge_ratio_min
+        and gray_std >= gray_std_min
+    )
 
 
 def assess_one(task):
@@ -109,7 +144,7 @@ def assess_one(task):
             label="error", note=metrics["error"],
         )
         return result
-    is_blurry = metrics["lap_var"] < threshold
+    is_blurry = is_defocused(metrics, threshold=threshold)
     result.update(
         lap_var=round(metrics["lap_var"], 2),
         tenengrad=round(metrics["tenengrad"], 1),

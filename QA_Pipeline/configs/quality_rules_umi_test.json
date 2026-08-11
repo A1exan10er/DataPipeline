@@ -1,8 +1,10 @@
 {
   "phase6_umi_processing": {
     "enabled": true,
+    "profile": "full",
     "output_root": "qa_umi_test/umi_processed_strict",
     "suffix": "_w_world_base",
+    "video_only_suffix": "_video_aligned",
     "overwrite": true,
     "keep_intermediate": false,
     "skip_assessment": false,
@@ -17,7 +19,13 @@
     "max_tasks_per_child": 10,
     "video": {
       "ffmpeg_threads": 2,
-      "preprocess_preset": "veryfast"
+      "preprocess_preset": "veryfast",
+      "output_mode": "derived_copy",
+      "sidecar_filename": "video_rotated_180.mp4",
+      "orientation_correction": {
+        "observation.image.left_wrist_view": 180,
+        "observation.image.right_wrist_view": 180
+      }
     },
     "ik": {
       "robots": ["flexiv_rizon4"],

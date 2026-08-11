@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "description": "Manual trajectory labels for regression testing judgment/judge_trajectory.py. Add more entries to labels[] as new hand-labeled episodes become available.",
+  "labels": [
+    {
+      "id": "bag_covers_the_box_2026-06-14_umi_episode_0000_manual",
+      "episode_path": "~/data/samples/bag_covers_the_box/2026-06-14/umi/episode_0000",
+      "expected_trajectory_quality": false,
+      "expected_recoverable": false,
+      "notes": "User-provided manual labels: both arms contain abrupt jumps and sustained shaking.",
+      "segments": [
+        {
+          "side": "left",
+          "start_frame": 150,
+          "end_frame": 200,
+          "label": 1,
+          "type": "large_jump",
+          "min_coverage": 0.7
+        },
+        {
+          "side": "left",
+          "start_frame": 250,
+          "end_frame": 300,
+          "label": 1,
+          "type": "jitter_and_jump",
+          "min_coverage": 0.7
+        },
+        {
+          "side": "right",
+          "start_frame": 250,
+          "end_frame": 300,
+          "label": 1,
+          "type": "large_jump",
+          "min_coverage": 0.7
+        },
+        {
+          "side": "left",
+          "start_frame": 600,
+          "end_frame": 900,
+          "label": 1,
+          "type": "sustained_jitter",
+          "min_coverage": 0.7
+        },
+        {
+          "side": "right",
+          "start_frame": 600,
+          "end_frame": 900,
+          "label": 1,
+          "type": "sustained_jitter",
+          "min_coverage": 0.7
+        }
+      ]
+    },
+    {
+      "id": "wrap_the_usb_cable_2026-06-16_umi_episode_0031_recoverable",
+      "episode_path": "~/data/samples/wrap_the_usb_cable/2026-06-16/umi/episode_0031",
+      "expected_trajectory_quality": false,
+      "expected_recoverable": true,
+      "notes": "User-provided boundary sample: roughly good, but has local jitter; record as quality false and recoverable true.",
+      "segments": []
+    },
+    {
+      "id": "water_the_flowers_2026-06-13_umi_episode_0067_good",
+      "episode_path": "/home/ubuntu/data/samples/water_the_flowers/2026-06-13/umi/episode_0067",
+      "expected_trajectory_quality": true,
+      "expected_recoverable": false,
+      "notes": "User-provided good-quality trajectory.",
+      "segments": []
+    },
+    {
+      "id": "wipe_the_whiteboard_2026-06-16_umi_episode_0040_bad",
+      "episode_path": "/home/ubuntu/data/samples/wipe_the_whiteboard/2026-06-16/umi/episode_0040",
+      "expected_trajectory_quality": false,
+      "notes": "User-provided bad-quality trajectory.",
+      "segments": []
+    },
+    {
+      "id": "unfold_the_shopping_bag_then_fold_2026-06-17_umi_episode_0058_good",
+      "episode_path": "/home/ubuntu/data/samples/unfold_the_shopping_bag_then_fold/2026-06-17/umi/episode_0058",
+      "expected_trajectory_quality": true,
+      "expected_recoverable": false,
+      "notes": "User-provided good-quality trajectory.",
+      "segments": []
+    },
+    {
+      "id": "wipe_surfaces_all_good",
+      "episode_root": "~/data/samples/wipe_surfaces",
+      "expected_trajectory_quality": true,
+      "expected_recoverable": false,
+      "notes": "User-provided directory-level label: all episodes under this folder are quality true.",
+      "segments": []
+    },
+    {
+      "id": "underwear_roll_storage_2026-06-16_all_good",
+      "episode_root": "/home/ubuntu/data/samples/underwear_roll_storage/2026-06-16",
+      "expected_trajectory_quality": true,
+      "expected_recoverable": false,
+      "notes": "User-provided directory-level label: all episodes under this folder are quality true.",
+      "segments": []
+    },
+    {
+      "id": "wipe_the_pot_with_towel_2026-06-15_all_good",
+      "episode_root": "/home/ubuntu/data/samples/wipe_the_pot_with_towel/2026-06-15",
+      "expected_trajectory_quality": true,
+      "expected_recoverable": false,
+      "notes": "User-provided directory-level label: all episodes under this folder are quality true.",
+      "segments": []
+    },
+    {
+      "id": "thread_the_needle_2026-06-15_all_good",
+      "episode_root": "/home/ubuntu/data/samples/thread_the_needle/2026-06-15",
+      "expected_trajectory_quality": true,
+      "expected_recoverable": false,
+      "notes": "User-provided directory-level label: all episodes under this folder are quality true.",
+      "segments": []
+    },
+    {
+      "id": "stack_blocks_and_dismantle_2026-06-09_all_good",
+      "episode_root": "/home/ubuntu/data/samples/stack_blocks_and_dismantle/2026-06-09",
+      "expected_trajectory_quality": true,
+      "expected_recoverable": false,
+      "notes": "User-provided directory-level label: all episodes under this folder are quality true.",
+      "segments": []
+    },
+    {
+      "id": "stack_blocks_and_dismantle_2026-05-29_episode_0008_recoverable_bad",
+      "episode_path": "/home/ubuntu/data/samples/stack_blocks_and_dismantle/2026-05-29/umi/episode_0008",
+      "expected_trajectory_quality": false,
+      "expected_recoverable": true,
+      "notes": "User-provided label: quality false but recoverable true; main issue is left-arm jitter/abrupt change around frames 5250-5350.",
+      "segments": [
+        {
+          "side": "left",
+          "start_frame": 5250,
+          "end_frame": 5350,
+          "label": 1,
+          "type": "jitter_and_jump",
+          "min_coverage": 0.5
+        }
+      ]
+    },
+    {
+      "id": "stack_blocks_and_dismantle_2026-05-29_episode_0046_recoverable_bad",
+      "episode_path": "/home/ubuntu/data/samples/stack_blocks_and_dismantle/2026-05-29/umi/episode_0046",
+      "expected_trajectory_quality": false,
+      "expected_recoverable": true,
+      "notes": "User-provided label: quality false but recoverable true.",
+      "segments": []
+    },
+    {
+      "id": "put_plates_into_box_all_bad",
+      "episode_root": "/home/ubuntu/data/samples/put_plates_into_box",
+      "expected_trajectory_quality": false,
+      "expected_recoverable": false,
+      "notes": "User-provided class-level label: all episodes are quality false because the trajectories are mostly jitter and abrupt changes throughout.",
+      "segments": []
+    }
+  ]
+}

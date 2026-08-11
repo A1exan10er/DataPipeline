@@ -32,6 +32,10 @@ DEFAULT_MOUNT_PREFIX = "/mnt/nas/database/verified"
 DEFAULT_NAS_PREFIX = "/volume1/database/verified,/database/verified"
 DEFAULT_DC_ROOT = str(Path(__file__).resolve().parents[1] / "dcp-sdk")
 DEFAULT_QA_PYTHON = "datapipeline-env/bin/python3"
+DEFAULT_PHASES = "1,2,3,6,7"
+DEFAULT_PHASE6_PROFILE = "video_only"
+DEFAULT_PHASE6_VIDEO_OUTPUT_MODE = "sidecar"
+DEFAULT_PHASE6_SIDECAR_FILENAME = "video_rotated_180.mp4"
 
 PENDING_STATUSES = ("pending", "retry")
 RETENTION_MANIFEST = "retention_cleanup.jsonl"
@@ -558,6 +562,10 @@ def run_pipeline_for_jobs(
         command.append("--disable-live-monitor")
     if args.force_rerun:
         command.append("--force-rerun")
+    # Event jobs must execute every explicitly selected phase. In particular,
+    # an earlier QA failure must not prevent Phase 6 from creating UMI video
+    # sidecars and recording their completion receipt.
+    command.append("--continue-after-fail")
 
     command_path = job_output / "pipeline_command.json"
     command_path.write_text(json.dumps(command, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -565,29 +573,151 @@ def run_pipeline_for_jobs(
     with console_log.open("w", encoding="utf-8") as log:
         log.write(" ".join(command) + "\n\n")
         log.flush()
-        completed = subprocess.run(command, cwd=args.repo_root, stdout=log, stderr=subprocess.STDOUT)
+        child_env = os.environ.copy()
+        child_env.update(
+            {
+                "QA_PHASE6_PROFILE": args.phase6_profile,
+                "QA_PHASE6_VIDEO_OUTPUT_MODE": args.phase6_video_output_mode,
+                "QA_PHASE6_SIDECAR_FILENAME": args.phase6_sidecar_filename,
+            }
+        )
+        (job_output / "pipeline_environment.json").write_text(
+            json.dumps(
+                {
+                    key: child_env[key]
+                    for key in (
+                        "QA_PHASE6_PROFILE",
+                        "QA_PHASE6_VIDEO_OUTPUT_MODE",
+                        "QA_PHASE6_SIDECAR_FILENAME",
+                    )
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            command,
+            cwd=args.repo_root,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=child_env,
+        )
 
-    finish_job(
-        Path(args.job_db),
-        int(valid_jobs[0]["id"]),
-        status="done" if completed.returncode == 0 else "failed",
-        run_id=run_id,
-        output_dir=job_output,
-        db_path=qa_db,
-        error="" if completed.returncode == 0 else f"pipeline exit code {completed.returncode}",
+    completion_errors: dict[str, str] = {}
+    if completed.returncode == 0:
+        completion_errors = phase6_postcondition_errors(qa_db, episodes, args)
+    pipeline_error = (
+        "" if completed.returncode == 0 else f"pipeline exit code {completed.returncode}"
     )
-    for job in valid_jobs[1:]:
+    all_succeeded = True
+    for job, episode in zip(valid_jobs, episodes):
+        job_error = pipeline_error or completion_errors.get(str(episode.resolve()), "")
+        succeeded = not job_error
+        all_succeeded = all_succeeded and succeeded
         finish_job(
             Path(args.job_db),
             int(job["id"]),
-            status="done" if completed.returncode == 0 else "failed",
+            status="done" if succeeded else "failed",
             run_id=run_id,
             output_dir=job_output,
             db_path=qa_db,
-            error="" if completed.returncode == 0 else f"pipeline exit code {completed.returncode}",
+            error=job_error,
         )
     cleanup_event_outputs(args)
-    return completed.returncode == 0, str(console_log), len(valid_jobs)
+    return all_succeeded, str(console_log), len(valid_jobs)
+
+
+def phase6_postcondition_errors(
+    qa_db: Path,
+    episodes: list[Path],
+    args: argparse.Namespace,
+) -> dict[str, str]:
+    """Return Phase 6 postcondition errors keyed by resolved episode path."""
+    phases = {item.strip() for item in str(args.phases).split(",")}
+    if "6" not in phases:
+        return {}
+    if not qa_db.is_file():
+        message = f"Phase 6 postcondition failed: QA database is missing: {qa_db}"
+        return {str(episode.resolve()): message for episode in episodes}
+    with sqlite3.connect(qa_db) as conn:
+        rows = conn.execute("SELECT episode_path, metrics FROM episodes").fetchall()
+    metrics_by_path = {}
+    for episode_path, raw_metrics in rows:
+        try:
+            metrics_by_path[str(Path(str(episode_path)).resolve())] = json.loads(
+                raw_metrics or "{}"
+            )
+        except json.JSONDecodeError:
+            metrics_by_path[str(Path(str(episode_path)).resolve())] = {}
+
+    errors: dict[str, str] = {}
+    for episode in episodes:
+        resolved = str(episode.resolve())
+        metrics = metrics_by_path.get(resolved)
+        failure = ""
+        if metrics is None:
+            failure = f"missing QA state: {episode}"
+        else:
+            status = str(metrics.get("p6_umi_status") or "")
+            if status == "not_applicable":
+                continue
+            if status != "passed":
+                failure = f"Phase 6 status={status or '<missing>'}: {episode}"
+            elif args.phase6_profile == "video_only":
+                processed_episode = (
+                    episode
+                    if args.phase6_video_output_mode == "sidecar"
+                    else Path(str(metrics.get("p6_umi_data_path") or ""))
+                )
+                metadata_path = processed_episode / "metadata.json"
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    failure = (
+                        f"could not validate Phase 6 metadata receipt: {episode}: {exc}"
+                    )
+                if not failure:
+                    procedure = (
+                        "umi.video_orientation_sidecar"
+                        if args.phase6_video_output_mode == "sidecar"
+                        else "umi.video_orientation"
+                    )
+                    completed_procedures = (
+                        metadata.get("data_pipeline", {})
+                        .get("completed_procedures", {})
+                    )
+                    if procedure not in completed_procedures:
+                        failure = f"missing {procedure} receipt: {episode}"
+                if not failure and args.phase6_video_output_mode == "sidecar":
+                    for stream in (
+                        "observation.image.left_wrist_view",
+                        "observation.image.right_wrist_view",
+                    ):
+                        sidecar = episode / stream / args.phase6_sidecar_filename
+                        if not sidecar.is_file() or sidecar.stat().st_size <= 0:
+                            failure = f"missing rotated wrist sidecar: {sidecar}"
+                            break
+        if failure:
+            errors[resolved] = "Phase 6 postcondition failed: " + failure
+    return errors
+
+
+def phase6_postcondition_error(
+    qa_db: Path,
+    episodes: list[Path],
+    args: argparse.Namespace,
+) -> str:
+    """Require a successful Phase 6 status and receipt for UMI event jobs."""
+    errors = phase6_postcondition_errors(qa_db, episodes, args)
+    if not errors:
+        return ""
+    failures = [error.removeprefix("Phase 6 postcondition failed: ") for error in errors.values()]
+    preview = "; ".join(failures[:5])
+    if len(failures) > 5:
+        preview += f"; ... {len(failures) - 5} more"
+    return "Phase 6 postcondition failed: " + preview
 
 
 def cleanup_event_outputs(args: argparse.Namespace) -> None:
@@ -889,7 +1019,21 @@ def add_worker_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--qa-python", default=DEFAULT_QA_PYTHON)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--phases", default="1,2,3,7")
+    parser.add_argument("--phases", default=DEFAULT_PHASES)
+    parser.add_argument(
+        "--phase6-profile",
+        choices=("full", "video_only"),
+        default=DEFAULT_PHASE6_PROFILE,
+    )
+    parser.add_argument(
+        "--phase6-video-output-mode",
+        choices=("derived_copy", "sidecar"),
+        default=DEFAULT_PHASE6_VIDEO_OUTPUT_MODE,
+    )
+    parser.add_argument(
+        "--phase6-sidecar-filename",
+        default=DEFAULT_PHASE6_SIDECAR_FILENAME,
+    )
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument(
         "--batch-size",

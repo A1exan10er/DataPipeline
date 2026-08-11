@@ -15,6 +15,8 @@
   "modality_alignment_end": "不同模态（如图像/状态/动作）在结尾处帧数未对齐",
   "modality_folder_missing": "缺少预期的模态数据文件夹",
   "modality_frame_count_misaligned": "不同模态之间帧数不一致，可能导致数据错位",
+  "quality_label_unexpected": "采集标签不是“完全正常”或“测试任务”，先进入内部复核和重复问题统计",
+  "quality_labels_missing": "缺少采集质量标签，可能表示采集或标注流程未完成",
   "required_modality_file_empty": "必需的模态文件存在但内容为空",
   "task_device_reference_missing": "缺少任务对应的设备参考信息",
   "task_robot_mismatch": "记录的机械臂类型与任务配置不匹配",

@@ -70,6 +70,19 @@ python visualize_episode_w_world_base.py path/to/class
 python visualize_episode_w_world_base.py --no-open path/to/class/episode_0001
 ```
 
+### `visualize_gripper.py`
+Launches a local web viewer for checking gripper recovery against a wrist-view
+video. The video player, timeline slider, and `-1/+1 frame` buttons stay synced
+with two metric cards: original gripper width from
+`observation.state.gripper_original/data.csv` and repaired gripper width from
+`observation.state.gripper/data.csv`.
+
+```
+python visualize_gripper.py
+python visualize_gripper.py path/to/class
+python visualize_gripper.py --no-open --side left path/to/class/episode_0001
+```
+
 ### `add_embodied_absolute_offset.py`
 Copies an episode (or every episode in a class) into a new output directory
 and adds a fixed XYZ offset to the absolute TCP positions in

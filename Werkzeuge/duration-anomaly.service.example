@@ -1,0 +1,18 @@
+[Unit]
+Description=DataPipeline standalone episode-duration anomaly scan
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/xinzhi/DataPipeline
+ExecStart=/home/xinzhi/DataPipeline/datapipeline-env/bin/python Werkzeuge/check_unusual_episode_durations.py scan /mnt/nas/database/verified --db outputs/duration_anomalies/duration_anomalies.sqlite
+ExecStartPost=/home/xinzhi/DataPipeline/datapipeline-env/bin/python Werkzeuge/check_unusual_episode_durations.py report --db outputs/duration_anomalies/duration_anomalies.sqlite --output outputs/duration_anomalies/report.html
+ReadOnlyPaths=/mnt/nas/database/verified
+ReadWritePaths=/home/xinzhi/DataPipeline/outputs
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=default.target

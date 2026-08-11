@@ -116,6 +116,69 @@
       "automation": "人工复查",
       "blocks_training": true
     },
+    "duration_extreme_long": {
+      "label": "episode 时长极端过长",
+      "category": "采集质量",
+      "owner": "QA负责人",
+      "action": "结合相同任务和机器人组的时长分布复查采集过程及 episode 内容。",
+      "impact": "极端过长可能表示采集未及时停止、流程异常或包含大量无效片段。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "duration_training_limit_exceeded": {
+      "label": "非演示任务时长超过训练上限",
+      "category": "采集质量",
+      "owner": "QA负责人",
+      "action": "核对任务目录中的最大时长和演示任务标记；确认是否误录、未及时停止或确属后训练长任务。",
+      "impact": "显著超过任务时长上限的片段通常不适合常规预训练。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "operator_sustained_slow_motion": {
+      "label": "操作员持续低速运动",
+      "category": "操作质量",
+      "owner": "QA负责人",
+      "action": "结合 episode 轨迹、动作命令和任务要求复核持续低速区间，并与操作员沟通采集节奏。",
+      "impact": "持续极慢但非静止的动作会降低有效动作密度和采集效率。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "equipment_motion_response_slow": {
+      "label": "设备运动响应偏慢",
+      "category": "设备/控制链路",
+      "owner": "设备维护人员",
+      "action": "检查机械状态、控制器、网络与动作执行链路；修复后重新采集或复测。",
+      "impact": "动作命令正常但机器人响应偏慢，可能导致轨迹失真或采集效率下降。",
+      "automation": "设备排查后重跑",
+      "blocks_training": true
+    },
+    "slow_motion_cause_uncertain": {
+      "label": "持续低速原因不确定",
+      "category": "操作质量/设备",
+      "owner": "QA负责人",
+      "action": "补充或检查动作数据，并联合采集与设备人员复核，避免错误归因。",
+      "impact": "已检测到低速轨迹，但现有证据不足以区分操作因素与设备因素。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
+    "equipment_motion_response_stalled": {
+      "label": "设备运动响应停滞",
+      "category": "设备/控制链路",
+      "owner": "设备维护人员",
+      "action": "检查机器人、控制器和通讯链路为何未跟随正常动作命令。",
+      "impact": "设备停滞会产生无效轨迹并可能提示硬件或控制故障。",
+      "automation": "设备排查后重跑",
+      "blocks_training": true
+    },
+    "standstill_cause_uncertain": {
+      "label": "静止原因不确定",
+      "category": "操作质量/设备",
+      "owner": "QA负责人",
+      "action": "检查动作源完整性并人工回放静止区间，确认操作或设备原因。",
+      "impact": "长时间静止已发生，但不能在证据不足时归责给操作员。",
+      "automation": "人工复查",
+      "blocks_training": true
+    },
     "duration_under_5s": {
       "label": "episode 时长低于 5 秒",
       "category": "采集质量",

@@ -200,8 +200,6 @@ def _check_required_metadata_fields(state: EpisodeState) -> list[Finding]:
             findings.append(_missing_field_finding(state, field_name))
     if not _positive_fps(metadata):
         findings.append(_missing_field_finding(state, "fps_actual_or_fps_config"))
-    if "quality" not in metadata:
-        findings.append(_missing_field_finding(state, "quality"))
     return findings
 
 
@@ -710,17 +708,50 @@ def _check_required_modality_files(state: EpisodeState) -> list[Finding]:
 
 def _check_quality_labels(state: EpisodeState) -> list[Finding]:
     labels = _quality_labels(state.metadata)
-    if labels:
+    raw_settings = config_value(["phase1_metadata", "quality_labels"], {})
+    settings = raw_settings if isinstance(raw_settings, dict) else {}
+    normal_labels = set(_string_list_setting(settings, "normal_labels", ["完全正常"]))
+    allowed_non_error_labels = set(_string_list_setting(settings, "allowed_non_error_labels", ["测试任务"]))
+
+    if not labels:
+        return [
+            _finding(
+                state,
+                "quality_labels_missing",
+                "major",
+                str(settings.get("missing_status") or "fail"),
+                "quality.labels is missing or empty; the episode label step did not complete.",
+                {"labels": labels},
+            )
+        ]
+
+    if normal_labels.intersection(labels) or allowed_non_error_labels.intersection(labels):
         return []
+
     return [
         _finding(
             state,
-            "quality_labels_missing",
+            "quality_label_unexpected",
             "minor",
-            "warning",
-            "quality.labels must be a non-empty list.",
+            str(settings.get("unexpected_status") or "needs_review"),
+            "quality.labels does not contain a normal or allowed non-error label.",
+            {
+                "labels": labels,
+                "normal_labels": sorted(normal_labels),
+                "allowed_non_error_labels": sorted(allowed_non_error_labels),
+            },
         )
     ]
+
+
+def _string_list_setting(settings: Any, key: str, default: list[str]) -> list[str]:
+    if not isinstance(settings, dict):
+        return default
+    value = settings.get(key)
+    if not isinstance(value, list):
+        return default
+    labels = [item for item in value if isinstance(item, str) and item]
+    return labels or default
 
 
 def _finish_state(state: EpisodeState, db_path: Path, new_findings: list[Finding]) -> None:

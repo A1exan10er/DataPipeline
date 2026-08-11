@@ -11,6 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from scripts.pipeline.issue_messages_zh import (
+    collector_id_from_episode_path,
+    enrich_details_for_notification,
+    notification_message_zh,
+    recommended_action_zh,
+)
 from scripts.pipeline.qa_config import config_value
 
 
@@ -103,6 +109,7 @@ class DcsIssueNotifier:
     def _payload(self, event: dict[str, Any]) -> dict[str, Any]:
         episode_path = str(event.get("episode_path") or "")
         details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        localized_event = {**event, "details": details}
         payload = {
             "event_schema": "qa_episode_abnormal_detected.v1",
             "event_key": self._event_key(event),
@@ -120,11 +127,11 @@ class DcsIssueNotifier:
             "check_name": event.get("check_name") or "",
             "severity": event.get("severity") or "",
             "status": event.get("status") or "",
-            "message": event.get("message") or "",
-            "details": details,
+            "message": notification_message_zh(localized_event),
+            "details": enrich_details_for_notification(localized_event),
             "detected_at": event.get("recorded_at") or _now(),
             "source": "qa_pipeline",
-            "recommended_action": recommended_action(event),
+            "recommended_action": recommended_action_zh(localized_event),
         }
         return payload
 
@@ -178,23 +185,8 @@ class DcsIssueNotifier:
             file_obj.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def collector_id_from_episode_path(path: str) -> str:
-    for part in Path(path).parts:
-        if part.startswith("collector-"):
-            return part
-    return ""
-
-
 def recommended_action(event: dict[str, Any]) -> str:
-    status = str(event.get("status") or "").lower()
-    check_name = str(event.get("check_name") or "")
-    if status == "fail":
-        return "Please inspect this episode and consider recollecting it before continuing the same task."
-    if check_name in {"standstill_segment", "excessive_standstill"}:
-        return "Please remind the operator to avoid long pauses during collection."
-    if check_name in {"abnormal_fps_loss", "frame_drop_ratio"}:
-        return "Please check camera/network load and recollect if video quality is important."
-    return "Please inspect this episode in the QA dashboard."
+    return recommended_action_zh(event)
 
 
 def _config_bool(key: str, default: bool) -> bool:

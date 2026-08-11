@@ -7,8 +7,10 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Callable
 import importlib
+import hashlib
 import json
 import os
+import stat
 import shlex
 import shutil
 import sys
@@ -28,7 +30,25 @@ from scripts.pipeline.qa_core import (
 
 PHASE_NUMBER = 6
 DEFAULT_SUFFIX = "_w_world_base"
+DEFAULT_VIDEO_ONLY_SUFFIX = "_video_aligned"
 SCHEMA_VERSION = 1
+PROCEDURE_SCHEMA_VERSION = 1
+VIDEO_ORIENTATION_PROCEDURE = "umi.video_orientation"
+VIDEO_ORIENTATION_SIDECAR_PROCEDURE = "umi.video_orientation_sidecar"
+RAW_ASSESSMENT_PROCEDURE = "umi.raw_data_assessment"
+TRAJECTORY_GATE_PROCEDURE = "umi.trajectory_gate"
+TRAJECTORY_PREPROCESS_PROCEDURE = "umi.trajectory_preprocess"
+WORLD_BASE_PROCEDURE = "umi.world_base_pose_transform"
+EXECUTABILITY_PROCEDURE = "umi.executability"
+PROCEDURE_VERSIONS = {
+    VIDEO_ORIENTATION_PROCEDURE: 2,
+    VIDEO_ORIENTATION_SIDECAR_PROCEDURE: 2,
+    RAW_ASSESSMENT_PROCEDURE: 1,
+    TRAJECTORY_GATE_PROCEDURE: 1,
+    TRAJECTORY_PREPROCESS_PROCEDURE: 1,
+    WORLD_BASE_PROCEDURE: 1,
+    EXECUTABILITY_PROCEDURE: 1,
+}
 _WORKER_CONTEXT: dict[str, Any] | None = None
 _WORKER_SETTINGS: dict[str, Any] | None = None
 
@@ -40,9 +60,13 @@ def run_phase(
     workers: int = 1,
 ) -> list[EpisodeState]:
     """Run UMI-specific validation and derived-data export for unfinished episodes."""
-    pending = [state for state in states if PHASE_NUMBER not in state.phases_completed]
-    total = len(pending)
     settings = _settings()
+    pending = [
+        state
+        for state in states
+        if PHASE_NUMBER not in state.phases_completed or needs_run(state, settings)
+    ]
+    total = len(pending)
     _apply_runtime_env(settings)
     modules = _load_umi_modules(load_executability=settings["run_executability"])
     context = _build_context(modules, settings)
@@ -187,7 +211,14 @@ def validate_dependencies() -> None:
         _load_umi_modules()
     except Exception as exc:  # noqa: BLE001 - convert import/setup errors to pipeline config errors
         raise PipelineConfigurationError(f"Could not load DataProcessUMI modules: {exc}") from exc
-    if bool(config_value(["phase6_umi_processing", "run_executability"], False)):
+    if (
+        str(
+            os.environ.get("QA_PHASE6_PROFILE")
+            or config_value(["phase6_umi_processing", "profile"], "full")
+        )
+        == "full"
+        and bool(config_value(["phase6_umi_processing", "run_executability"], False))
+    ):
         try:
             importlib.import_module("pinocchio")
             modules = _load_umi_modules(load_executability=True)
@@ -258,10 +289,26 @@ def _episode_findings(state: EpisodeState, context: dict[str, Any], settings: di
             "p6_umi_report_path": result.get("report_path") or "",
             "p6_umi_trajectory_gate": result.get("trajectory_gate") or {},
             "p6_umi_executability": result.get("executability") or {},
+            "p6_umi_profile": settings["profile"],
+            "p6_umi_requested_procedures": result.get("requested_procedures") or [],
+            "p6_umi_executed_procedures": result.get("executed_procedures") or [],
+            "p6_umi_skipped_procedures": result.get("skipped_procedures") or [],
         }
     )
     if status == "passed":
-        state.training_ready = True
+        if settings["profile"] == "full":
+            state.training_ready = True
+        if settings["profile"] == "video_only":
+            return [
+                _finding(
+                    state,
+                    "umi_video_orientation_passed",
+                    "info",
+                    "pass",
+                    "UMI wrist videos were normalized to the configured orientation.",
+                    result,
+                )
+            ]
         operations = result.get("operations") or []
         if operations and operations != ["passthrough"]:
             return [
@@ -319,7 +366,134 @@ def _episode_findings(state: EpisodeState, context: dict[str, Any], settings: di
     ]
 
 
+def _process_video_only_episode(
+    state: EpisodeState,
+    context: dict[str, Any],
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    vrd = context["modules"]["vrd"]
+    tf = context["modules"]["tf"]
+    source_episode = state.episode_path.resolve()
+    sidecar_mode = settings["video"]["output_mode"] == "sidecar"
+    destination = (
+        source_episode
+        if sidecar_mode
+        else _profile_destination(state, context, settings, "video_only")
+    )
+    if not sidecar_mode:
+        # Check containment first; existing valid outputs are handled as
+        # resumable procedure state rather than as a generic overwrite.
+        _ensure_safe_output(context["output_root"], destination, overwrite=True)
+    rotations = settings["video"]["orientation_correction"]
+    procedure = (
+        VIDEO_ORIENTATION_SIDECAR_PROCEDURE
+        if sidecar_mode
+        else VIDEO_ORIENTATION_PROCEDURE
+    )
+    procedure_config = _procedure_config(procedure, settings, context)
+    expected_outputs = _procedure_outputs(procedure, settings)
+    requested = [procedure]
+
+    if _procedure_complete(
+        destination,
+        procedure,
+        procedure_config,
+        expected_outputs,
+    ):
+        executed: list[str] = []
+        skipped = requested.copy()
+    else:
+        if not sidecar_mode and destination.exists() and not settings["overwrite"]:
+            raise FileExistsError(
+                "UMI video-only output exists but its procedure receipt is missing or stale; "
+                f"enable overwrite to rebuild it: {destination}"
+            )
+        if sidecar_mode:
+            rotated = tf.rotate_wrist_videos_to_sidecars(
+                source_episode,
+                rotations,
+                settings["video"]["sidecar_filename"],
+            )
+            _record_procedure(
+                source_episode,
+                procedure,
+                procedure_config,
+                rotated,
+                source_episode,
+            )
+            tf.recompute_checksum_manifest(source_episode)
+        else:
+            staging = destination.with_name(f".{destination.name}.video-orientation.tmp-{os.getpid()}")
+            if staging.exists():
+                shutil.rmtree(staging)
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            resume_source = (
+                destination
+                if destination.exists() and _recorded_source(destination) is not None
+                else source_episode
+            )
+            _validate_resume_source(resume_source, source_episode)
+            shutil.copytree(resume_source, staging)
+            try:
+                rotated = tf.rotate_wrist_videos(staging, rotations)
+                _record_procedure(
+                    staging,
+                    procedure,
+                    procedure_config,
+                    rotated,
+                    source_episode,
+                )
+                tf.recompute_checksum_manifest(staging)
+                _publish_directory(staging, destination)
+            finally:
+                if staging.exists():
+                    shutil.rmtree(staging)
+        executed = requested.copy()
+        skipped = []
+
+    generated_at = vrd.now_utc_iso()
+    report_path = (
+        context["report_root"]
+        / _report_rel_dir(state)
+        / f"{state.episode_path.name}.json"
+    )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "type": "qa_pipeline_umi_episode_report",
+        "generated_at": generated_at,
+        "class_name": _task_name(state),
+        "episode": state.episode_path.name,
+        "source_path": str(source_episode),
+        "status": "passed",
+        "profile": "video_only",
+        "video_output_mode": settings["video"]["output_mode"],
+        "data_path": str(destination),
+        "requested_procedures": requested,
+        "executed_procedures": executed,
+        "skipped_procedures": skipped,
+    }
+    vrd.write_json_report(report_path, payload)
+    return {
+        "status": "passed",
+        "failed_stage": None,
+        "reason": None,
+        "label": None,
+        "category": None,
+        "operations": requested,
+        "requested_procedures": requested,
+        "executed_procedures": executed,
+        "skipped_procedures": skipped,
+        "data_path": str(destination),
+        "report_path": str(report_path),
+        "trajectory_gate": None,
+        "executability": None,
+    }
+
+
 def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    if settings["profile"] == "video_only":
+        return _process_video_only_episode(state, context, settings)
+
     modules = context["modules"]
     vrd = modules["vrd"]
     pp = modules["pp"]
@@ -342,6 +516,62 @@ def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings:
     failed_stage = None
     reason = None
     data_path = None
+    requested_procedures = _requested_procedures(settings)
+    executed_procedures: list[str] = []
+    skipped_procedures: list[str] = []
+    destination = _profile_destination(state, context, settings, "full")
+
+    if all(
+        _procedure_complete(
+            destination,
+            procedure,
+            _procedure_config(procedure, settings, context),
+            _procedure_outputs(procedure, settings),
+        )
+        for procedure in requested_procedures
+    ):
+        data_path = str(destination)
+        status = "passed"
+        skipped_procedures = requested_procedures.copy()
+        payload = _combined_report_payload(
+            state,
+            task_name,
+            status,
+            None,
+            None,
+            None,
+            (False, [], []),
+            None,
+            None,
+            None,
+            None,
+            data_path,
+            generated_at,
+        )
+        payload.update(
+            {
+                "profile": "full",
+                "requested_procedures": requested_procedures,
+                "executed_procedures": [],
+                "skipped_procedures": skipped_procedures,
+            }
+        )
+        vrd.write_json_report(report_path, payload)
+        return {
+            "status": status,
+            "failed_stage": None,
+            "reason": None,
+            "label": None,
+            "category": None,
+            "operations": [],
+            "requested_procedures": requested_procedures,
+            "executed_procedures": [],
+            "skipped_procedures": skipped_procedures,
+            "data_path": data_path,
+            "report_path": str(report_path),
+            "trajectory_gate": None,
+            "executability": None,
+        }
 
     if settings["trajectory_first_gate"]:
         trajectory_gate = _trajectory_gate(sa, episode_dir, context["smooth_config"], settings)
@@ -364,10 +594,17 @@ def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings:
         failed_stage = "assessment"
         reason = "assessment failed: " + ", ".join(gate[1])
     else:
+        preprocess_source = _full_resume_source(state, context, settings)
+        preprocess_source, sidecar_materialized = _materialize_sidecar_input(
+            state,
+            preprocess_source,
+            context,
+            settings,
+        )
         cleaned_ep = context["work_root"] / "preprocess" / rel_report_dir / episode_name
         cleaned_ep.parent.mkdir(parents=True, exist_ok=True)
         pre_record = pp.process_episode(
-            episode_dir,
+            preprocess_source,
             cleaned_ep,
             context["pre_config"],
             context["smooth_config"],
@@ -387,12 +624,93 @@ def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings:
             failed_stage = "preprocess"
             reason = pre_record.get("error") or "unrecoverable trajectory"
         else:
-            dest_ep = context["data_root"] / _data_rel_dir(state, settings["suffix"]) / episode_name
+            dest_ep = destination
             _ensure_safe_output(context["output_root"], dest_ep, settings["overwrite"])
-            tf_record = tf.transform_episode(cleaned_ep, dest_ep, context["tf_config"])
+            video_config = _procedure_config(VIDEO_ORIENTATION_PROCEDURE, settings, context)
+            video_outputs = _procedure_outputs(VIDEO_ORIENTATION_PROCEDURE, settings)
+            video_already_done = sidecar_materialized or _procedure_complete(
+                cleaned_ep,
+                VIDEO_ORIENTATION_PROCEDURE,
+                video_config,
+                video_outputs,
+            )
+            tf_record = tf.transform_episode(
+                cleaned_ep,
+                dest_ep,
+                context["tf_config"],
+                rotate_videos=False,
+            )
+            _record_procedure(
+                dest_ep,
+                TRAJECTORY_PREPROCESS_PROCEDURE,
+                _procedure_config(TRAJECTORY_PREPROCESS_PROCEDURE, settings, context),
+                _procedure_outputs(TRAJECTORY_PREPROCESS_PROCEDURE, settings),
+                episode_dir,
+            )
+            if video_already_done:
+                skipped_procedures.append(VIDEO_ORIENTATION_PROCEDURE)
+                if sidecar_materialized:
+                    _record_procedure(
+                        dest_ep,
+                        VIDEO_ORIENTATION_PROCEDURE,
+                        video_config,
+                        video_outputs,
+                        episode_dir,
+                    )
+            else:
+                rotated_videos = tf.rotate_wrist_videos(
+                    dest_ep,
+                    settings["video"]["orientation_correction"],
+                )
+                tf_record["rotated_videos"] = rotated_videos
+                _record_procedure(
+                    dest_ep,
+                    VIDEO_ORIENTATION_PROCEDURE,
+                    video_config,
+                    rotated_videos,
+                    episode_dir,
+                )
+                executed_procedures.append(VIDEO_ORIENTATION_PROCEDURE)
+            _record_procedure(
+                dest_ep,
+                WORLD_BASE_PROCEDURE,
+                _procedure_config(WORLD_BASE_PROCEDURE, settings, context),
+                tf_record.get("transformed_files") or [],
+                episode_dir,
+            )
+            executed_procedures.extend(
+                [TRAJECTORY_PREPROCESS_PROCEDURE, WORLD_BASE_PROCEDURE]
+            )
+            if settings["trajectory_first_gate"]:
+                _record_procedure(
+                    dest_ep,
+                    TRAJECTORY_GATE_PROCEDURE,
+                    _procedure_config(TRAJECTORY_GATE_PROCEDURE, settings, context),
+                    [],
+                    episode_dir,
+                )
+                executed_procedures.append(TRAJECTORY_GATE_PROCEDURE)
+            if assess is not None:
+                _record_procedure(
+                    dest_ep,
+                    RAW_ASSESSMENT_PROCEDURE,
+                    _procedure_config(RAW_ASSESSMENT_PROCEDURE, settings, context),
+                    [],
+                    episode_dir,
+                )
+                executed_procedures.append(RAW_ASSESSMENT_PROCEDURE)
             if settings["run_executability"]:
                 exec_out = context["report_root"] / rel_report_dir / episode_name / "executability"
                 exec_record = _run_executability(modules, settings, dest_ep, exec_out)
+                _record_procedure(
+                    dest_ep,
+                    EXECUTABILITY_PROCEDURE,
+                    _procedure_config(EXECUTABILITY_PROCEDURE, settings, context),
+                    [],
+                    episode_dir,
+                )
+                executed_procedures.append(EXECUTABILITY_PROCEDURE)
+            tf.recompute_checksum_manifest(dest_ep)
             status = "passed"
             data_path = str(dest_ep)
 
@@ -411,10 +729,22 @@ def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings:
         data_path,
         generated_at,
     )
+    payload.update(
+        {
+            "profile": "full",
+            "requested_procedures": requested_procedures,
+            "executed_procedures": executed_procedures,
+            "skipped_procedures": skipped_procedures,
+        }
+    )
     vrd.write_json_report(report_path, payload)
 
     if not settings["keep_intermediate"]:
         shutil.rmtree(context["work_root"] / "preprocess" / rel_report_dir / episode_name, ignore_errors=True)
+        shutil.rmtree(
+            context["work_root"] / "orientation_input" / rel_report_dir / episode_name,
+            ignore_errors=True,
+        )
 
     return {
         "status": status,
@@ -423,6 +753,9 @@ def _process_umi_episode(state: EpisodeState, context: dict[str, Any], settings:
         "label": pre_record.get("label") if pre_record else None,
         "category": pre_record.get("category") if pre_record else None,
         "operations": pre_record.get("operations") if pre_record else None,
+        "requested_procedures": requested_procedures,
+        "executed_procedures": executed_procedures,
+        "skipped_procedures": skipped_procedures,
         "data_path": data_path,
         "report_path": str(report_path),
         "trajectory_gate": trajectory_gate,
@@ -437,11 +770,20 @@ def _build_context(modules: dict[str, Any], settings: dict[str, Any]) -> dict[st
     work_root = output_root / ".work"
 
     vrd = modules["vrd"]
+    if settings["profile"] == "video_only":
+        return {
+            "modules": modules,
+            "output_root": output_root,
+            "data_root": data_root,
+            "report_root": report_root,
+            "work_root": work_root,
+        }
+
     pp = modules["pp"]
     sa = modules["sa"]
     tf = modules["tf"]
     assess_args = None
-    if not settings["skip_assessment"]:
+    if settings["profile"] == "full" and not settings["skip_assessment"]:
         assess_args = vrd.parse_args(settings["assessment_args"].split() if settings["assessment_args"] else [])
         if settings["fps"] is not None:
             assess_args.fps = settings["fps"]
@@ -468,6 +810,14 @@ def _build_context(modules: dict[str, Any], settings: dict[str, Any]) -> dict[st
 
 
 def _settings() -> dict[str, Any]:
+    profile = str(
+        os.environ.get("QA_PHASE6_PROFILE")
+        or config_value(["phase6_umi_processing", "profile"], "full")
+    )
+    if profile not in {"full", "video_only"}:
+        raise PipelineConfigurationError(
+            f"Unsupported phase6_umi_processing.profile: {profile!r}; expected 'full' or 'video_only'."
+        )
     repaired_status = str(config_value(["phase6_umi_processing", "status_for_repaired"], "warning"))
     if repaired_status not in {"pass", "warning", "needs_review", "fail"}:
         repaired_status = "warning"
@@ -481,10 +831,47 @@ def _settings() -> dict[str, Any]:
     ffmpeg_threads = video_config.get("ffmpeg_threads", 2)
     if ffmpeg_threads is not None:
         ffmpeg_threads = max(1, int(ffmpeg_threads))
+    rotations = video_config.get(
+        "orientation_correction",
+        {
+            "observation.image.left_wrist_view": 180,
+            "observation.image.right_wrist_view": 180,
+        },
+    )
+    if not isinstance(rotations, dict) or not rotations:
+        raise PipelineConfigurationError("Phase 6 video orientation_correction must be a non-empty object.")
+    rotations = {str(name): int(degrees) for name, degrees in rotations.items()}
+    unsupported = {name: degrees for name, degrees in rotations.items() if degrees not in (0, 180)}
+    if unsupported:
+        raise PipelineConfigurationError(
+            f"Phase 6 currently supports only 0/180-degree video rotations: {unsupported}"
+        )
+    video_output_mode = str(
+        os.environ.get("QA_PHASE6_VIDEO_OUTPUT_MODE")
+        or video_config.get("output_mode", "derived_copy")
+    )
+    if video_output_mode not in {"derived_copy", "sidecar"}:
+        raise PipelineConfigurationError(
+            "Phase 6 video output_mode must be 'derived_copy' or 'sidecar'."
+        )
+    sidecar_filename = str(
+        os.environ.get("QA_PHASE6_SIDECAR_FILENAME")
+        or video_config.get("sidecar_filename", "video_rotated_180.mp4")
+    )
+    if not sidecar_filename or Path(sidecar_filename).name != sidecar_filename:
+        raise PipelineConfigurationError("Phase 6 video sidecar_filename must be a plain filename.")
     return {
+        "profile": profile,
         "enabled": bool(config_value(["phase6_umi_processing", "enabled"], True)),
         "output_root": config_value(["phase6_umi_processing", "output_root"], "outputs/umi_processed"),
         "suffix": str(config_value(["phase6_umi_processing", "suffix"], DEFAULT_SUFFIX) or DEFAULT_SUFFIX),
+        "video_only_suffix": str(
+            config_value(
+                ["phase6_umi_processing", "video_only_suffix"],
+                DEFAULT_VIDEO_ONLY_SUFFIX,
+            )
+            or DEFAULT_VIDEO_ONLY_SUFFIX
+        ),
         "overwrite": bool(config_value(["phase6_umi_processing", "overwrite"], True)),
         "keep_intermediate": bool(config_value(["phase6_umi_processing", "keep_intermediate"], False)),
         "skip_assessment": bool(config_value(["phase6_umi_processing", "skip_assessment"], False)),
@@ -497,7 +884,8 @@ def _settings() -> dict[str, Any]:
             for item in config_value(["phase6_umi_processing", "trajectory_pass_labels"], ["smooth"])
         ],
         "trajectory_nonpass_status": trajectory_nonpass_status,
-        "run_executability": bool(config_value(["phase6_umi_processing", "run_executability"], False)),
+        "run_executability": profile == "full"
+        and bool(config_value(["phase6_umi_processing", "run_executability"], False)),
         "max_concurrent_episodes": int(
             config_value(["phase6_umi_processing", "max_concurrent_episodes"], 1)
         ),
@@ -516,6 +904,9 @@ def _settings() -> dict[str, Any]:
         },
         "video": {
             "ffmpeg_threads": ffmpeg_threads,
+            "orientation_correction": rotations,
+            "output_mode": video_output_mode,
+            "sidecar_filename": sidecar_filename,
             "preprocess_preset": (
                 None
                 if video_config.get("preprocess_preset") in (None, "")
@@ -534,6 +925,337 @@ def _settings() -> dict[str, Any]:
         "smooth_config": _optional_path(config_value(["phase6_umi_processing", "smooth_config"], None)),
         "transform_config": _optional_path(config_value(["phase6_umi_processing", "transform_config"], None)),
     }
+
+
+def _requested_procedures(settings: dict[str, Any]) -> list[str]:
+    if settings["profile"] == "video_only":
+        if settings["video"]["output_mode"] == "sidecar":
+            return [VIDEO_ORIENTATION_SIDECAR_PROCEDURE]
+        return [VIDEO_ORIENTATION_PROCEDURE]
+    procedures = []
+    if not settings["skip_assessment"]:
+        procedures.append(RAW_ASSESSMENT_PROCEDURE)
+    if settings["trajectory_first_gate"]:
+        procedures.append(TRAJECTORY_GATE_PROCEDURE)
+    procedures.extend(
+        [
+            TRAJECTORY_PREPROCESS_PROCEDURE,
+            VIDEO_ORIENTATION_PROCEDURE,
+            WORLD_BASE_PROCEDURE,
+        ]
+    )
+    if settings["run_executability"]:
+        procedures.append(EXECUTABILITY_PROCEDURE)
+    return procedures
+
+
+def _procedure_config(
+    procedure: str,
+    settings: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    if procedure == VIDEO_ORIENTATION_PROCEDURE:
+        return {
+            "rotations_degrees": settings["video"]["orientation_correction"],
+            "output": "canonical_video",
+            "encoding": "preserve_source_stream_format_v1",
+            "encoder_preset": settings["video"].get("preprocess_preset", "veryfast"),
+            "encoder_threads": settings["video"].get("ffmpeg_threads", 2),
+        }
+    if procedure == VIDEO_ORIENTATION_SIDECAR_PROCEDURE:
+        return {
+            "rotations_degrees": settings["video"]["orientation_correction"],
+            "output": "sidecar",
+            "sidecar_filename": settings["video"]["sidecar_filename"],
+            "encoding": "preserve_source_stream_format_v1",
+            "encoder_preset": settings["video"].get("preprocess_preset", "veryfast"),
+            "encoder_threads": settings["video"].get("ffmpeg_threads", 2),
+        }
+    if procedure == RAW_ASSESSMENT_PROCEDURE:
+        return {"assessment_args": settings["assessment_args"], "fps": settings["fps"]}
+    if procedure == TRAJECTORY_GATE_PROCEDURE:
+        return {
+            "smooth_config": context["smooth_config"],
+            "pass_labels": settings["trajectory_pass_labels"],
+            "fps": settings["fps"],
+        }
+    if procedure == TRAJECTORY_PREPROCESS_PROCEDURE:
+        return {
+            "preprocess_config": context["pre_config"],
+            "smooth_config": context["smooth_config"],
+            "fps": settings["fps"],
+        }
+    if procedure == WORLD_BASE_PROCEDURE:
+        return {"transform_config": context["tf_config"]}
+    if procedure == EXECUTABILITY_PROCEDURE:
+        return {"ik": settings["ik"]}
+    raise KeyError(f"Unknown UMI procedure: {procedure}")
+
+
+def _procedure_outputs(procedure: str, settings: dict[str, Any]) -> list[str]:
+    if procedure == VIDEO_ORIENTATION_PROCEDURE:
+        return _video_output_paths(settings["video"]["orientation_correction"])
+    if procedure == VIDEO_ORIENTATION_SIDECAR_PROCEDURE:
+        return _video_output_paths(
+            settings["video"]["orientation_correction"],
+            settings["video"]["sidecar_filename"],
+        )
+    if procedure in {TRAJECTORY_PREPROCESS_PROCEDURE, WORLD_BASE_PROCEDURE}:
+        return [
+            "actions.eef_pose/data.csv",
+            "observation.state.eef_pose/data.csv",
+        ]
+    return []
+
+
+def _video_output_paths(
+    rotations: dict[str, int],
+    filename: str = "video.mp4",
+) -> list[str]:
+    return [f"{stream}/{filename}" for stream, degrees in rotations.items() if int(degrees) != 0]
+
+
+def _canonical_hash(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _episode_metadata(episode_dir: Path) -> dict[str, Any]:
+    metadata_path = Path(episode_dir) / "metadata.json"
+    if not metadata_path.is_file():
+        return {}
+    with metadata_path.open("r", encoding="utf-8") as file_obj:
+        metadata = json.load(file_obj)
+    if not isinstance(metadata, dict):
+        raise ValueError(f"metadata.json must contain an object: {metadata_path}")
+    return metadata
+
+
+def _procedure_receipts(metadata: dict[str, Any]) -> dict[str, Any]:
+    pipeline = metadata.get("data_pipeline")
+    if not isinstance(pipeline, dict):
+        return {}
+    receipts = pipeline.get("completed_procedures")
+    return receipts if isinstance(receipts, dict) else {}
+
+
+def _procedure_complete(
+    episode_dir: Path,
+    procedure: str,
+    config: dict[str, Any],
+    expected_outputs: list[str],
+) -> bool:
+    episode_dir = Path(episode_dir)
+    if not episode_dir.is_dir():
+        return False
+    try:
+        receipt = _procedure_receipts(_episode_metadata(episode_dir)).get(procedure)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(receipt, dict):
+        return False
+    if receipt.get("version") != PROCEDURE_VERSIONS[procedure]:
+        return False
+    if receipt.get("config_hash") != _canonical_hash(config):
+        return False
+    for relative_path in expected_outputs:
+        output_path = episode_dir / relative_path
+        if not output_path.is_file() or output_path.stat().st_size <= 0:
+            return False
+    return True
+
+
+def _record_procedure(
+    episode_dir: Path,
+    procedure: str,
+    config: dict[str, Any],
+    outputs: list[str],
+    source_episode: Path,
+) -> None:
+    episode_dir = Path(episode_dir)
+    metadata_path = episode_dir / "metadata.json"
+    metadata = _episode_metadata(episode_dir)
+    pipeline = metadata.setdefault("data_pipeline", {})
+    if not isinstance(pipeline, dict):
+        raise ValueError(f"metadata.json data_pipeline must be an object: {metadata_path}")
+    pipeline["schema_version"] = PROCEDURE_SCHEMA_VERSION
+    pipeline.setdefault("source_episode", str(Path(source_episode).resolve()))
+    receipts = pipeline.setdefault("completed_procedures", {})
+    if not isinstance(receipts, dict):
+        raise ValueError(f"metadata.json completed_procedures must be an object: {metadata_path}")
+    receipts[procedure] = {
+        "version": PROCEDURE_VERSIONS[procedure],
+        "completed_at": datetime.now().astimezone().isoformat(),
+        "config": config,
+        "config_hash": _canonical_hash(config),
+        "outputs": sorted(str(path) for path in outputs),
+    }
+    temp_path = metadata_path.with_name(f".{metadata_path.name}.tmp-{os.getpid()}")
+    episode_mode = stat.S_IMODE(episode_dir.stat().st_mode)
+    metadata_mode = (
+        stat.S_IMODE(metadata_path.stat().st_mode)
+        if metadata_path.exists()
+        else None
+    )
+    try:
+        if not episode_mode & stat.S_IWUSR:
+            episode_dir.chmod(episode_mode | stat.S_IWUSR)
+        for orphan in episode_dir.glob(f".{metadata_path.name}.tmp-*"):
+            orphan.unlink()
+        with temp_path.open("w", encoding="utf-8") as file_obj:
+            json.dump(metadata, file_obj, indent=2, ensure_ascii=False, default=str)
+            file_obj.write("\n")
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+        temp_path.replace(metadata_path)
+        if metadata_mode is not None:
+            metadata_path.chmod(metadata_mode)
+        try:
+            descriptor = os.open(str(episode_dir), os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError:
+            # Some network filesystems do not support directory fsync.
+            pass
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+        episode_dir.chmod(episode_mode)
+
+
+def _profile_destination(
+    state: EpisodeState,
+    context: dict[str, Any],
+    settings: dict[str, Any],
+    profile: str,
+) -> Path:
+    suffix = settings["video_only_suffix"] if profile == "video_only" else settings["suffix"]
+    return context["data_root"] / _data_rel_dir(state, suffix) / state.episode_path.name
+
+
+def _validate_resume_source(candidate: Path, source_episode: Path) -> None:
+    recorded = _recorded_source(candidate)
+    if recorded and Path(str(recorded)).resolve() != Path(source_episode).resolve():
+        raise ValueError(
+            f"Processed UMI episode belongs to another source: {recorded}; expected {source_episode}"
+        )
+
+
+def _recorded_source(episode_dir: Path) -> str | None:
+    pipeline = _episode_metadata(episode_dir).get("data_pipeline")
+    if not isinstance(pipeline, dict):
+        return None
+    value = pipeline.get("source_episode")
+    return str(value) if value else None
+
+
+def _publish_directory(staging: Path, destination: Path) -> None:
+    backup = destination.with_name(f".{destination.name}.backup-{os.getpid()}")
+    if backup.exists():
+        shutil.rmtree(backup)
+    if destination.exists():
+        destination.replace(backup)
+    try:
+        staging.replace(destination)
+    except Exception:
+        if backup.exists() and not destination.exists():
+            backup.replace(destination)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
+
+
+def _full_resume_source(
+    state: EpisodeState,
+    context: dict[str, Any],
+    settings: dict[str, Any],
+) -> Path:
+    source = state.episode_path.resolve()
+    full_destination = _profile_destination(state, context, settings, "full")
+    if full_destination.is_dir() and _recorded_source(full_destination) is not None:
+        _validate_resume_source(full_destination, source)
+        return full_destination
+    video_destination = _profile_destination(state, context, settings, "video_only")
+    video_config = _procedure_config(VIDEO_ORIENTATION_PROCEDURE, settings, context)
+    if _procedure_complete(
+        video_destination,
+        VIDEO_ORIENTATION_PROCEDURE,
+        video_config,
+        _video_output_paths(settings["video"]["orientation_correction"]),
+    ):
+        _validate_resume_source(video_destination, source)
+        return video_destination
+    return source
+
+
+def _materialize_sidecar_input(
+    state: EpisodeState,
+    preprocess_source: Path,
+    context: dict[str, Any],
+    settings: dict[str, Any],
+) -> tuple[Path, bool]:
+    """Build a work copy whose canonical videos come from rotated sidecars."""
+    sidecar_config = _procedure_config(
+        VIDEO_ORIENTATION_SIDECAR_PROCEDURE,
+        settings,
+        context,
+    )
+    sidecar_outputs = _procedure_outputs(VIDEO_ORIENTATION_SIDECAR_PROCEDURE, settings)
+    candidate = None
+    for path in (Path(preprocess_source), state.episode_path.resolve()):
+        if _procedure_complete(
+            path,
+            VIDEO_ORIENTATION_SIDECAR_PROCEDURE,
+            sidecar_config,
+            sidecar_outputs,
+        ):
+            candidate = path
+            break
+    if candidate is None:
+        return Path(preprocess_source), False
+
+    work_episode = (
+        context["work_root"]
+        / "orientation_input"
+        / _report_rel_dir(state)
+        / state.episode_path.name
+    )
+    if work_episode.exists():
+        shutil.rmtree(work_episode)
+    work_episode.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(candidate, work_episode)
+    sidecar_filename = settings["video"]["sidecar_filename"]
+    for stream, degrees in settings["video"]["orientation_correction"].items():
+        if int(degrees) == 0:
+            continue
+        sidecar = work_episode / stream / sidecar_filename
+        canonical = work_episode / stream / "video.mp4"
+        shutil.copy2(sidecar, canonical)
+    return work_episode, True
+
+
+def needs_run(state: EpisodeState, settings: dict[str, Any] | None = None) -> bool:
+    """Return whether the configured Phase 6 profile has uncompleted procedures."""
+    settings = settings or _settings()
+    if not settings["enabled"] or not _is_umi_episode(state, settings):
+        return PHASE_NUMBER not in state.phases_completed
+    requested = set(_requested_procedures(settings))
+    previous = set(state.metrics.get("p6_umi_requested_procedures") or [])
+    if not requested.issubset(previous):
+        return True
+    data_path = state.metrics.get("p6_umi_data_path")
+    if not data_path:
+        return True
+    receipts = _procedure_receipts(_episode_metadata(Path(str(data_path))))
+    return not requested.issubset(receipts)
 
 
 def _positive_int_or_none(value: Any) -> int | None:
@@ -557,6 +1279,11 @@ def _apply_runtime_env(settings: dict[str, Any]) -> None:
         os.environ.pop("UMI_FFMPEG_THREADS", None)
     else:
         os.environ["UMI_FFMPEG_THREADS"] = str(threads)
+    preset = settings.get("video", {}).get("preprocess_preset")
+    if preset in (None, ""):
+        os.environ.pop("UMI_FFMPEG_PRESET", None)
+    else:
+        os.environ["UMI_FFMPEG_PRESET"] = str(preset)
 
 
 def _load_umi_modules(load_executability: bool = False) -> dict[str, Any]:
