@@ -1,0 +1,59 @@
+name: 发布服务器 Runner 引导包
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: datapipeline-ci
+    timeout-minutes: 20
+    steps:
+      - name: 从内网 Gitea 检出精确提交
+        env:
+          CI_SERVER_URL: ${{ gitea.server_url }}
+          CI_REPOSITORY: ${{ gitea.repository }}
+          CI_COMMIT_SHA: ${{ gitea.sha }}
+          CI_JOB_TOKEN: ${{ gitea.token }}
+        run: |
+          git init .
+          git remote add origin "$CI_SERVER_URL/$CI_REPOSITORY.git"
+          auth="$(printf 'x-access-token:%s' "$CI_JOB_TOKEN" | base64 -w0)"
+          git -c "http.extraHeader=Authorization: Basic $auth" fetch --no-tags --depth=1 origin "$CI_COMMIT_SHA"
+          git checkout --detach FETCH_HEAD
+
+      - name: 下载并校验官方 Gitea Runner
+        run: |
+          curl --fail --location --show-error --output gitea-runner \
+            https://gitea.com/gitea/runner/releases/download/v3.1.0/gitea-runner-3.1.0-linux-amd64
+          curl --fail --location --show-error --output runner-checksums.txt \
+            https://gitea.com/gitea/runner/releases/download/v3.1.0/checksums.txt
+          bash deploy/build_server_runner_bundle.sh \
+            gitea-runner runner-checksums.txt datapipeline-server-runner-bootstrap.tar.gz
+
+      - name: 发布不可变引导包
+        env:
+          CI_SERVER_URL: ${{ gitea.server_url }}
+          CI_REPOSITORY: ${{ gitea.repository }}
+          CI_COMMIT_SHA: ${{ gitea.sha }}
+          CI_JOB_TOKEN: ${{ gitea.token }}
+        run: |
+          tag="runner-bootstrap-${CI_COMMIT_SHA}"
+          release_json="$(TAG="$tag" python3 -c 'import json,os; print(json.dumps({"tag_name": os.environ["TAG"], "target_commitish": os.environ["CI_COMMIT_SHA"], "name": "DataPipeline 服务器 Runner 引导包 " + os.environ["CI_COMMIT_SHA"][:12], "body": "非敏感离线引导包；正式 SHA-256 见附件。", "draft": False, "prerelease": False}))')"
+          response="$(curl --fail --silent --show-error \
+            -H "Authorization: token $CI_JOB_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$release_json" \
+            "$CI_SERVER_URL/api/v1/repos/$CI_REPOSITORY/releases")"
+          release_id="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+          for asset in datapipeline-server-runner-bootstrap.tar.gz datapipeline-server-runner-bootstrap.tar.gz.sha256; do
+            curl --fail --silent --show-error \
+              -H "Authorization: token $CI_JOB_TOKEN" \
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary "@$asset" \
+              "$CI_SERVER_URL/api/v1/repos/$CI_REPOSITORY/releases/$release_id/assets?name=$asset" \
+              >/dev/null
+          done
+          echo "引导包已发布：$CI_SERVER_URL/$CI_REPOSITORY/releases/tag/$tag"

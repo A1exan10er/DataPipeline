@@ -81,6 +81,9 @@ EVENT_JOB_DB = PROJECT_ROOT / "outputs" / "event_listener" / "jobs.db"
 EVENT_CONTROL_DIR = PROJECT_ROOT / "outputs" / "event_listener" / "control"
 EVENT_LISTENER_ENABLED_FILE = EVENT_CONTROL_DIR / "listener.enabled"
 EVENT_LISTENER_ERROR_FILE = EVENT_CONTROL_DIR / "listener-last-error.txt"
+EVENT_LISTENER_SYSTEMD_SERVICE = os.environ.get(
+    "EVENT_LISTENER_SYSTEMD_SERVICE", "datapipeline-event-listener.service"
+)
 RETENTION_MANIFEST = "retention_cleanup.jsonl"
 ISSUE_TRANSLATIONS_PATH = SCRIPT_DIR / "issue_translations.json"
 _ISSUE_TRANSLATIONS_CACHE: dict[str, str] | None = None
@@ -2248,7 +2251,27 @@ def event_listener_process_info() -> tuple[int | None, list[str]]:
 
 def event_listener_is_running() -> bool:
     pid, _ = event_listener_process_info()
-    return pid is not None or tmux_session_running("qa_event_listener")
+    return (
+        pid is not None
+        or tmux_session_running("qa_event_listener")
+        or event_listener_systemd_running()
+    )
+
+
+def event_listener_systemd_running() -> bool:
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", EVENT_LISTENER_SYSTEMD_SERVICE):
+        return False
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", EVENT_LISTENER_SYSTEMD_SERVICE],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
 
 
 def _record_event_listener_start_result(completed: subprocess.CompletedProcess[str]) -> None:
@@ -2391,14 +2414,21 @@ def api_event_listener_status() -> dict[str, Any]:
 def event_listener_status() -> dict[str, Any]:
     listener_pid, _ = event_listener_process_info()
     tmux_running = tmux_session_running("qa_event_listener")
-    running = listener_pid is not None or tmux_running
-    manager = "tmux" if tmux_running else ("process" if listener_pid is not None else "none")
+    systemd_running = event_listener_systemd_running()
+    running = listener_pid is not None or tmux_running or systemd_running
+    manager = (
+        "systemd"
+        if systemd_running
+        else ("tmux" if tmux_running else ("process" if listener_pid is not None else "none"))
+    )
     status = {
         "running": running,
         "manager": manager,
         "pid": listener_pid,
         "desired_running": EVENT_LISTENER_ENABLED_FILE.is_file(),
         "tmux_running": tmux_running,
+        "systemd_running": systemd_running,
+        "systemd_service": EVENT_LISTENER_SYSTEMD_SERVICE,
         "job_db": str(EVENT_JOB_DB),
         "counts": {},
         "recent": [],
