@@ -77,6 +77,7 @@ jobs:
           REQUESTED_SHA: ${{ inputs.commit_sha }}
           DEPLOY_ROOT: /home/xinzhi/DataPipeline-deploy
           PERSISTENT_OUTPUTS: /home/xinzhi/DataPipeline/outputs
+          DCS_CONFIG_FILE: /home/xinzhi/DataPipeline/dcp-sdk/dcs_config.json
           SYSTEMD_USER_DIR: /home/xinzhi/.config/systemd/user
           XDG_CONFIG_HOME: /home/xinzhi/.config
           DEPLOY_START_EVENT_LISTENER: "1"
