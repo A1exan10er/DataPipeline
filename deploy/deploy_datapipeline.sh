@@ -215,7 +215,8 @@ ln -s "$RELEASE_DIR" "$next_link"
 mv -Tf "$next_link" "$CURRENT_LINK"
 SWITCHED=1
 
-systemctl --user enable "$DASHBOARD_SERVICE"
+# 使用绝对 unit 路径，避免隔离 runner 的 HOME 影响 systemctl 客户端查找路径。
+systemctl --user enable "$SYSTEMD_USER_DIR/$DASHBOARD_SERVICE"
 systemctl --user restart "$DASHBOARD_SERVICE"
 
 healthy=0

@@ -18,6 +18,21 @@ def test_runner_registration_file_is_portable_across_host_and_sandbox() -> None:
     assert "file: /runner/.runner" not in config
 
 
+def test_runner_exposes_real_user_systemd_config_inside_sandbox() -> None:
+    launcher = (PROJECT_ROOT / "deploy" / "run-gitea-runner-prod.sh").read_text(
+        encoding="utf-8"
+    )
+    deploy_script = (PROJECT_ROOT / "deploy" / "deploy_datapipeline.sh").read_text(
+        encoding="utf-8"
+    )
+    workflow = (PROJECT_ROOT / ".gitea" / "workflows" / "deploy.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "--setenv XDG_CONFIG_HOME /home/xinzhi/.config" in launcher
+    assert 'systemctl --user enable "$SYSTEMD_USER_DIR/$DASHBOARD_SERVICE"' in deploy_script
+    assert "XDG_CONFIG_HOME: /home/xinzhi/.config" in workflow
+
+
 def test_discovers_dashboard_user_service_safely(tmp_path: Path) -> None:
     proc_root = tmp_path / "proc"
     process_dir = proc_root / "4242"

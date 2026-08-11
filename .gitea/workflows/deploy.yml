@@ -78,6 +78,7 @@ jobs:
           DEPLOY_ROOT: /home/xinzhi/DataPipeline-deploy
           PERSISTENT_OUTPUTS: /home/xinzhi/DataPipeline/outputs
           SYSTEMD_USER_DIR: /home/xinzhi/.config/systemd/user
+          XDG_CONFIG_HOME: /home/xinzhi/.config
           DEPLOY_START_EVENT_LISTENER: "1"
           LEGACY_DASHBOARD_SERVICE_NAME: ${{ inputs.legacy_dashboard_service }}
         run: |
