@@ -45,6 +45,7 @@ except ModuleNotFoundError:
 from scripts.pipeline.qa_core import (
     EpisodeState,
     Finding,
+    PipelineConfigurationError,
     discover_episodes_with_report,
     export_findings_jsonl,
     export_quality_report,
