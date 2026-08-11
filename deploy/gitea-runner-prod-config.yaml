@@ -2,7 +2,8 @@ log:
   level: info
 
 runner:
-  file: /runner/.runner
+  # 相对路径可同时用于主机上的首次注册和 /runner 沙箱内的常驻 daemon。
+  file: .runner
   capacity: 1
   timeout: 90m
   shutdown_timeout: 5m

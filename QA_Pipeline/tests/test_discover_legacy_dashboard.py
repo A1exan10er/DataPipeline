@@ -10,6 +10,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DISCOVERY_SCRIPT = PROJECT_ROOT / "deploy" / "discover_legacy_dashboard.sh"
 
 
+def test_runner_registration_file_is_portable_across_host_and_sandbox() -> None:
+    config = (PROJECT_ROOT / "deploy" / "gitea-runner-prod-config.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "file: .runner" in config
+    assert "file: /runner/.runner" not in config
+
+
 def test_discovers_dashboard_user_service_safely(tmp_path: Path) -> None:
     proc_root = tmp_path / "proc"
     process_dir = proc_root / "4242"
