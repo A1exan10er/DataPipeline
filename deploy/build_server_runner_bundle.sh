@@ -53,5 +53,10 @@ install -m 0644 "$CHECKSUM_FILE" "$staging/gitea-runner-checksums.txt"
 
 tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
   -czf "$OUTPUT_ARCHIVE" -C "$staging" .
-sha256sum "$OUTPUT_ARCHIVE" > "$OUTPUT_ARCHIVE.sha256"
+output_directory="$(cd "$(dirname "$OUTPUT_ARCHIVE")" && pwd)"
+output_name="$(basename "$OUTPUT_ARCHIVE")"
+(
+  cd "$output_directory"
+  sha256sum "$output_name"
+) > "$OUTPUT_ARCHIVE.sha256"
 echo "已生成非敏感 runner 引导包：$OUTPUT_ARCHIVE"
