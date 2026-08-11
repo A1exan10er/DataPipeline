@@ -37,6 +37,7 @@ args=(
   --dir /runner/home
   --chdir /runner
   --setenv HOME /runner/home
+  --setenv XDG_CONFIG_HOME /home/xinzhi/.config
   --setenv PATH /usr/local/bin:/usr/bin:/bin
 )
 
