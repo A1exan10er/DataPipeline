@@ -48,6 +48,7 @@ QA_DCS_NOTIFY_ACTIONABLE_STATUSES="${QA_DCS_NOTIFY_ACTIONABLE_STATUSES:-needs_re
 QA_DCS_NOTIFY_ACTIONABLE_CHECKS="${QA_DCS_NOTIFY_ACTIONABLE_CHECKS:-}"
 QA_DCS_NOTIFY_EXCLUDE_CHECKS="${QA_DCS_NOTIFY_EXCLUDE_CHECKS:-timestamps_raw_inconsistency,quality_label_unexpected}"
 BACKEND="${EVENT_LISTENER_BACKEND:-auto}"
+SYSTEMD_SERVICE="${EVENT_LISTENER_SYSTEMD_SERVICE:-datapipeline-event-listener.service}"
 
 # The dashboard supervisor explicitly opts into the last known-good settings.
 # Interactive/API starts keep the values supplied in their current environment.
@@ -60,6 +61,7 @@ if [[ "${EVENT_LISTENER_USE_SAVED_SETTINGS:-0}" == "1" && -f "$SETTINGS_FILE" ]]
   OUTPUT_DIR="${EVENT_LISTENER_OUTPUT_DIR:-$OUTPUT_DIR}"
   LOG_FILE="${EVENT_LISTENER_LOG_FILE:-$LOG_FILE}"
   BACKEND="${EVENT_LISTENER_BACKEND:-$BACKEND}"
+  SYSTEMD_SERVICE="${EVENT_LISTENER_SYSTEMD_SERVICE:-$SYSTEMD_SERVICE}"
 fi
 # Recalculate derived paths after loading saved settings. Explicit control paths
 # remain supported for tests and non-default installations.
@@ -67,8 +69,12 @@ CONTROL_DIR="${EVENT_LISTENER_CONTROL_DIR:-$OUTPUT_DIR/control}"
 PID_FILE="${EVENT_LISTENER_PID_FILE:-$CONTROL_DIR/listener.pid}"
 ENABLED_FILE="${EVENT_LISTENER_ENABLED_FILE:-$CONTROL_DIR/listener.enabled}"
 SETTINGS_FILE="${EVENT_LISTENER_SETTINGS_FILE:-$CONTROL_DIR/listener-settings.env}"
-if [[ "$BACKEND" != "auto" && "$BACKEND" != "tmux" && "$BACKEND" != "process" ]]; then
-  echo "EVENT_LISTENER_BACKEND 只能是 auto、tmux 或 process"
+if [[ "$BACKEND" != "auto" && "$BACKEND" != "tmux" && "$BACKEND" != "process" && "$BACKEND" != "systemd" ]]; then
+  echo "EVENT_LISTENER_BACKEND 只能是 auto、tmux、process 或 systemd"
+  exit 2
+fi
+if [[ ! "$SYSTEMD_SERVICE" =~ ^[A-Za-z0-9_.@-]+\.service$ ]]; then
+  echo "EVENT_LISTENER_SYSTEMD_SERVICE 格式无效"
   exit 2
 fi
 for value_name in EVENT_DATE EVENT_DATE_FROM EVENT_DATE_TO; do
@@ -98,6 +104,11 @@ tmux_running() {
   tmux_installed && tmux has-session -t "$SESSION" 2>/dev/null
 }
 
+systemd_running() {
+  [[ "$BACKEND" == "systemd" ]] \
+    && systemctl --user is-active --quiet "$SYSTEMD_SERVICE" 2>/dev/null
+}
+
 managed_process_pid() {
   [[ -f "$PID_FILE" ]] || return 1
   local pid cmdline
@@ -111,7 +122,7 @@ managed_process_pid() {
 }
 
 listener_running() {
-  tmux_running || managed_process_pid >/dev/null
+  systemd_running || tmux_running || managed_process_pid >/dev/null
 }
 
 persist_settings() {
@@ -124,6 +135,7 @@ persist_settings() {
   printf 'EVENT_LISTENER_OUTPUT_DIR=%q\n' "$OUTPUT_DIR" >> "$temporary"
   printf 'EVENT_LISTENER_LOG_FILE=%q\n' "$LOG_FILE" >> "$temporary"
   printf 'EVENT_LISTENER_BACKEND=%q\n' "$BACKEND" >> "$temporary"
+  printf 'EVENT_LISTENER_SYSTEMD_SERVICE=%q\n' "$SYSTEMD_SERVICE" >> "$temporary"
   for name in \
     DCS_CONFIG_FILE DC_ROOT MOUNT_PREFIX NAS_PREFIX QA_PYTHON PHASES WORKERS \
     PHASE6_PROFILE PHASE6_VIDEO_OUTPUT_MODE PHASE6_SIDECAR_FILENAME DISABLE_QUALITY_LABEL_FILTER \
@@ -190,7 +202,9 @@ start_foreground() {
 status() {
   local process_pid=""
   process_pid="$(managed_process_pid 2>/dev/null || true)"
-  if tmux_running; then
+  if systemd_running; then
+    echo "实时检测服务：运行中（托管方式=systemd，服务=$SYSTEMD_SERVICE）"
+  elif tmux_running; then
     echo "实时检测服务：运行中（托管方式=tmux，会话=$SESSION）"
   elif [[ -n "$process_pid" ]]; then
     echo "实时检测服务：运行中（托管方式=process，进程号=$process_pid）"
@@ -226,6 +240,21 @@ case "$ACTION" in
     rm -f "$PID_FILE"
     persist_settings
     "$QA_PYTHON" Werkzeuge/listen_episode_verified.py recover-running --job-db "$JOB_DB" || true
+    if [[ "$BACKEND" == "systemd" ]]; then
+      if ! systemctl --user enable "$SYSTEMD_SERVICE" >/dev/null; then
+        echo "无法启用实时检测 user-systemd 服务：$SYSTEMD_SERVICE"
+        exit 1
+      fi
+      if ! systemctl --user start "$SYSTEMD_SERVICE"; then
+        systemctl --user disable "$SYSTEMD_SERVICE" >/dev/null 2>&1 || true
+        echo "实时检测 user-systemd 服务启动失败：$SYSTEMD_SERVICE"
+        exit 1
+      fi
+      mark_enabled
+      echo "实时检测服务已启动：托管方式=systemd，服务=$SYSTEMD_SERVICE"
+      echo "日志：journalctl --user -u $SYSTEMD_SERVICE"
+      exit 0
+    fi
     if [[ "$BACKEND" == "tmux" ]] && ! command -v tmux >/dev/null 2>&1; then
       echo "已指定 tmux 托管，但系统未安装 tmux。请设置 EVENT_LISTENER_BACKEND=process。"
       exit 1
@@ -254,6 +283,13 @@ case "$ACTION" in
   stop)
     mark_disabled
     stopped=0
+    if [[ "$BACKEND" == "systemd" ]]; then
+      if systemctl --user is-active --quiet "$SYSTEMD_SERVICE" 2>/dev/null; then
+        systemctl --user stop "$SYSTEMD_SERVICE"
+        stopped=1
+      fi
+      systemctl --user disable "$SYSTEMD_SERVICE" >/dev/null 2>&1 || true
+    fi
     if tmux_running; then
       tmux kill-session -t "$SESSION"
       stopped=1

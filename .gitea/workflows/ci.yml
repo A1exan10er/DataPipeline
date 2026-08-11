@@ -40,7 +40,12 @@ jobs:
 
       - name: 静态检查
         run: |
-          bash -n QA_Pipeline/scripts/event_listener_control.sh
+          bash -n \
+            QA_Pipeline/scripts/event_listener_control.sh \
+            deploy/bootstrap_server_runner.sh \
+            deploy/build_server_runner_bundle.sh \
+            deploy/deploy_datapipeline.sh \
+            deploy/discover_legacy_dashboard.sh
           .ci-venv/bin/python -m compileall -q \
             QA_Pipeline/scripts \
             Werkzeuge \

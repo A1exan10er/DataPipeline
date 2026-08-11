@@ -60,7 +60,7 @@ if [[ -n "$RUNNER_BINARY_FILE" || -n "$CHECKSUM_FILE" ]]; then
     exit 2
   fi
 fi
-for command_name in bwrap curl git install python3 systemctl tar; do
+for command_name in bwrap curl git install python3 ss systemctl tar; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "服务器缺少必要命令：$command_name。未进行安装，请联系维护者。"
     exit 1
@@ -77,6 +77,31 @@ fi
 
 mkdir -p "$RUNNER_ROOT/home" "$RUNNER_ROOT/work" "$DEPLOY_ROOT/releases" "$SERVICE_DIR"
 chmod 0700 "$RUNNER_ROOT" "$RUNNER_ROOT/home" "$RUNNER_ROOT/work"
+
+legacy_config="$DEPLOY_ROOT/legacy-dashboard.env"
+if [[ ! -f "$legacy_config" ]]; then
+  legacy_service="$(bash "$REPO_ROOT/deploy/discover_legacy_dashboard.sh")"
+  if [[ "$legacy_service" == "datapipeline-dashboard.service" ]]; then
+    echo "4131 已由新版 datapipeline-dashboard.service 管理，无需记录旧服务。"
+    legacy_service=""
+  fi
+  if [[ -n "$legacy_service" ]]; then
+    if [[ ! -t 0 ]]; then
+      echo "首次初始化必须由维护者在交互式终端确认旧 Dashboard 服务。"
+      exit 1
+    fi
+    read -r -p "确认仅在部署切换时接管服务 $legacy_service？请输入“确认”：" confirmation
+    if [[ "$confirmation" != "确认" ]]; then
+      echo "维护者未确认旧 Dashboard 服务，初始化已取消。"
+      exit 1
+    fi
+  fi
+  temporary_legacy_config="$legacy_config.tmp.$$"
+  printf 'LEGACY_DASHBOARD_SERVICE_NAME=%s\n' "$legacy_service" > "$temporary_legacy_config"
+  chmod 0600 "$temporary_legacy_config"
+  mv "$temporary_legacy_config" "$legacy_config"
+  echo "已记录旧 Dashboard 服务：${legacy_service:-无}"
+fi
 
 runner_url="https://gitea.com/gitea/runner/releases/download/v${RUNNER_VERSION}/gitea-runner-${RUNNER_VERSION}-linux-amd64"
 checksum_url="https://gitea.com/gitea/runner/releases/download/v${RUNNER_VERSION}/checksums.txt"
