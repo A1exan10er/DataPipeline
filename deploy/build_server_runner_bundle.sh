@@ -16,6 +16,14 @@ if [[ "$OUTPUT_ARCHIVE" != *.tar.gz ]]; then
   exit 2
 fi
 
+runner_file_path="$(
+  awk '$1 == "file:" {print $2; exit}' "$REPO_ROOT/deploy/gitea-runner-prod-config.yaml"
+)"
+if [[ "$runner_file_path" != ".runner" ]]; then
+  echo "runner.file 必须是 .runner，确保首次注册和 Bubblewrap daemon 使用同一个文件。" >&2
+  exit 1
+fi
+
 expected="$(awk -v name="gitea-runner-${RUNNER_VERSION}-linux-amd64" '$2 == name {print $1}' "$CHECKSUM_FILE")"
 actual="$(sha256sum "$RUNNER_BINARY" | awk '{print $1}')"
 if [[ -z "$expected" || "$actual" != "$expected" ]]; then
