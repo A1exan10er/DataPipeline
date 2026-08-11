@@ -5,6 +5,7 @@ TARGET_SHA="${1:-}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/home/xinzhi/DataPipeline-deploy}"
 PERSISTENT_OUTPUTS="${PERSISTENT_OUTPUTS:-/home/xinzhi/DataPipeline/outputs}"
 DCS_CONFIG_FILE="${DCS_CONFIG_FILE:-/home/xinzhi/DataPipeline/dcp-sdk/dcs_config.json}"
+LISTENER_PHASES="${PHASES:-1,2,3,7}"
 CURRENT_LINK="$DEPLOY_ROOT/current"
 RELEASES_DIR="$DEPLOY_ROOT/releases"
 DASHBOARD_SERVICE="${DASHBOARD_SERVICE_NAME:-datapipeline-dashboard.service}"
@@ -169,7 +170,9 @@ systemd-run --user --quiet --wait --pipe --collect \
   --setenv "DCS_CONFIG_FILE=$DCS_CONFIG_FILE" \
   "$RELEASE_DIR/datapipeline-env/bin/python" \
   "$RELEASE_DIR/Werkzeuge/check_dcs_config.py" \
-  --dc-root "$RELEASE_DIR/dcp-sdk"
+  --dc-root "$RELEASE_DIR/dcp-sdk" \
+  --qa-root "$RELEASE_DIR/QA_Pipeline" \
+  --phases "$LISTENER_PHASES"
 
 mkdir -p "$SYSTEMD_USER_DIR"
 install -m 0644 "$RELEASE_DIR/deploy/datapipeline-dashboard.service" \
@@ -261,6 +264,7 @@ fi
 
 if [[ "$LISTENER_WAS_DESIRED" == "1" ]]; then
   DCS_CONFIG_FILE="$DCS_CONFIG_FILE" \
+    PHASES="$LISTENER_PHASES" \
     EVENT_LISTENER_BACKEND=systemd \
     EVENT_LISTENER_SYSTEMD_SERVICE="$LISTENER_SERVICE" \
     "$CURRENT_LINK/QA_Pipeline/scripts/event_listener_control.sh" start

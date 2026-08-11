@@ -22,7 +22,9 @@ DC_ROOT="${DC_ROOT:-$REPO_ROOT/dcp-sdk}"
 MOUNT_PREFIX="${MOUNT_PREFIX:-/mnt/nas/database/verified}"
 NAS_PREFIX="${NAS_PREFIX:-/volume1/database/verified,/database/verified}"
 QA_PYTHON="${QA_PYTHON:-datapipeline-env/bin/python}"
-PHASES="${PHASES:-1,2,3,6,7}"
+# Phase 6 依赖主机 ffmpeg/ffprobe。生产机未满足该依赖时，实时监听默认运行
+# 不依赖视频转码的 1/2/3/7 阶段；部署预检会阻止误启用缺少依赖的阶段。
+PHASES="${PHASES:-1,2,3,7}"
 WORKERS="${WORKERS:-1}"
 PHASE6_PROFILE="${PHASE6_PROFILE:-video_only}"
 PHASE6_VIDEO_OUTPUT_MODE="${PHASE6_VIDEO_OUTPUT_MODE:-sidecar}"

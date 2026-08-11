@@ -44,9 +44,11 @@ def test_production_dcs_config_is_checked_outside_runner_sandbox() -> None:
         PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listener_control.sh"
     ).read_text(encoding="utf-8")
     assert "DCS_CONFIG_FILE: /home/xinzhi/DataPipeline/dcp-sdk/dcs_config.json" in workflow
+    assert 'PHASES: "1,2,3,7"' in workflow
     assert 'systemd-run --user --quiet --wait --pipe --collect' in deploy_script
     assert 'Werkzeuge/check_dcs_config.py' in deploy_script
     assert '--setenv "DCS_CONFIG_FILE=$DCS_CONFIG_FILE"' in deploy_script
+    assert '--phases "$LISTENER_PHASES"' in deploy_script
     assert 'DCS_CONFIG_FILE="$EXPLICIT_DCS_CONFIG_FILE"' in control_script
 
 
