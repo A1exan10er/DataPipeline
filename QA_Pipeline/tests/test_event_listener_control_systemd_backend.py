@@ -10,6 +10,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONTROL_SCRIPT = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listener_control.sh"
 
 
+def test_listener_default_phases_do_not_require_unavailable_video_tools() -> None:
+    script = CONTROL_SCRIPT.read_text(encoding="utf-8")
+    assert 'PHASES="${PHASES:-1,2,3,7}"' in script
+
+
 def test_systemd_explicit_dcs_config_overrides_saved_runner_path(tmp_path: Path) -> None:
     captured = tmp_path / "captured-config"
     fake_python = tmp_path / "fake-python"
