@@ -33,6 +33,23 @@ def test_runner_exposes_real_user_systemd_config_inside_sandbox() -> None:
     assert "XDG_CONFIG_HOME: /home/xinzhi/.config" in workflow
 
 
+def test_production_dcs_config_is_checked_outside_runner_sandbox() -> None:
+    deploy_script = (PROJECT_ROOT / "deploy" / "deploy_datapipeline.sh").read_text(
+        encoding="utf-8"
+    )
+    workflow = (PROJECT_ROOT / ".gitea" / "workflows" / "deploy.yml").read_text(
+        encoding="utf-8"
+    )
+    control_script = (
+        PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listener_control.sh"
+    ).read_text(encoding="utf-8")
+    assert "DCS_CONFIG_FILE: /home/xinzhi/DataPipeline/dcp-sdk/dcs_config.json" in workflow
+    assert 'systemd-run --user --quiet --wait --pipe --collect' in deploy_script
+    assert 'Werkzeuge/check_dcs_config.py' in deploy_script
+    assert '--setenv "DCS_CONFIG_FILE=$DCS_CONFIG_FILE"' in deploy_script
+    assert 'DCS_CONFIG_FILE="$EXPLICIT_DCS_CONFIG_FILE"' in control_script
+
+
 def test_discovers_dashboard_user_service_safely(tmp_path: Path) -> None:
     proc_root = tmp_path / "proc"
     process_dir = proc_root / "4242"

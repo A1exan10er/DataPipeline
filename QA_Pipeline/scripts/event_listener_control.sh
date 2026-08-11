@@ -14,6 +14,9 @@ CONTROL_DIR="${EVENT_LISTENER_CONTROL_DIR:-$OUTPUT_DIR/control}"
 PID_FILE="${EVENT_LISTENER_PID_FILE:-$CONTROL_DIR/listener.pid}"
 ENABLED_FILE="${EVENT_LISTENER_ENABLED_FILE:-$CONTROL_DIR/listener.enabled}"
 SETTINGS_FILE="${EVENT_LISTENER_SETTINGS_FILE:-$CONTROL_DIR/listener-settings.env}"
+# systemd 单元提供的生产配置必须高于历史保存设置。保存设置可能由
+# 隔离 Runner 写入，不能让其中的 HOME 派生路径覆盖主机上的真实配置。
+EXPLICIT_DCS_CONFIG_FILE="${DCS_CONFIG_FILE-}"
 DCS_CONFIG_FILE="${DCS_CONFIG_FILE:-$HOME/DataPipeline/dcp-sdk/dcs_config.json}"
 DC_ROOT="${DC_ROOT:-$REPO_ROOT/dcp-sdk}"
 MOUNT_PREFIX="${MOUNT_PREFIX:-/mnt/nas/database/verified}"
@@ -62,6 +65,9 @@ if [[ "${EVENT_LISTENER_USE_SAVED_SETTINGS:-0}" == "1" && -f "$SETTINGS_FILE" ]]
   LOG_FILE="${EVENT_LISTENER_LOG_FILE:-$LOG_FILE}"
   BACKEND="${EVENT_LISTENER_BACKEND:-$BACKEND}"
   SYSTEMD_SERVICE="${EVENT_LISTENER_SYSTEMD_SERVICE:-$SYSTEMD_SERVICE}"
+  if [[ -n "$EXPLICIT_DCS_CONFIG_FILE" ]]; then
+    DCS_CONFIG_FILE="$EXPLICIT_DCS_CONFIG_FILE"
+  fi
 fi
 # Recalculate derived paths after loading saved settings. Explicit control paths
 # remain supported for tests and non-default installations.

@@ -4,6 +4,7 @@ set -euo pipefail
 TARGET_SHA="${1:-}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/home/xinzhi/DataPipeline-deploy}"
 PERSISTENT_OUTPUTS="${PERSISTENT_OUTPUTS:-/home/xinzhi/DataPipeline/outputs}"
+DCS_CONFIG_FILE="${DCS_CONFIG_FILE:-/home/xinzhi/DataPipeline/dcp-sdk/dcs_config.json}"
 CURRENT_LINK="$DEPLOY_ROOT/current"
 RELEASES_DIR="$DEPLOY_ROOT/releases"
 DASHBOARD_SERVICE="${DASHBOARD_SERVICE_NAME:-datapipeline-dashboard.service}"
@@ -50,6 +51,10 @@ fi
 if [[ ! -d "$PERSISTENT_OUTPUTS" ]]; then
   echo "持久化输出目录不存在：$PERSISTENT_OUTPUTS"
   exit 1
+fi
+if [[ "$DCS_CONFIG_FILE" != /* ]]; then
+  echo "DCS 配置文件必须使用绝对路径：$DCS_CONFIG_FILE"
+  exit 2
 fi
 
 cd "$REPO_ROOT"
@@ -156,6 +161,16 @@ if [[ ! -d "$RELEASE_DIR" ]]; then
   mv "$TEMP_RELEASE" "$RELEASE_DIR"
 fi
 
+# Runner 的 bwrap 沙箱只拥有 outputs 写权限。通过 user-systemd 在主机命名空间
+# 中只读校验生产 DCS 配置，且必须在停止任何现有服务之前完成。
+preflight_unit="datapipeline-deploy-preflight-${TARGET_SHA:0:12}-$$"
+systemd-run --user --quiet --wait --pipe --collect \
+  --unit "$preflight_unit" \
+  --setenv "DCS_CONFIG_FILE=$DCS_CONFIG_FILE" \
+  "$RELEASE_DIR/datapipeline-env/bin/python" \
+  "$RELEASE_DIR/Werkzeuge/check_dcs_config.py" \
+  --dc-root "$RELEASE_DIR/dcp-sdk"
+
 mkdir -p "$SYSTEMD_USER_DIR"
 install -m 0644 "$RELEASE_DIR/deploy/datapipeline-dashboard.service" \
   "$SYSTEMD_USER_DIR/$DASHBOARD_SERVICE"
@@ -245,12 +260,19 @@ if [[ "$healthy" != "1" ]]; then
 fi
 
 if [[ "$LISTENER_WAS_DESIRED" == "1" ]]; then
-  EVENT_LISTENER_BACKEND=systemd \
+  DCS_CONFIG_FILE="$DCS_CONFIG_FILE" \
+    EVENT_LISTENER_BACKEND=systemd \
     EVENT_LISTENER_SYSTEMD_SERVICE="$LISTENER_SERVICE" \
     "$CURRENT_LINK/QA_Pipeline/scripts/event_listener_control.sh" start
-  "$CURRENT_LINK/datapipeline-env/bin/python" \
+
+  health_unit="datapipeline-deploy-health-${TARGET_SHA:0:12}-$$"
+  systemd-run --user --quiet --wait --pipe --collect \
+    --unit "$health_unit" \
+    --setenv "DCS_CONFIG_FILE=$DCS_CONFIG_FILE" \
+    "$CURRENT_LINK/datapipeline-env/bin/python" \
     "$CURRENT_LINK/Werkzeuge/check_event_listener_health.py" \
     --api-url "http://127.0.0.1:4131/api/event-listener/status" \
+    --dc-root "$CURRENT_LINK/dcp-sdk" \
     --queue-name "${EVENT_QUEUE_NAME:-qa_pipeline.listen_episode_verified.v2}" \
     --timeout-seconds 60
 fi
