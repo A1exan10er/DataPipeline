@@ -106,6 +106,7 @@ def test_event_listener_status_reports_process_backend(monkeypatch, tmp_path: Pa
         lambda: (4321, ["python", "Werkzeuge/listen_episode_verified.py", "serve"]),
     )
     monkeypatch.setattr(dashboard, "tmux_session_running", lambda _session: False)
+    monkeypatch.setattr(dashboard, "event_listener_systemd_running", lambda: False)
     monkeypatch.setattr(dashboard, "directory_size", lambda *_args, **_kwargs: "0 B")
     monkeypatch.setattr(dashboard, "event_listener_settings", lambda: {"workers": "1"})
 
@@ -125,6 +126,7 @@ def test_event_listener_status_keeps_tmux_compatibility(monkeypatch, tmp_path: P
     monkeypatch.setattr(dashboard, "EVENT_JOB_DB", tmp_path / "missing.db")
     monkeypatch.setattr(dashboard, "event_listener_process_info", lambda: (None, []))
     monkeypatch.setattr(dashboard, "tmux_session_running", lambda _session: True)
+    monkeypatch.setattr(dashboard, "event_listener_systemd_running", lambda: False)
     monkeypatch.setattr(dashboard, "directory_size", lambda *_args, **_kwargs: "0 B")
     monkeypatch.setattr(dashboard, "event_listener_settings", lambda: {})
 
