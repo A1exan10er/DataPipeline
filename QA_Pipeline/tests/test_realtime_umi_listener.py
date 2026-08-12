@@ -99,3 +99,80 @@ def test_phase6_postcondition_errors_are_scoped_per_episode(tmp_path: Path) -> N
 
     assert list(errors) == [str(failed.resolve())]
     assert "status=error" in errors[str(failed.resolve())]
+
+
+def _insert_failed_job(
+    db_path: Path,
+    *,
+    event_id: str,
+    mounted_path: Path,
+    error: str,
+) -> int:
+    listener.init_job_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO jobs (
+                event_id, record_id, session_id, verified_path, mounted_path,
+                payload_json, status, attempts, run_id, output_dir, db_path,
+                error, received_at, started_at, finished_at, updated_at
+            ) VALUES (?, '', '', ?, ?, '{}', 'failed', 3, 'old-run', 'old-output',
+                      'old.db', ?, '2026-08-12T00:00:00Z', '2026-08-12T00:00:01Z',
+                      '2026-08-12T00:00:02Z', '2026-08-12T00:00:02Z')
+            """,
+            (event_id, str(mounted_path), str(mounted_path), error),
+        )
+        return int(cursor.lastrowid)
+
+
+def test_missing_episode_is_rejected_before_batch_stability_check(tmp_path: Path) -> None:
+    missing = tmp_path / "episode_0001_missing"
+
+    try:
+        listener._resolve_job_episode({"mounted_path": str(missing)})
+    except FileNotFoundError as exc:
+        assert str(missing) in str(exc)
+    else:
+        raise AssertionError("missing episode must be rejected before batching")
+
+
+def test_recover_only_collateral_missing_path_failures(tmp_path: Path) -> None:
+    job_db = tmp_path / "jobs.db"
+    existing = tmp_path / "episode_0001_existing"
+    existing.mkdir()
+    (existing / "metadata.json").write_text("{}\n", encoding="utf-8")
+    truly_missing = tmp_path / "episode_0002_missing"
+    unrelated_missing = tmp_path / "episode_9999_missing"
+    pipeline_episode = tmp_path / "episode_0003_pipeline_error"
+    pipeline_episode.mkdir()
+    (pipeline_episode / "metadata.json").write_text("{}\n", encoding="utf-8")
+
+    collateral_id = _insert_failed_job(
+        job_db,
+        event_id="collateral",
+        mounted_path=existing,
+        error=f"episode path does not exist: {unrelated_missing}",
+    )
+    missing_id = _insert_failed_job(
+        job_db,
+        event_id="actual-missing",
+        mounted_path=truly_missing,
+        error=f"episode path does not exist: {truly_missing}",
+    )
+    pipeline_id = _insert_failed_job(
+        job_db,
+        event_id="pipeline-error",
+        mounted_path=pipeline_episode,
+        error="pipeline exit code 1",
+    )
+
+    assert listener.recover_collateral_missing_path_failures(job_db) == 1
+    with sqlite3.connect(job_db) as conn:
+        rows = dict(
+            conn.execute(
+                "SELECT id, status || ':' || attempts FROM jobs ORDER BY id"
+            ).fetchall()
+        )
+    assert rows[collateral_id] == "pending:0"
+    assert rows[missing_id] == "failed:3"
+    assert rows[pipeline_id] == "failed:3"
