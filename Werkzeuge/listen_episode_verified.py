@@ -390,6 +390,47 @@ def recover_running_jobs(job_db: Path) -> int:
         return int(cursor.rowcount or 0)
 
 
+def recover_collateral_missing_path_failures(job_db: Path) -> int:
+    """Requeue jobs failed only because another episode in their batch disappeared.
+
+    Older batch handling propagated one missing episode's error to every job in the
+    batch. Only recover a row when its own episode and metadata still exist and the
+    path named in the error is different from its mounted path.
+    """
+    prefix = "episode path does not exist: "
+    now = utc_now()
+    recovered: list[int] = []
+    with sqlite3.connect(job_db) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, mounted_path, error
+            FROM jobs
+            WHERE status = 'failed' AND error LIKE 'episode path does not exist: %'
+            """
+        ).fetchall()
+        for row in rows:
+            own_path = Path(str(row["mounted_path"] or ""))
+            error = str(row["error"] or "")
+            missing_path = Path(error.removeprefix(prefix).strip())
+            if missing_path == own_path:
+                continue
+            if not own_path.is_dir() or not (own_path / "metadata.json").is_file():
+                continue
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'pending', attempts = 0, run_id = '', output_dir = '',
+                    db_path = '', error = '', started_at = NULL, finished_at = NULL,
+                    updated_at = ?
+                WHERE id = ? AND status = 'failed'
+                """,
+                (now, int(row["id"])),
+            )
+            recovered.append(int(row["id"]))
+    return len(recovered)
+
+
 def path_snapshot(path: Path) -> tuple[int, int, float]:
     file_count = 0
     total_bytes = 0
@@ -452,6 +493,10 @@ def run_pipeline_for_job(args: argparse.Namespace, job: dict[str, Any]) -> tuple
 
 def _resolve_job_episode(job: dict[str, Any]) -> Path:
     mounted = Path(str(job["mounted_path"]))
+    if not mounted.exists():
+        raise FileNotFoundError(f"episode path does not exist: {mounted}")
+    if mounted.name.startswith("episode_") and not (mounted / "metadata.json").is_file():
+        raise FileNotFoundError(f"metadata.json not found under: {mounted}")
     episodes = episode_paths_for_target(mounted)
     if not episodes:
         raise FileNotFoundError(f"no episode directories found under {mounted}")
@@ -885,6 +930,12 @@ async def worker_loop(args: argparse.Namespace) -> None:
         recovered = recover_running_jobs(Path(args.job_db))
         if recovered:
             print(f"recovered stale running jobs: {recovered}", flush=True)
+        collateral = recover_collateral_missing_path_failures(Path(args.job_db))
+        if collateral:
+            print(
+                f"recovered collateral batch failures: {collateral}",
+                flush=True,
+            )
     while True:
         fail_exhausted_jobs(Path(args.job_db), args.max_attempts)
         skipped = skip_queued_jobs_outside_event_date(Path(args.job_db), args)
