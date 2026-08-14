@@ -244,7 +244,7 @@ import json
 import urllib.request
 
 with urllib.request.urlopen(
-    "http://127.0.0.1:4131/api/event-listener/status", timeout=3
+    "http://127.0.0.1:4131/api/status", timeout=3
 ) as response:
     payload = json.load(response)
 status = payload.get("event_listener", {})

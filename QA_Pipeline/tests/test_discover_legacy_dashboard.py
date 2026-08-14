@@ -35,6 +35,7 @@ def test_runner_exposes_real_user_systemd_config_inside_sandbox() -> None:
     assert 'systemctl --user enable "$SYSTEMD_USER_DIR/$DASHBOARD_SERVICE"' in deploy_script
     assert "XDG_CONFIG_HOME: /home/xinzhi/.config" in workflow
     assert "Environment=DASHBOARD_RUN_BACKEND=systemd" in dashboard_unit
+    assert '"http://127.0.0.1:4131/api/status", timeout=3' in deploy_script
     assert 'launcher.get("configured_backend") != "systemd"' in deploy_script
     assert 'not launcher.get("systemd_available")' in deploy_script
 
