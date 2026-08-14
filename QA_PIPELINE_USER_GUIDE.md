@@ -305,6 +305,13 @@ through `--verified-root`; it is not hard-coded in the dashboard. Treat the
 sample root as read-only and write databases, logs, and reports only under
 `outputs/`.
 
+Dashboard **Start Run** also has no `tmux` dependency. Production runs are
+managed as independent transient user-systemd services. With the default
+`--run-backend auto`, a local environment without user-systemd falls back to a
+detached process whose PID, process start identity, and command are validated
+before status or stop operations. Use `--run-backend process` to select that
+fallback explicitly.
+
 ```bash
 cd /home/tianyu/Projects/DataPipeline
 

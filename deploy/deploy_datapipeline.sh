@@ -250,6 +250,11 @@ with urllib.request.urlopen(
 status = payload.get("event_listener", {})
 if "running" not in status or "manager" not in status or "systemd_running" not in status:
     raise SystemExit("连接到的 dashboard 不是待部署的新版本")
+launcher = payload.get("run_launcher", {})
+if launcher.get("configured_backend") != "systemd":
+    raise SystemExit("dashboard pipeline run manager 未配置为 systemd")
+if launcher.get("effective_backend") != "systemd" or not launcher.get("systemd_available"):
+    raise SystemExit("dashboard 无法连接 user-systemd run manager")
 PY
   then
     healthy=1

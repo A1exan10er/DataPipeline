@@ -109,7 +109,9 @@ Current default behavior:
   `QA_Pipeline/scripts/qa_control_dashboard.py --host 0.0.0.0 --port 4131`;
   it can start date-range/task-folder runs, manage the event listener, show run
   status/logs, generate Chinese work-session reports, and display reviewer
-  actions;
+  actions. Dashboard-started runs do not require tmux: production uses transient
+  user-systemd services and local `auto` mode falls back to a validated detached
+  process;
 - the verified-event listener defaults to phases `1,2,3,6,7`; Phase 6 runs as
   `video_only` with `sidecar` output and requires the receipt plus both wrist
   sidecars before marking a job done;
