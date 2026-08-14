@@ -88,6 +88,8 @@ def test_start_panel_keeps_server_style_and_new_controls(tmp_path: Path) -> None
     assert 'id="operatorFilter"' in panel
     assert "Severe report preset" in panel
     assert "resumeRun(" in html
+    assert "Boolean(run.manager_running)" in html
+    assert "Boolean(run.tmux_running)" not in html
     assert "Starting..." in html and "Started: " in html
 
 
@@ -341,7 +343,7 @@ def test_resume_command_preserves_scope_and_removes_force_rerun(tmp_path: Path) 
     assert command[command.index("--run-id") + 1] == run["run_id"]
 
 
-def test_api_resume_reuses_database_and_starts_same_session(monkeypatch, tmp_path: Path) -> None:
+def test_api_resume_reuses_database_and_starts_new_manager(monkeypatch, tmp_path: Path) -> None:
     root = tmp_path / "samples"
     root.mkdir()
     state = _state(tmp_path, root)
@@ -392,19 +394,28 @@ def test_api_resume_reuses_database_and_starts_same_session(monkeypatch, tmp_pat
             "continue_after_fail": 1,
         },
     )
-    starts: list[tuple[str, str]] = []
-    monkeypatch.setattr(dashboard, "tmux_session_running", lambda _session: False)
+    starts: list[tuple[str, Path]] = []
+    monkeypatch.setattr(dashboard, "run_manager_running", lambda _run: False)
     monkeypatch.setattr(dashboard, "validate_execution_requirements", lambda *_args: None)
-    monkeypatch.setattr(dashboard, "start_tmux", lambda session, cmd: starts.append((session, cmd)))
+    monkeypatch.setattr(
+        dashboard,
+        "launch_dashboard_run",
+        lambda _state, run_id, path: (
+            starts.append((run_id, path))
+            or dashboard.RunManagerHandle("systemd", "datapipeline-qa-run-resume.service")
+        ),
+    )
 
     result = dashboard.api_resume_run(state, "stopped-run")
 
     assert result["resumed"] is True
     assert result["db_path"] == str(db_path)
     assert "--force-rerun" not in result["command"]
-    assert starts == [("qa_dash_stopped-run", f"bash {output / 'dashboard_command.sh'}")]
+    assert starts == [("stopped-run", output / "dashboard_command.sh")]
     row = dashboard.registered_run(state.registry_db, "stopped-run")
     assert row is not None and row["status"] == "running"
+    assert row["manager"] == "systemd"
+    assert row["manager_id"] == "datapipeline-qa-run-resume.service"
 
 
 def test_command_builder_rejects_invalid_overload_action(tmp_path: Path) -> None:
@@ -529,7 +540,15 @@ def test_registry_migration_preserves_old_row(tmp_path: Path) -> None:
         conn.row_factory = sqlite3.Row
         columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
         row = dict(conn.execute("SELECT * FROM runs WHERE run_id = 'old'").fetchone())
-    assert {"severe_report_requested", "severe_report_config", "continue_after_fail"} <= columns
+    assert {
+        "severe_report_requested",
+        "severe_report_config",
+        "continue_after_fail",
+        "manager",
+        "manager_id",
+        "manager_pid",
+        "manager_start_ticks",
+    } <= columns
     assert row["command"] == "cmd" and row["notes"] == "note"
     assert row["severe_report_requested"] == 0
     assert row["severe_report_config"] == ""
@@ -673,20 +692,27 @@ def test_event_job_page_uses_database_count_and_offset(monkeypatch, tmp_path: Pa
     assert [row["id"] for row in result["jobs"]] == list(range(25, 5, -1))
 
 
-def test_api_start_records_new_settings_without_real_tmux(monkeypatch, tmp_path: Path) -> None:
+def test_api_start_records_new_settings_without_tmux(monkeypatch, tmp_path: Path) -> None:
     root = tmp_path / "samples"
     root.mkdir()
     config = _config(tmp_path / "config.json")
     state = _state(tmp_path, root)
     monkeypatch.setattr(dashboard, "validate_execution_requirements", lambda *args: None)
-    monkeypatch.setattr(dashboard, "start_tmux", lambda *args: None)
+    monkeypatch.setattr(
+        dashboard,
+        "launch_dashboard_run",
+        lambda *_args: dashboard.RunManagerHandle(
+            "systemd", "datapipeline-qa-run-api-run.service"
+        ),
+    )
     result = dashboard.api_start_run(
         state,
         _payload(config, root_path=str(root), run_id="api-run", continue_after_fail=False),
     )
     assert result["ok"] is True
     assert result["run_id"] == "api-run"
-    assert result["tmux_session"] == "qa_dash_api-run"
+    assert result["manager"] == "systemd"
+    assert result["manager_id"] == "datapipeline-qa-run-api-run.service"
     assert result["command"].count("--generate-operator-severe-report") == 1
     row = dashboard.registered_run(state.registry_db, "api-run")
     assert row["severe_report_requested"] == 1
@@ -696,13 +722,17 @@ def test_api_start_records_new_settings_without_real_tmux(monkeypatch, tmp_path:
         dashboard.api_start_run(state, _payload(config, root_path=str(root), run_id="api-run"))
 
 
-def test_api_tmux_failure_is_not_success(monkeypatch, tmp_path: Path) -> None:
+def test_api_manager_failure_is_not_success(monkeypatch, tmp_path: Path) -> None:
     root = tmp_path / "samples"
     root.mkdir()
     state = _state(tmp_path, root)
     monkeypatch.setattr(dashboard, "validate_execution_requirements", lambda *args: None)
-    monkeypatch.setattr(dashboard, "start_tmux", lambda *args: (_ for _ in ()).throw(RuntimeError("tmux failed")))
-    with pytest.raises(RuntimeError, match="tmux failed"):
+    monkeypatch.setattr(
+        dashboard,
+        "launch_dashboard_run",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("systemd failed")),
+    )
+    with pytest.raises(RuntimeError, match="systemd failed"):
         dashboard.api_start_run(
             state,
             {"mode": "task_folder", "root_path": str(root), "run_id": "failed-run"},

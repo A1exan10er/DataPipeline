@@ -111,6 +111,7 @@ def test_actual_pipeline_detects_deduplicates_ranks_and_excludes_equipment(
             "1,2,7",
             "--workers",
             "1",
+            "--disable-resource-guard",
             "--continue-after-fail",
             "--disable-quality-label-filter",
             "--disable-live-monitor",

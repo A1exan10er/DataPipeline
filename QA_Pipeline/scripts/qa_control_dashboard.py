@@ -3,7 +3,7 @@
 This service is intentionally small and self-contained:
 - serves a browser UI on one port
 - tracks dashboard-started runs in a local SQLite registry
-- starts/stops approved pipeline modes through tmux
+- starts/stops approved pipeline modes through systemd or validated detached processes
 - reports server load, event listener queue state, and per-run summaries
 """
 
@@ -14,6 +14,7 @@ import html
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import sqlite3
@@ -21,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -76,6 +78,7 @@ DEFAULT_REGISTRY_DB = DEFAULT_MANAGER_DIR / "runs.db"
 DEFAULT_ISSUE_HISTORY_DB = DEFAULT_MANAGER_DIR / "issue_history.db"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "dashboard_runs"
 DEFAULT_VERIFIED_ROOT = Path("/mnt/nas/database/verified")
+DEFAULT_RUN_BACKEND = os.environ.get("DASHBOARD_RUN_BACKEND", "auto")
 EVENT_CONTROL_SCRIPT = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "event_listener_control.sh"
 EVENT_JOB_DB = PROJECT_ROOT / "outputs" / "event_listener" / "jobs.db"
 EVENT_CONTROL_DIR = PROJECT_ROOT / "outputs" / "event_listener" / "control"
@@ -103,6 +106,14 @@ class PipelineRunRequest:
     settings: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class RunManagerHandle:
+    manager: str
+    manager_id: str = ""
+    manager_pid: int | None = None
+    manager_start_ticks: str = ""
+
+
 class DashboardHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -117,6 +128,7 @@ class DashboardState:
         self.output_root = _project_path(args.output_root)
         self.verified_root = _project_path(args.verified_root)
         self.qa_python = _absolute_path(args.qa_python)
+        self.run_backend = str(args.run_backend)
         self.refresh_seconds = max(1.0, float(args.refresh_seconds))
         self.max_discovered_runs = max(0, int(args.max_discovered_runs))
         self.auto_work_session_reports = not args.disable_auto_work_session_reports
@@ -157,6 +169,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--verified-root", default=str(DEFAULT_VERIFIED_ROOT))
     parser.add_argument("--qa-python", default="datapipeline-env/bin/python")
+    parser.add_argument(
+        "--run-backend",
+        choices=("auto", "systemd", "process"),
+        default=DEFAULT_RUN_BACKEND,
+        help=(
+            "Manager for dashboard-started pipeline runs. auto uses user-systemd "
+            "when available and otherwise a validated detached process."
+        ),
+    )
     parser.add_argument("--refresh-seconds", type=float, default=5.0)
     parser.add_argument("--max-discovered-runs", type=int, default=200)
     parser.add_argument(
@@ -343,6 +364,10 @@ def init_registry(db_path: Path) -> None:
                 db_path TEXT NOT NULL,
                 command TEXT NOT NULL,
                 tmux_session TEXT,
+                manager TEXT NOT NULL DEFAULT '',
+                manager_id TEXT NOT NULL DEFAULT '',
+                manager_pid INTEGER,
+                manager_start_ticks TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 phases TEXT,
                 workers INTEGER,
@@ -379,6 +404,10 @@ def init_registry(db_path: Path) -> None:
             "severe_report_config": "TEXT NOT NULL DEFAULT ''",
             "continue_after_fail": "INTEGER NOT NULL DEFAULT 0",
             "operator_filter": "TEXT NOT NULL DEFAULT ''",
+            "manager": "TEXT NOT NULL DEFAULT ''",
+            "manager_id": "TEXT NOT NULL DEFAULT ''",
+            "manager_pid": "INTEGER",
+            "manager_start_ticks": "TEXT NOT NULL DEFAULT ''",
         }
         for column_name, declaration in migrations.items():
             if column_name not in columns:
@@ -484,6 +513,7 @@ def api_status(state: DashboardState) -> dict[str, Any]:
         return {
             "generated_at": now_iso(),
             "server": server_load(),
+            "run_launcher": run_launcher_status(state),
             "event_listener": event_listener_status(),
             "consecutive_failures": consecutive_failure_warnings(state),
             "runs": list_runs(state, limit=30),
@@ -500,7 +530,9 @@ def list_runs(state: DashboardState, limit: int | None = None) -> list[dict[str,
         by_key[run["run_id"]] = run
     for run in registered:
         run.update(run_summary(Path(run["db_path"]), Path(run["output_dir"])))
-        run["tmux_running"] = tmux_session_running(run.get("tmux_session") or "")
+        run["manager"] = run_manager_name(run)
+        run["manager_running"] = run_manager_running(run)
+        run["tmux_running"] = run["manager"] == "tmux" and run["manager_running"]
         by_key[run["run_id"]] = run
     runs = list(by_key.values())
     runs.sort(key=lambda item: item.get("updated_at") or item.get("mtime") or "", reverse=True)
@@ -512,7 +544,8 @@ def registered_runs(registry_db: Path) -> list[dict[str, Any]]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT run_id, mode, output_dir, db_path, tmux_session, status,
+            SELECT run_id, mode, output_dir, db_path, tmux_session,
+                   manager, manager_id, manager_pid, manager_start_ticks, status,
                    phases, workers, batch_size, root_path, date_from, date_to,
                    task_filter, operator_filter, started_at, finished_at, updated_at, notes,
                    severe_report_requested, severe_report_config,
@@ -555,6 +588,11 @@ def discover_output_runs(state: DashboardState) -> list[dict[str, Any]]:
             "output_dir": str(output_dir),
             "db_path": str(db_path),
             "tmux_session": "",
+            "manager": "",
+            "manager_id": "",
+            "manager_pid": None,
+            "manager_start_ticks": "",
+            "manager_running": False,
             "status": "complete",
             "updated_at": mtime_iso(output_dir),
             "mtime": mtime_iso(output_dir),
@@ -1035,8 +1073,6 @@ def validate_execution_requirements(
     pipeline_script = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "run_pipeline.py"
     if not pipeline_script.is_file():
         raise ValueError(f"run_pipeline.py does not exist: {pipeline_script}")
-    if shutil.which("tmux") is None:
-        raise ValueError("tmux is required to start dashboard pipeline runs")
     configured_root = Path(state.verified_root).resolve(strict=False)
     if not configured_root.is_dir():
         raise ValueError(f"Configured data root does not exist or is not a directory: {configured_root}")
@@ -1079,7 +1115,6 @@ def api_start_run(state: DashboardState, payload: dict[str, Any]) -> dict[str, A
     run_id = sanitize_id(str(payload.get("run_id") or make_run_id(mode)))
     output_dir = state.output_root / run_id
     db_path = output_dir / "qa.db"
-    session = sanitize_id(f"qa_dash_{run_id}")[:80]
     if registered_run(state.registry_db, run_id) is not None:
         raise ValueError(f"run_id already exists: {run_id}")
     request = build_pipeline_command(state, payload, run_id, output_dir, db_path)
@@ -1096,7 +1131,11 @@ def api_start_run(state: DashboardState, payload: dict[str, Any]) -> dict[str, A
             "output_dir": str(output_dir),
             "db_path": str(db_path),
             "command": shell_command(command),
-            "tmux_session": session,
+            "tmux_session": "",
+            "manager": "",
+            "manager_id": "",
+            "manager_pid": None,
+            "manager_start_ticks": "",
             "status": "running",
             "phases": settings["phases"],
             "workers": settings["workers"],
@@ -1114,9 +1153,11 @@ def api_start_run(state: DashboardState, payload: dict[str, Any]) -> dict[str, A
             "severe_report_config": settings["operator_severe_config"],
             "continue_after_fail": int(settings["continue_after_fail"]),
         }
+    handle: RunManagerHandle | None = None
     try:
         write_run_script(command_path, command, log_path)
-        start_tmux(session, f"bash {shlex.quote(str(command_path))}")
+        handle = launch_dashboard_run(state, run_id, command_path)
+        apply_run_manager_handle(row, handle)
     except Exception as exc:
         row["status"] = "failed"
         row["finished_at"] = now_iso()
@@ -1127,14 +1168,21 @@ def api_start_run(state: DashboardState, payload: dict[str, Any]) -> dict[str, A
     try:
         record_run(state.registry_db, row)
     except Exception:
-        if tmux_session_running(session):
-            subprocess.run(["tmux", "kill-session", "-t", session], cwd=PROJECT_ROOT, check=False)
+        if handle is not None:
+            stop_run_manager(row)
         raise
-    append_run_event(state.registry_db, run_id, "start", f"Started tmux session {session}")
+    append_run_event(
+        state.registry_db,
+        run_id,
+        "start",
+        f"Started with {handle.manager} manager {handle.manager_id or handle.manager_pid}",
+    )
     return {
         "ok": True,
         "run_id": run_id,
-        "tmux_session": session,
+        "manager": handle.manager,
+        "manager_id": handle.manager_id,
+        "manager_pid": handle.manager_pid,
         "output_dir": str(output_dir),
         "command": shell_command(command),
     }
@@ -1144,11 +1192,15 @@ def api_stop_run(state: DashboardState, run_id: str) -> dict[str, Any]:
     run = find_run(state, run_id)
     if not run:
         raise ValueError(f"unknown run_id: {run_id}")
-    session = run.get("tmux_session") or ""
-    if session and tmux_session_running(session):
-        subprocess.run(["tmux", "kill-session", "-t", session], cwd=PROJECT_ROOT, check=False)
+    manager = run_manager_name(run)
+    stop_run_manager(run)
     update_run_status(state.registry_db, run_id, "stopped", finished=True)
-    append_run_event(state.registry_db, run_id, "stop", "Stopped by dashboard")
+    append_run_event(
+        state.registry_db,
+        run_id,
+        "stop",
+        f"Stopped by dashboard using {manager or 'inactive'} manager",
+    )
     return {"ok": True, "run_id": run_id, "status": "stopped"}
 
 
@@ -1157,8 +1209,7 @@ def api_resume_run(state: DashboardState, run_id: str) -> dict[str, Any]:
     run = registered_run(state.registry_db, run_id)
     if not run:
         raise ValueError(f"unknown registered run_id: {run_id}")
-    session = str(run.get("tmux_session") or "")
-    if session and tmux_session_running(session):
+    if run_manager_running(run):
         raise ValueError(f"run is already active: {run_id}")
     db_path = Path(str(run.get("db_path") or ""))
     output_dir = Path(str(run.get("output_dir") or ""))
@@ -1174,16 +1225,32 @@ def api_resume_run(state: DashboardState, run_id: str) -> dict[str, Any]:
     exit_status_path = output_dir / "dashboard_exit_status.txt"
     exit_status_path.unlink(missing_ok=True)
     write_run_script(command_path, command, log_path)
-    start_tmux(session, f"bash {shlex.quote(str(command_path))}")
-    with sqlite3.connect(state.registry_db) as conn:
-        conn.execute(
-            """
-            UPDATE runs
-            SET status = 'running', command = ?, finished_at = '', updated_at = ?, notes = ''
-            WHERE run_id = ?
-            """,
-            (shell_command(command), now_iso(), run_id),
-        )
+    handle = launch_dashboard_run(state, run_id, command_path)
+    try:
+        with sqlite3.connect(state.registry_db) as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET status = 'running', command = ?, tmux_session = '',
+                    manager = ?, manager_id = ?, manager_pid = ?, manager_start_ticks = ?,
+                    finished_at = '', updated_at = ?, notes = ''
+                WHERE run_id = ?
+                """,
+                (
+                    shell_command(command),
+                    handle.manager,
+                    handle.manager_id,
+                    handle.manager_pid,
+                    handle.manager_start_ticks,
+                    now_iso(),
+                    run_id,
+                ),
+            )
+    except Exception:
+        cleanup_row = dict(run)
+        apply_run_manager_handle(cleanup_row, handle)
+        stop_run_manager(cleanup_row)
+        raise
     append_run_event(
         state.registry_db,
         run_id,
@@ -1198,6 +1265,9 @@ def api_resume_run(state: DashboardState, run_id: str) -> dict[str, Any]:
         "db_path": str(db_path),
         "output_dir": str(output_dir),
         "command": shell_command(command),
+        "manager": handle.manager,
+        "manager_id": handle.manager_id,
+        "manager_pid": handle.manager_pid,
     }
 
 
@@ -4042,8 +4112,7 @@ def sync_registered_run_statuses(state: DashboardState) -> None:
         for run in runs:
             if run.get("status") != "running":
                 continue
-            session = run.get("tmux_session") or ""
-            if session and tmux_session_running(session):
+            if run_manager_running(run):
                 continue
             run_status = latest_run_status(Path(run["output_dir"]))
             status = str(run_status.get("status") or "")
@@ -4059,17 +4128,25 @@ def sync_registered_run_statuses(state: DashboardState) -> None:
 
 
 def record_run(registry_db: Path, row: dict[str, Any]) -> None:
+    row = dict(row)
+    row.setdefault("tmux_session", "")
+    row.setdefault("manager", "")
+    row.setdefault("manager_id", "")
+    row.setdefault("manager_pid", None)
+    row.setdefault("manager_start_ticks", "")
     with sqlite3.connect(registry_db) as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO runs (
                 run_id, mode, output_dir, db_path, command, tmux_session,
+                manager, manager_id, manager_pid, manager_start_ticks,
                 status, phases, workers, batch_size, root_path, date_from,
                 date_to, task_filter, operator_filter, started_at, finished_at, updated_at, notes,
                 severe_report_requested, severe_report_config, continue_after_fail
             )
             VALUES (
                 :run_id, :mode, :output_dir, :db_path, :command, :tmux_session,
+                :manager, :manager_id, :manager_pid, :manager_start_ticks,
                 :status, :phases, :workers, :batch_size, :root_path, :date_from,
                 :date_to, :task_filter, :operator_filter, :started_at, :finished_at, :updated_at, :notes,
                 :severe_report_requested, :severe_report_config, :continue_after_fail
@@ -4512,6 +4589,270 @@ def write_run_script(path: Path, command: list[str], log_path: Path) -> None:
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     path.chmod(0o755)
+
+
+def configured_run_backend(state: DashboardState) -> str:
+    backend = str(getattr(state, "run_backend", DEFAULT_RUN_BACKEND) or "auto").strip().lower()
+    if backend not in {"auto", "systemd", "process"}:
+        raise ValueError("run backend must be auto, systemd, or process")
+    return backend
+
+
+def systemd_user_available() -> bool:
+    if shutil.which("systemctl") is None or shutil.which("systemd-run") is None:
+        return False
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "show-environment"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def effective_run_backend(state: DashboardState) -> str:
+    configured = configured_run_backend(state)
+    if configured == "process":
+        return "process"
+    available = systemd_user_available()
+    if configured == "systemd":
+        if not available:
+            raise RuntimeError("user-systemd is required by the configured dashboard run backend")
+        return "systemd"
+    return "systemd" if available else "process"
+
+
+def run_launcher_status(state: DashboardState) -> dict[str, Any]:
+    configured = configured_run_backend(state)
+    available = systemd_user_available()
+    if configured == "systemd":
+        effective = "systemd"
+    elif configured == "process":
+        effective = "process"
+    else:
+        effective = "systemd" if available else "process"
+    return {
+        "configured_backend": configured,
+        "effective_backend": effective,
+        "systemd_available": available,
+    }
+
+
+def launch_dashboard_run(
+    state: DashboardState,
+    run_id: str,
+    command_path: Path,
+) -> RunManagerHandle:
+    backend = effective_run_backend(state)
+    if backend == "systemd":
+        return launch_systemd_run(run_id, command_path)
+    return launch_process_run(command_path)
+
+
+def launch_systemd_run(run_id: str, command_path: Path) -> RunManagerHandle:
+    safe_run_id = sanitize_id(run_id)[:120]
+    unit = f"datapipeline-qa-run-{safe_run_id}-{uuid.uuid4().hex[:10]}.service"
+    try:
+        completed = subprocess.run(
+            [
+                "systemd-run",
+                "--user",
+                "--quiet",
+                "--collect",
+                "--service-type=exec",
+                "--unit",
+                unit,
+                "--property=TimeoutStopSec=30s",
+                "bash",
+                str(command_path),
+            ],
+            cwd=PROJECT_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as exc:
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "stop", unit],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        raise RuntimeError("user-systemd timed out while starting dashboard run") from exc
+    if completed.returncode != 0:
+        message = completed.stdout.strip() or f"exit {completed.returncode}"
+        raise RuntimeError(f"user-systemd failed to start dashboard run: {message}")
+    return RunManagerHandle(manager="systemd", manager_id=unit)
+
+
+def launch_process_run(command_path: Path) -> RunManagerHandle:
+    try:
+        process = subprocess.Popen(
+            ["bash", str(command_path)],
+            cwd=PROJECT_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"detached process failed to start dashboard run: {exc}") from exc
+    start_ticks = process_start_ticks(process.pid)
+    if not start_ticks:
+        return_code = process.poll()
+        if return_code is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        raise RuntimeError(
+            "detached dashboard run exited during startup"
+            + (f" with code {return_code}" if return_code is not None else "")
+        )
+    return RunManagerHandle(
+        manager="process",
+        manager_pid=process.pid,
+        manager_start_ticks=start_ticks,
+    )
+
+
+def apply_run_manager_handle(row: dict[str, Any], handle: RunManagerHandle) -> None:
+    row["tmux_session"] = ""
+    row["manager"] = handle.manager
+    row["manager_id"] = handle.manager_id
+    row["manager_pid"] = handle.manager_pid
+    row["manager_start_ticks"] = handle.manager_start_ticks
+
+
+def run_manager_name(run: dict[str, Any]) -> str:
+    manager = str(run.get("manager") or "").strip().lower()
+    if manager in {"systemd", "process", "tmux"}:
+        return manager
+    if str(run.get("tmux_session") or "").strip():
+        return "tmux"
+    return ""
+
+
+def run_manager_running(run: dict[str, Any]) -> bool:
+    manager = run_manager_name(run)
+    if manager == "systemd":
+        return systemd_run_unit_running(str(run.get("manager_id") or ""))
+    if manager == "process":
+        return managed_run_process_pid(run) is not None
+    if manager == "tmux":
+        return tmux_session_running(str(run.get("tmux_session") or run.get("manager_id") or ""))
+    return False
+
+
+def _valid_run_unit(unit: str) -> bool:
+    return bool(re.fullmatch(r"datapipeline-qa-run-[A-Za-z0-9_.-]+\.service", unit))
+
+
+def systemd_run_unit_running(unit: str) -> bool:
+    if not _valid_run_unit(unit):
+        return False
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", unit],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def process_start_ticks(pid: int) -> str:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = raw.rsplit(")", 1)[1].strip().split()
+        return fields[19]
+    except (OSError, IndexError):
+        return ""
+
+
+def process_cmdline(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+
+def managed_run_process_pid(run: dict[str, Any]) -> int | None:
+    try:
+        pid = int(run.get("manager_pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    expected_ticks = str(run.get("manager_start_ticks") or "")
+    if pid <= 1 or not expected_ticks or process_start_ticks(pid) != expected_ticks:
+        return None
+    expected_script = str(Path(str(run.get("output_dir") or "")) / "dashboard_command.sh")
+    if expected_script not in process_cmdline(pid):
+        return None
+    return pid
+
+
+def stop_run_manager(run: dict[str, Any]) -> bool:
+    manager = run_manager_name(run)
+    if manager == "systemd":
+        unit = str(run.get("manager_id") or "")
+        if not _valid_run_unit(unit) or not systemd_run_unit_running(unit):
+            return False
+        completed = subprocess.run(
+            ["systemctl", "--user", "stop", unit],
+            cwd=PROJECT_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=35,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"user-systemd failed to stop dashboard run unit: {unit}")
+        return True
+    if manager == "process":
+        pid = managed_run_process_pid(run)
+        if pid is None:
+            return False
+        try:
+            pgid = os.getpgid(pid)
+            if pgid == pid:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return False
+        deadline = time.monotonic() + 10
+        while managed_run_process_pid(run) is not None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if managed_run_process_pid(run) is not None:
+            if pgid == pid:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        return True
+    if manager == "tmux":
+        session = str(run.get("tmux_session") or run.get("manager_id") or "")
+        if session and tmux_session_running(session):
+            subprocess.run(
+                ["tmux", "kill-session", "-t", session],
+                cwd=PROJECT_ROOT,
+                check=False,
+            )
+            return True
+    return False
 
 
 def start_tmux(session: str, command: str) -> None:
@@ -5692,7 +6033,7 @@ function renderRuns(runs) {{
   body.innerHTML = runs.map(run => {{
     const counts = run.status_counts || {{}};
     const status = run.status || val(run,'live_status.status','');
-    const active = Boolean(run.tmux_running) || status === 'running';
+    const active = Boolean(run.manager_running) || status === 'running';
     const canResume = !active && Boolean(run.command) && ['stopped', 'failed'].includes(status);
     const actions = active
       ? `<button onclick="event.stopPropagation(); stopRun('${{run.run_id}}')">Stop</button>`

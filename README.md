@@ -303,6 +303,11 @@ http://<server-ip>:4131
 控制台启动 run 时不按 `quality.labels` 过滤 episode。正常/测试标签按规则处理，
 缺失或非允许标签由第 1 阶段报告，其他已选择阶段仍会继续检查同一个 episode。
 
+`Start Run` 不依赖 `tmux`。生产服务器把每次检查作为独立的 user-systemd transient
+service 托管，因此 Dashboard 更新或重启不会中断正在运行的检查。本地没有可用的
+user-systemd 时，`auto` 后端会使用带 PID、进程启动时间和命令校验的独立后台进程；
+也可通过 `--run-backend process` 明确选择该模式。
+
 ### 中文工作时段报告
 
 中文报告生成脚本：

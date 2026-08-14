@@ -28,9 +28,15 @@ def test_runner_exposes_real_user_systemd_config_inside_sandbox() -> None:
     workflow = (PROJECT_ROOT / ".gitea" / "workflows" / "deploy.yml").read_text(
         encoding="utf-8"
     )
+    dashboard_unit = (PROJECT_ROOT / "deploy" / "datapipeline-dashboard.service").read_text(
+        encoding="utf-8"
+    )
     assert "--setenv XDG_CONFIG_HOME /home/xinzhi/.config" in launcher
     assert 'systemctl --user enable "$SYSTEMD_USER_DIR/$DASHBOARD_SERVICE"' in deploy_script
     assert "XDG_CONFIG_HOME: /home/xinzhi/.config" in workflow
+    assert "Environment=DASHBOARD_RUN_BACKEND=systemd" in dashboard_unit
+    assert 'launcher.get("configured_backend") != "systemd"' in deploy_script
+    assert 'not launcher.get("systemd_available")' in deploy_script
 
 
 def test_production_dcs_config_is_checked_outside_runner_sandbox() -> None:
