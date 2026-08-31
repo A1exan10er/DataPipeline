@@ -9,9 +9,10 @@ from __future__ import annotations
 import csv
 import json
 import os
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 from scripts.pipeline.qa_config import config_value
 
@@ -23,30 +24,49 @@ CATEGORY_UMI = "umi"
 DEFINED_CATEGORIES = {CATEGORY_SINGLE_ARM, CATEGORY_DUAL_ARM, CATEGORY_UMI}
 
 
+@dataclass(frozen=True)
+class TaskReferenceSnapshot:
+    """One cached view of the configured task compatibility catalog."""
+
+    mapping: dict[str, dict[str, Any]]
+    source: str
+    available: bool
+    error: str = ""
+
+
 def task_device_category(task_names: list[str]) -> dict[str, Any]:
-    """Return the reference device category for the first matching task name."""
-    mapping = _task_reference_mapping()
+    """Return all reference device categories for the first matching task name."""
+    snapshot = _task_reference_snapshot()
+    mapping = snapshot.mapping
     for task_name in task_names:
         normalized = _normalize_name(task_name)
         if not normalized:
             continue
         if normalized in mapping:
             row = mapping[normalized]
+            categories = list(row["categories"])
             return {
-                "category": row["category"],
-                "defined": row["category"] in DEFINED_CATEGORIES,
+                # Keep the singular field only when it is unambiguous. Older
+                # result readers can continue to consume single-category rows
+                # without accidentally treating a multi-category task as one.
+                "category": categories[0] if len(categories) == 1 else "",
+                "categories": categories,
+                "defined": bool(categories),
                 "matched_task_key": row["task_key"],
                 "source": row["source"],
                 "raw_compatible_device_types": row["raw"],
-                "reference_available": True,
+                "reference_available": snapshot.available,
+                "reference_error": snapshot.error,
             }
     return {
         "category": "",
+        "categories": [],
         "defined": False,
         "matched_task_key": "",
-        "source": _reference_source_name(),
+        "source": snapshot.source,
         "raw_compatible_device_types": None,
-        "reference_available": bool(mapping),
+        "reference_available": snapshot.available,
+        "reference_error": snapshot.error,
     }
 
 
@@ -66,54 +86,108 @@ def robot_device_category(robot: str) -> str:
     return ""
 
 
-def categories_compatible(task_category: str, robot_category: str) -> bool:
-    """Return whether task and robot categories are compatible."""
-    return task_category in DEFINED_CATEGORIES and task_category == robot_category
+def categories_compatible(
+    task_categories: str | Collection[str], robot_category: str
+) -> bool:
+    """Return whether the robot belongs to any task-compatible category."""
+    if isinstance(task_categories, str):
+        allowed = {task_categories}
+    else:
+        allowed = {str(category) for category in task_categories}
+    return robot_category in DEFINED_CATEGORIES and robot_category in allowed
+
+
+def _task_reference_mapping() -> dict[str, dict[str, Any]]:
+    """Compatibility wrapper for callers that only need the mapping."""
+    return _task_reference_snapshot().mapping
 
 
 @lru_cache(maxsize=1)
-def _task_reference_mapping() -> dict[str, dict[str, Any]]:
-    file_mapping = _load_reference_file()
-    if file_mapping:
-        return file_mapping
-    return _load_reference_database()
+def _task_reference_snapshot() -> TaskReferenceSnapshot:
+    file_snapshot = _load_reference_file()
+    if file_snapshot.available:
+        return file_snapshot
+
+    database_snapshot = _load_reference_database()
+    if database_snapshot.available:
+        return database_snapshot
+
+    failed_snapshots = [
+        snapshot
+        for snapshot in (file_snapshot, database_snapshot)
+        if snapshot.error
+    ]
+    errors = [snapshot.error for snapshot in failed_snapshots]
+    source = ";".join(
+        snapshot.source for snapshot in failed_snapshots if snapshot.source
+    )
+    return TaskReferenceSnapshot({}, source, False, "; ".join(errors))
 
 
-def _load_reference_file() -> dict[str, dict[str, Any]]:
+def _load_reference_file() -> TaskReferenceSnapshot:
     path_value = os.environ.get("QA_TASK_REFERENCE_FILE", "").strip()
     if not path_value:
-        return {}
+        return TaskReferenceSnapshot({}, "", False)
     path = Path(path_value)
+    source = f"file:{path}"
     try:
         if path.suffix.lower() == ".json":
             rows = json.loads(path.read_text(encoding="utf-8"))
         else:
             with path.open("r", encoding="utf-8", newline="") as file_obj:
                 rows = list(csv.DictReader(file_obj))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        return TaskReferenceSnapshot(
+            {}, source, False, f"Task reference file could not be loaded: {exc}"
+        )
     if not isinstance(rows, list):
-        return {}
-    return _rows_to_mapping(rows, f"file:{path}")
+        return TaskReferenceSnapshot(
+            {}, source, False, "Task reference file must contain a list of task rows."
+        )
+    mapping = _rows_to_mapping(rows, source)
+    if not mapping:
+        return TaskReferenceSnapshot(
+            {}, source, False, "Task reference file contained no usable task rows."
+        )
+    return TaskReferenceSnapshot(mapping, source, True)
 
 
-def _load_reference_database() -> dict[str, dict[str, Any]]:
+def _load_reference_database() -> TaskReferenceSnapshot:
     host = os.environ.get("QA_TASK_DB_HOST", "").strip()
     database = os.environ.get("QA_TASK_DB_NAME", "").strip()
     user = os.environ.get("QA_TASK_DB_USER", "").strip()
     password = os.environ.get("QA_TASK_DB_PASSWORD", "")
-    if not (host and database and user and password):
-        return {}
-    port = int(os.environ.get("QA_TASK_DB_PORT", "5432"))
     table = os.environ.get("QA_TASK_DB_TABLE", "public.tasks").strip()
+    source = f"postgres:{host}/{database}.{table}" if host and database else "postgres"
+    if not (host and database and user and password):
+        return TaskReferenceSnapshot(
+            {}, source, False, "PostgreSQL task reference is not fully configured."
+        )
+    try:
+        port = int(os.environ.get("QA_TASK_DB_PORT", "5432"))
+    except ValueError as exc:
+        return TaskReferenceSnapshot(
+            {}, source, False, f"PostgreSQL task reference port is invalid: {exc}"
+        )
     task_column = os.environ.get("QA_TASK_DB_TASK_COLUMN", "task_key").strip()
     device_column = os.environ.get("QA_TASK_DB_DEVICE_COLUMN", "compatible_device_types").strip()
     statement = f"SELECT {task_column}, {device_column} FROM {table}"
     try:
         rows = _query_postgres(host, port, database, user, password, statement)
-    except Exception:
-        return {}
-    return _rows_to_mapping(rows, f"postgres:{host}/{database}.{table}")
+    except Exception as exc:
+        return TaskReferenceSnapshot(
+            {},
+            source,
+            False,
+            "PostgreSQL task reference query failed: "
+            + _redacted_error_message(exc, password),
+        )
+    mapping = _rows_to_mapping(rows, source)
+    if not mapping:
+        return TaskReferenceSnapshot(
+            {}, source, False, "PostgreSQL task reference query returned no usable task rows."
+        )
+    return TaskReferenceSnapshot(mapping, source, True)
 
 
 def _query_postgres(
@@ -146,7 +220,7 @@ def _query_postgres(
     try:
         import psycopg2  # type: ignore[import-not-found]
     except ImportError:
-        return []
+        raise RuntimeError("neither psycopg nor psycopg2 is installed")
     with psycopg2.connect(
         host=host,
         port=port,
@@ -171,10 +245,11 @@ def _rows_to_mapping(rows: list[Any], source: str) -> dict[str, dict[str, Any]]:
         normalized_task = _normalize_name(str(task_key or ""))
         if not normalized_task:
             continue
-        category = _category_from_device_types(compatible_device_types)
+        categories = _categories_from_device_types(compatible_device_types)
         mapping[normalized_task] = {
             "task_key": str(task_key),
-            "category": category,
+            "categories": categories,
+            "category": categories[0] if len(categories) == 1 else "",
             "raw": _safe_json_value(compatible_device_types),
             "source": source,
         }
@@ -187,23 +262,34 @@ def _row_value(row: Any, key: str) -> Any:
     return getattr(row, key, None)
 
 
-def _category_from_device_types(value: Any) -> str:
+def _redacted_error_message(exc: Exception, secret: str) -> str:
+    message = str(exc)
+    return message.replace(secret, "<redacted>") if secret else message
+
+
+def _categories_from_device_types(value: Any) -> list[str]:
+    """Normalize every recognized compatible device type, preserving order."""
     values = _device_type_values(value)
-    categories = {_normalize_device_type(item) for item in values}
-    categories.discard("")
-    if CATEGORY_UMI in categories:
-        return CATEGORY_UMI
-    if CATEGORY_DUAL_ARM in categories:
-        return CATEGORY_DUAL_ARM
-    if CATEGORY_SINGLE_ARM in categories:
-        return CATEGORY_SINGLE_ARM
-    return ""
+    categories: list[str] = []
+    for item in values:
+        category = _normalize_device_type(item)
+        if category and category not in categories:
+            categories.append(category)
+    return categories
+
+
+def _category_from_device_types(value: Any) -> str:
+    """Return a category only when the compatible type is unambiguous."""
+    categories = _categories_from_device_types(value)
+    return categories[0] if len(categories) == 1 else ""
 
 
 def _device_type_values(value: Any) -> list[str]:
     if value is None:
         return []
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, set):
+        return sorted(str(item) for item in value)
+    if isinstance(value, (list, tuple)):
         return [str(item) for item in value]
     if isinstance(value, str):
         stripped = value.strip()
@@ -241,6 +327,8 @@ def _safe_json_value(value: Any) -> Any:
         return value
     if isinstance(value, tuple):
         return list(value)
+    if isinstance(value, set):
+        return sorted(value, key=str)
     return str(value)
 
 
@@ -284,11 +372,3 @@ def _default_robot_device_categories() -> dict[str, list[str]]:
         ],
         CATEGORY_UMI: ["umi"],
     }
-
-
-def _reference_source_name() -> str:
-    if os.environ.get("QA_TASK_REFERENCE_FILE", "").strip():
-        return "file"
-    if os.environ.get("QA_TASK_DB_HOST", "").strip():
-        return "postgres"
-    return ""

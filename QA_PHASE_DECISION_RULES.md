@@ -37,7 +37,8 @@ declared modalities, required files, checksum manifest, and quality labels.
 | `parent_path_structure` | parent path should look like `<task>/<date>/<operator>/<episode>` | warning |
 | `required_metadata_field` | `task_key`, `episode_index`, `duration_seconds`, `total_frames`, `modalities`, FPS, and `quality` must be valid | fail |
 | `task_folder_metadata_mismatch` | task folder name differs from `metadata.task_key` | pass/info, reported for cleanup |
-| `task_robot_mismatch` | task folder indicates one robot/source but metadata, episode name, or robot folder indicates another | fail |
+| `task_robot_mismatch` | episode robot category is absent from all compatible categories appointed to the task | fail |
+| `task_device_reference_unavailable` | task compatibility catalog is configured but unavailable or empty | needs_review |
 | `modality_folder_missing` | known modality in metadata has no matching folder | fail |
 | `required_modality_file_missing` | image modality lacks `video.mp4` or `timestamps.csv`; CSV modality lacks `data.csv` | fail |
 | `required_modality_file_empty` | required modality file exists but is empty | fail |

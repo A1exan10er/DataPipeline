@@ -84,6 +84,7 @@ BUILTIN_ISSUE_TITLES_ZH = {
     "standstill_motion_source_missing": "静止检测运动源缺失",
     "state_csv_row_count_mismatch": "状态数据行数与预期不一致",
     "task_device_reference_missing": "缺少任务设备参考信息",
+    "task_device_reference_unavailable": "任务设备参考目录不可用",
     "task_folder_metadata_mismatch": "任务目录与 metadata 记录不一致",
     "task_robot_mismatch": "任务与机器人类型不匹配",
     "timestamp_large_gap": "时间戳存在过大间隔",

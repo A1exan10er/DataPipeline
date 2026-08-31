@@ -39,6 +39,7 @@ DEFAULT_PHASE6_SIDECAR_FILENAME = "video_rotated_180.mp4"
 
 PENDING_STATUSES = ("pending", "retry")
 RETENTION_MANIFEST = "retention_cleanup.jsonl"
+TASK_ROBOT_MISMATCH_REQUEUE_REASON = "task_robot_mismatch_multi_category_fix"
 
 
 def utc_now() -> str:
@@ -74,6 +75,29 @@ def init_job_db(job_db: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, id)")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_mounted_path ON jobs(mounted_path)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_reprocess_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                previous_status TEXT NOT NULL,
+                previous_attempts INTEGER NOT NULL,
+                previous_run_id TEXT,
+                previous_output_dir TEXT,
+                previous_db_path TEXT,
+                previous_error TEXT,
+                previous_started_at TEXT,
+                previous_finished_at TEXT,
+                previous_updated_at TEXT,
+                requeued_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_job_reprocess_history_job_id "
+            "ON job_reprocess_history(job_id, id)"
         )
 
 
@@ -431,6 +455,136 @@ def recover_collateral_missing_path_failures(job_db: Path) -> int:
     return len(recovered)
 
 
+def task_robot_mismatch_requeue_candidates(
+    job_db: Path,
+    event_date: str,
+    repo_root: Path,
+) -> list[dict[str, Any]]:
+    """Find completed jobs whose only failing QA check is task_robot_mismatch."""
+    resolved_date = resolve_event_date_filter(event_date)
+    if not re.fullmatch(r"\d{8}", resolved_date):
+        raise ValueError("event_date must be YYYYMMDD, today, or yesterday")
+    candidates: list[dict[str, Any]] = []
+    with sqlite3.connect(job_db.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, status, attempts, mounted_path, payload_json, run_id,
+                   output_dir, db_path, error, started_at, finished_at, updated_at
+            FROM jobs
+            WHERE status = 'done'
+              AND (mounted_path LIKE ? OR mounted_path LIKE ?)
+            ORDER BY id
+            """,
+            (f"%/{resolved_date}/%", f"%{resolved_date}-%"),
+        ).fetchall()
+    for row in rows:
+        job = dict(row)
+        mounted_path = Path(str(job.get("mounted_path") or ""))
+        if episode_date_from_path(mounted_path) != resolved_date:
+            continue
+        qa_db = Path(str(job.get("db_path") or ""))
+        if not qa_db.is_absolute():
+            qa_db = repo_root / qa_db
+        if not qa_db.is_file():
+            continue
+        try:
+            with sqlite3.connect(qa_db.resolve().as_uri() + "?mode=ro", uri=True) as qa_conn:
+                failed_checks = {
+                    str(item[0])
+                    for item in qa_conn.execute(
+                        """
+                        SELECT DISTINCT check_name
+                        FROM findings
+                        WHERE episode_path = ? AND status = 'fail'
+                        """,
+                        (str(mounted_path),),
+                    ).fetchall()
+                    if item[0]
+                }
+        except sqlite3.Error:
+            continue
+        if failed_checks != {"task_robot_mismatch"}:
+            continue
+        job["db_path_resolved"] = str(qa_db)
+        job["failed_check_names"] = sorted(failed_checks)
+        candidates.append(job)
+    return candidates
+
+
+def apply_task_robot_mismatch_requeue(
+    job_db: Path,
+    candidates: list[dict[str, Any]],
+) -> list[int]:
+    """Audit and reset selected jobs in one transaction for listener pickup."""
+    if not candidates:
+        return []
+    now = utc_now()
+    requeued: list[int] = []
+    with sqlite3.connect(job_db) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        for candidate in candidates:
+            job_id = int(candidate["id"])
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE id = ? AND status = 'done'",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                continue
+            current = dict(row)
+            if str(current.get("db_path") or "") != str(candidate.get("db_path") or ""):
+                continue
+            cursor = conn.execute(
+                """
+                INSERT INTO job_reprocess_history (
+                    job_id, reason, previous_status, previous_attempts,
+                    previous_run_id, previous_output_dir, previous_db_path,
+                    previous_error, previous_started_at, previous_finished_at,
+                    previous_updated_at, requeued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    TASK_ROBOT_MISMATCH_REQUEUE_REASON,
+                    str(current.get("status") or ""),
+                    int(current.get("attempts") or 0),
+                    str(current.get("run_id") or ""),
+                    str(current.get("output_dir") or ""),
+                    str(current.get("db_path") or ""),
+                    str(current.get("error") or ""),
+                    current.get("started_at"),
+                    current.get("finished_at"),
+                    current.get("updated_at"),
+                    now,
+                ),
+            )
+            try:
+                payload = json.loads(str(current.get("payload_json") or "{}"))
+            except json.JSONDecodeError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload["qa_reprocess"] = {
+                "reason": TASK_ROBOT_MISMATCH_REQUEUE_REASON,
+                "requested_at": now,
+                "history_id": int(cursor.lastrowid),
+            }
+            conn.execute(
+                """
+                UPDATE jobs
+                SET payload_json = ?, status = 'pending', attempts = 0,
+                    run_id = '', output_dir = '', db_path = '', error = '',
+                    started_at = NULL, finished_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (json.dumps(payload, ensure_ascii=False, sort_keys=True), now, job_id),
+            )
+            requeued.append(job_id)
+        conn.commit()
+    return requeued
+
+
 def path_snapshot(path: Path) -> tuple[int, int, float]:
     file_count = 0
     total_bytes = 0
@@ -489,6 +643,43 @@ def wait_until_all_stable(paths: list[Path], interval: float, timeout: float) ->
 def run_pipeline_for_job(args: argparse.Namespace, job: dict[str, Any]) -> tuple[bool, str]:
     ok, detail, _count = run_pipeline_for_jobs(args, [job])
     return ok, detail
+
+
+def pipeline_run_location(
+    args: argparse.Namespace,
+    jobs: list[dict[str, Any]],
+    timestamp: str,
+) -> tuple[str, Path]:
+    """Return a run ID and collision-resistant output path for a claimed batch."""
+    first_id = int(jobs[0]["id"])
+    last_id = int(jobs[-1]["id"])
+    is_reprocess = False
+    for job in jobs:
+        try:
+            payload = json.loads(str(job.get("payload_json") or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict) and isinstance(payload.get("qa_reprocess"), dict):
+            is_reprocess = True
+            break
+    if is_reprocess:
+        run_id = f"{args.run_id_prefix}-{timestamp}-reprocess-jobs{first_id}-{last_id}"
+        output = (
+            Path(args.output_dir)
+            / "reprocesses"
+            / f"reprocess_{timestamp}_jobs_{first_id:08d}_{last_id:08d}"
+        )
+    elif len(jobs) == 1:
+        run_id = f"{args.run_id_prefix}-{timestamp}-job{first_id}"
+        output = Path(args.output_dir) / "jobs" / f"job_{first_id:08d}"
+    else:
+        run_id = f"{args.run_id_prefix}-{timestamp}-jobs{first_id}-{last_id}"
+        output = (
+            Path(args.output_dir)
+            / "batches"
+            / f"batch_{timestamp}_jobs_{first_id:08d}_{last_id:08d}"
+        )
+    return run_id, output
 
 
 def _resolve_job_episode(job: dict[str, Any]) -> Path:
@@ -554,15 +745,8 @@ def run_pipeline_for_jobs(
                 requeue_job(Path(args.job_db), int(job["id"]), detail)
         return False, detail, 0
 
-    first_id = int(valid_jobs[0]["id"])
-    last_id = int(valid_jobs[-1]["id"])
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    if len(valid_jobs) == 1:
-        run_id = f"{args.run_id_prefix}-{timestamp}-job{first_id}"
-        job_output = Path(args.output_dir) / "jobs" / f"job_{first_id:08d}"
-    else:
-        run_id = f"{args.run_id_prefix}-{timestamp}-jobs{first_id}-{last_id}"
-        job_output = Path(args.output_dir) / "batches" / f"batch_{timestamp}_jobs_{first_id:08d}_{last_id:08d}"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    run_id, job_output = pipeline_run_location(args, valid_jobs, timestamp)
     job_output.mkdir(parents=True, exist_ok=True)
     episode_list = job_output / "episodes.txt"
     episode_list.write_text("".join(f"{episode}\n" for episode in episodes), encoding="utf-8")
@@ -835,7 +1019,7 @@ def cleanup_event_outputs(args: argparse.Namespace) -> None:
 
 def _retention_candidates(output_dir: Path, include_size: bool = False) -> list[dict[str, Any]]:
     candidates = []
-    for parent_name in ("jobs", "batches"):
+    for parent_name in ("jobs", "batches", "reprocesses"):
         parent = output_dir / parent_name
         if not parent.is_dir():
             continue
@@ -1029,6 +1213,42 @@ def recover_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def requeue_task_robot_mismatch_command(args: argparse.Namespace) -> int:
+    resolved_date = resolve_event_date_filter(args.date)
+    try:
+        candidates = task_robot_mismatch_requeue_candidates(
+            Path(args.job_db), resolved_date, Path(args.repo_root)
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(
+        f"task_robot_mismatch requeue candidates for {resolved_date}: {len(candidates)}"
+    )
+    for job in candidates:
+        print(
+            json.dumps(
+                {
+                    "job_id": int(job["id"]),
+                    "mounted_path": str(job.get("mounted_path") or ""),
+                    "previous_run_id": str(job.get("run_id") or ""),
+                    "previous_output_dir": str(job.get("output_dir") or ""),
+                    "previous_db_path": str(job.get("db_path") or ""),
+                    "failed_check_names": job.get("failed_check_names", []),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    if not args.apply:
+        print("dry run only; pass --apply to audit and requeue these jobs")
+        return 0
+    requeued = apply_task_robot_mismatch_requeue(Path(args.job_db), candidates)
+    print(f"audited and requeued jobs: {len(requeued)}")
+    if requeued:
+        print("job_ids=" + ",".join(str(job_id) for job_id in requeued))
+    return 0
+
+
 def enqueue_manual(args: argparse.Namespace) -> int:
     init_job_db(Path(args.job_db))
     mounted = normalize_verified_path(args.verified_path, args.nas_prefix, args.mount_prefix)
@@ -1160,6 +1380,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     recover_parser = subparsers.add_parser("recover-running", help="Requeue stale running jobs.")
     add_common_args(recover_parser)
 
+    mismatch_parser = subparsers.add_parser(
+        "requeue-task-robot-mismatch",
+        help="Audit and requeue one date's jobs that failed only task_robot_mismatch.",
+    )
+    add_common_args(mismatch_parser)
+    mismatch_parser.add_argument(
+        "--date",
+        required=True,
+        help="Episode date as YYYYMMDD, today, or yesterday.",
+    )
+    mismatch_parser.add_argument(
+        "--repo-root",
+        default=str(Path(__file__).resolve().parents[1]),
+        help="Resolve relative QA result database paths from this directory.",
+    )
+    mismatch_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write audit rows and reset matching jobs to pending. Default is dry-run.",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -1189,6 +1430,8 @@ def main(argv: list[str] | None = None) -> int:
         return enqueue_manual(args)
     if args.command == "recover-running":
         return recover_command(args)
+    if args.command == "requeue-task-robot-mismatch":
+        return requeue_task_robot_mismatch_command(args)
     if args.command == "worker":
         asyncio.run(worker_loop(args))
         return 0

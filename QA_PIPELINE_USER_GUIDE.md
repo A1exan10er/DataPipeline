@@ -572,7 +572,8 @@ Main not-pass cases:
 | `quality_label_unexpected` | Labels exist but do not contain `完全正常` or `测试任务`; recorded for internal review and repeated-issue escalation | needs_review |
 | `action_modality_singular_name` | Modality/folder uses `action.*` instead of `actions.*`; fix item is reported | warning |
 | `unknown_modality_detected` | Unknown modality names are reported for review | pass/info by default |
-| `task_robot_mismatch` | Metadata/name/path robot source conflicts with robot token in task folder | fail in current Phase 1 |
+| `task_robot_mismatch` | Episode robot category is not in the task catalog's full `compatible_device_types` list | fail in current Phase 1 |
+| `task_device_reference_unavailable` | Configured task catalog cannot be loaded or queried | needs_review |
 
 `observation.image.flow_*` modalities are intentionally ignored by Phase 1 file
 integrity checks. Their presence or absence does not affect pass/fail status.

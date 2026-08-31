@@ -236,9 +236,39 @@ def _check_task_context_consistency(state: EpisodeState) -> list[Finding]:
             )
         )
     reference = task_device_category([task_key, robot_tagged_folder, task_folder])
-    task_category = str(reference.get("category", ""))
+    raw_categories = reference.get("categories", [])
+    task_categories = (
+        [str(category) for category in raw_categories if str(category)]
+        if isinstance(raw_categories, (list, tuple, set))
+        else []
+    )
+    # Accept old single-category providers during rolling deployments while
+    # ensuring new multi-category rows are never collapsed to one value.
+    if not task_categories and reference.get("category"):
+        task_categories = [str(reference["category"])]
+    task_category = task_categories[0] if len(task_categories) == 1 else ""
     actual_category = robot_device_category(robot)
-    if reference.get("reference_available") and not reference.get("defined"):
+    if not reference.get("reference_available", True):
+        findings.append(
+            _finding(
+                state,
+                "task_device_reference_unavailable",
+                "minor",
+                "needs_review",
+                "Task compatible device type reference is unavailable; robot compatibility could not be checked.",
+                {
+                    "task_key": task_key,
+                    "task_folder": task_folder,
+                    "robot_tagged_task_folder": robot_tagged_folder,
+                    "reference_source": reference.get("source", ""),
+                    "reference_error": reference.get("reference_error", ""),
+                    "actual_robot": robot,
+                    "actual_robot_category": actual_category,
+                    "note": "This is a reference-source failure, not evidence that the robot is incompatible.",
+                },
+            )
+        )
+    elif not reference.get("defined"):
         findings.append(
             _finding(
                 state,
@@ -259,7 +289,7 @@ def _check_task_context_consistency(state: EpisodeState) -> list[Finding]:
                 },
             )
         )
-    elif task_category and not actual_category:
+    elif task_categories and not actual_category:
         findings.append(
             _finding(
                 state,
@@ -270,7 +300,7 @@ def _check_task_context_consistency(state: EpisodeState) -> list[Finding]:
                 {
                     "task_key": task_key,
                     "task_folder": task_folder,
-                    "expected_task_device_category": task_category,
+                    "expected_task_device_categories": task_categories,
                     "actual_robot": robot,
                     "metadata_robot": str(state.metadata.get("robot", "")),
                     "episode_name_robot": _robot_from_episode_name(state.episode_path.name),
@@ -280,19 +310,23 @@ def _check_task_context_consistency(state: EpisodeState) -> list[Finding]:
                 },
             )
         )
-    elif task_category and actual_category and not categories_compatible(task_category, actual_category):
+    elif (
+        task_categories
+        and actual_category
+        and not categories_compatible(task_categories, actual_category)
+    ):
         findings.append(
             _finding(
                 state,
                 "task_robot_mismatch",
                 "major",
                 "fail",
-                "Episode robot/source category does not match the task compatible device type.",
+                "Episode robot/source category does not match any task-compatible device category.",
                 {
                     "task_key": task_key,
                     "task_folder": task_folder,
                     "robot_tagged_task_folder": robot_tagged_folder,
-                    "expected_task_device_category": task_category,
+                    "expected_task_device_categories": task_categories,
                     "actual_robot_category": actual_category,
                     "matched_reference_task_key": reference.get("matched_task_key", ""),
                     "reference_source": reference.get("source", ""),
@@ -306,7 +340,7 @@ def _check_task_context_consistency(state: EpisodeState) -> list[Finding]:
                         {
                             "operation": "move_episode_to_compatible_device_task_folder_or_fix_metadata",
                             "current_task_folder": first_present(robot_tagged_folder, task_folder),
-                            "expected_task_device_category": task_category,
+                            "expected_task_device_categories": task_categories,
                             "actual_robot_category": actual_category,
                             "actual_robot": robot,
                         }
@@ -319,6 +353,7 @@ def _check_task_context_consistency(state: EpisodeState) -> list[Finding]:
     state.metrics["p1_task_folder"] = task_folder
     state.metrics["p1_task_expected_robot"] = ""
     state.metrics["p1_task_device_category"] = task_category
+    state.metrics["p1_task_device_categories"] = task_categories
     state.metrics["p1_robot_device_category"] = actual_category
     state.metrics["p1_task_device_reference_source"] = str(reference.get("source", ""))
     return findings

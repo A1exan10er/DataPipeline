@@ -19,6 +19,7 @@
   "quality_labels_missing": "缺少采集质量标签，可能表示采集或标注流程未完成",
   "required_modality_file_empty": "必需的模态文件存在但内容为空",
   "task_device_reference_missing": "缺少任务对应的设备参考信息",
+  "task_device_reference_unavailable": "任务对应的设备参考目录无法加载或查询，需要人工复核",
   "task_robot_mismatch": "记录的机械臂类型与任务配置不匹配",
   "timestamps_not_monotonic": "时间戳未按单调递增排列，可能存在乱序",
   "timestamps_raw_inconsistency": "原始时间戳数据存在不一致",

@@ -419,7 +419,8 @@ QA_Pipeline/scripts/pipeline/phase1_metadata.py
 | `quality_label_unexpected` | 已有标签但不包含 `完全正常` 或 `测试任务`，先作为内部复核/重复问题统计 | needs_review |
 | `action_modality_singular_name` | 模态/文件夹使用 `action.*` 而不是 `actions.*`，会记录待修复项 | warning |
 | `unknown_modality_detected` | 检测到未知模态名称，会记录供复核 | 默认 pass/info |
-| `task_robot_mismatch` | metadata/name/path 中的机器人来源与 task 文件夹机器人 token 冲突 | 当前第 1 阶段为 fail |
+| `task_robot_mismatch` | Episode 机器人类别不在任务目录完整的 `compatible_device_types` 列表中 | 当前第 1 阶段为 fail |
+| `task_device_reference_unavailable` | 已配置的任务目录无法加载或查询 | needs_review |
 
 `observation.image.flow_*` 模态在第 1 阶段文件完整性检查中会被主动忽略。它
 是否存在不影响 pass/fail 状态。
