@@ -53,10 +53,12 @@ from scripts.pipeline.qa_core import (
     infer_context,
     init_db,
     load_episode_state,
+    load_episode_states,
     load_metadata,
     operator_from_episode_path,
     prune_db_to_episode_paths,
     replace_discovery_findings,
+    qa_write_session,
     save_findings,
     save_episode_state,
 )
@@ -769,6 +771,11 @@ def _run_streaming_discovery(
     started = time.perf_counter()
     last_report = started
     max_selected = args.max_episodes
+    completed_episode_paths = (
+        _streaming_completed_episode_paths(db_path, phases)
+        if not args.force_rerun and 6 not in phases
+        else None
+    )
 
     def flush_batch(force: bool = False) -> bool:
         nonlocal batch, processed, batch_index
@@ -885,7 +892,12 @@ def _run_streaming_discovery(
                     last_report,
                 )
                 continue
-            if _streaming_episode_completed(db_path, episode_path, phases, args.force_rerun):
+            already_completed = (
+                str(episode_path) in completed_episode_paths
+                if completed_episode_paths is not None
+                else _streaming_episode_completed(db_path, episode_path, phases, args.force_rerun)
+            )
+            if already_completed:
                 skipped_completed += 1
                 last_report = _print_streaming_progress(
                     scanned,
@@ -1134,6 +1146,27 @@ def _streaming_episode_completed(
         if phase == 6 and phase6_umi_processing.needs_run(state):
             return False
     return True
+
+
+def _streaming_completed_episode_paths(db_path: Path, phases: list[int]) -> set[str]:
+    """Build one resume index instead of opening SQLite for every discovered path."""
+    required = {int(phase) for phase in phases}
+    if not db_path.is_file() or not required:
+        return set()
+    completed_paths: set[str] = set()
+    with sqlite3.connect(db_path) as conn:
+        try:
+            rows = conn.execute("SELECT episode_path, phases_completed FROM episodes")
+            for episode_path, phases_json in rows:
+                try:
+                    completed = {int(value) for value in json.loads(phases_json or "[]")}
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if required.issubset(completed):
+                    completed_paths.add(str(episode_path))
+        except sqlite3.OperationalError:
+            return set()
+    return completed_paths
 
 
 def _print_streaming_progress(
@@ -1541,8 +1574,9 @@ def _load_or_create_states(
     states = []
     total = len(episodes)
     started = time.perf_counter()
+    loaded_states = load_episode_states(db_path, episodes)
     for index, episode_path in enumerate(episodes):
-        state = load_episode_state(db_path, episode_path)
+        state = loaded_states.get(str(episode_path))
         if state is None:
             state = _new_episode_state(roots, episode_path)
         if force_rerun:
@@ -1673,10 +1707,11 @@ def _run_phase(
         overall_total,
     )
     phase_start = time.time()
-    if phase_number in (1, 2, 3, 4, 5, 6, 7):
-        runner(runnable, db_path, progress_callback=callback, workers=workers)
-    else:
-        runner(runnable, db_path, progress_callback=callback)
+    with qa_write_session(db_path, max_episodes=100, max_seconds=5.0):
+        if phase_number in (1, 2, 3, 4, 5, 6, 7):
+            runner(runnable, db_path, progress_callback=callback, workers=workers)
+        else:
+            runner(runnable, db_path, progress_callback=callback)
     elapsed = time.time() - phase_start
     print()
     counts = _phase_status_counts(states, phase_number)
@@ -1765,9 +1800,11 @@ def _phase_status_counts(states: list[EpisodeState], phase_number: int) -> Count
 
 
 def _write_final_verdicts(states: list[EpisodeState], db_path: Path) -> None:
-    for state in states:
-        state.final_status = _final_status(state)
-        save_episode_state(db_path, state)
+    with qa_write_session(db_path, max_episodes=250, max_seconds=5.0) as session:
+        for state in states:
+            state.final_status = _final_status(state)
+            save_episode_state(db_path, state)
+            session.episode_complete()
 
 
 def _final_status(state: EpisodeState) -> str:
@@ -1803,7 +1840,7 @@ def _maybe_generate_operator_severe_report(
     db_path: Path,
     output_dir: Path,
 ) -> bool:
-    """Generate the optional severe report after all normal exports succeed."""
+    """Best-effort legacy export; dashboard snapshots remain independently retryable."""
     if args.dry_run or not args.generate_operator_severe_report:
         return True
     try:
@@ -1813,8 +1850,12 @@ def _maybe_generate_operator_severe_report(
             Path(args.operator_severe_config),
         )
     except Exception as exc:
-        _print_error(f"Operator severe report generation failed: {exc}")
-        return False
+        print(
+            "Warning: operator severe report generation failed; checked QA data "
+            f"remains valid and the dashboard publisher can retry: {exc}",
+            file=sys.stderr,
+        )
+        return True
     for path in paths:
         print(f"Wrote operator severe report: {path}")
     return True

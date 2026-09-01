@@ -4,10 +4,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from contextlib import contextmanager
 import csv
 import json
 import os
 import sqlite3
+import threading
+import time
 
 from scripts.pipeline.qa_config import config_value
 
@@ -16,6 +19,9 @@ DEFAULT_DB_PATH = Path("outputs/qa_pipeline.db")
 STATUS_VALUES = ("pass", "warning", "fail", "needs_review")
 SEVERITY_VALUES = ("info", "minor", "major", "critical")
 DEFAULT_EXCEL_MAX_EPISODES = 100_000
+_INITIALIZED_DATABASES: set[str] = set()
+_INITIALIZED_DATABASES_LOCK = threading.Lock()
+_WRITE_SESSION_LOCAL = threading.local()
 
 
 class PipelineConfigurationError(RuntimeError):
@@ -66,8 +72,17 @@ class DiscoveryResult:
 def init_db(db_path: Path) -> None:
     """Create the SQLite database and required tables if they do not exist."""
     db_path = Path(db_path)
+    cache_key = str(db_path.resolve(strict=False))
+    with _INITIALIZED_DATABASES_LOCK:
+        if cache_key in _INITIALIZED_DATABASES and db_path.is_file():
+            return
+        if cache_key in _INITIALIZED_DATABASES:
+            _INITIALIZED_DATABASES.discard(cache_key)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS episodes (
@@ -113,6 +128,10 @@ def init_db(db_path: Path) -> None:
             "ON findings(status)"
         )
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_findings_episode_phase "
+            "ON findings(episode_path, phase)"
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_episodes_final_status "
             "ON episodes(final_status)"
         )
@@ -120,6 +139,81 @@ def init_db(db_path: Path) -> None:
             "CREATE INDEX IF NOT EXISTS idx_episodes_task "
             "ON episodes(task)"
         )
+    with _INITIALIZED_DATABASES_LOCK:
+        _INITIALIZED_DATABASES.add(cache_key)
+
+
+class _WriteSession:
+    def __init__(self, db_path: Path, max_episodes: int, max_seconds: float) -> None:
+        self.db_path = Path(db_path)
+        self.max_episodes = max(1, int(max_episodes))
+        self.max_seconds = max(0.1, float(max_seconds))
+        self.connection: sqlite3.Connection | None = None
+        self.pending_episodes = 0
+        self.last_commit = time.monotonic()
+
+    def get_connection(self) -> sqlite3.Connection:
+        if self.connection is None:
+            self.connection = sqlite3.connect(self.db_path, timeout=30.0)
+            self.connection.execute("PRAGMA busy_timeout = 30000")
+        return self.connection
+
+    def episode_complete(self) -> None:
+        self.pending_episodes += 1
+        if (
+            self.pending_episodes >= self.max_episodes
+            or time.monotonic() - self.last_commit >= self.max_seconds
+        ):
+            self.commit()
+
+    def commit(self) -> None:
+        if self.connection is not None:
+            self.connection.commit()
+        self.pending_episodes = 0
+        self.last_commit = time.monotonic()
+
+    def close(self, commit: bool) -> None:
+        if self.connection is None:
+            return
+        try:
+            self.connection.commit() if commit else self.connection.rollback()
+        finally:
+            self.connection.close()
+            self.connection = None
+
+
+@contextmanager
+def qa_write_session(
+    db_path: Path,
+    max_episodes: int = 100,
+    max_seconds: float = 5.0,
+):
+    """Reuse one writer and commit bounded chunks within a pipeline phase."""
+    init_db(db_path)
+    previous = getattr(_WRITE_SESSION_LOCAL, "session", None)
+    if previous is not None:
+        yield previous
+        return
+    session = _WriteSession(Path(db_path), max_episodes, max_seconds)
+    _WRITE_SESSION_LOCAL.session = session
+    try:
+        yield session
+    except BaseException:
+        session.close(commit=False)
+        raise
+    else:
+        session.close(commit=True)
+    finally:
+        _WRITE_SESSION_LOCAL.session = None
+
+
+def _active_write_session(db_path: Path) -> _WriteSession | None:
+    session = getattr(_WRITE_SESSION_LOCAL, "session", None)
+    if session is None:
+        return None
+    if session.db_path.resolve(strict=False) != Path(db_path).resolve(strict=False):
+        return None
+    return session
 
 
 def load_episode_state(db_path: Path, episode_path: Path) -> EpisodeState | None:
@@ -142,19 +236,70 @@ def load_episode_state(db_path: Path, episode_path: Path) -> EpisodeState | None
     return _state_from_row(row)
 
 
+def load_episode_states(
+    db_path: Path,
+    episode_paths: list[Path],
+    chunk_size: int = 500,
+) -> dict[str, EpisodeState]:
+    """Load many episode states with bounded multi-row queries."""
+    init_db(db_path)
+    values = [str(path) for path in episode_paths]
+    result: dict[str, EpisodeState] = {}
+    if not values:
+        return result
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        for offset in range(0, len(values), max(1, int(chunk_size))):
+            chunk = values[offset : offset + max(1, int(chunk_size))]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT episode_path, task, date, operator, robot, controller,
+                       phases_completed, phase_status, metrics, final_status,
+                       training_ready, last_updated
+                FROM episodes
+                WHERE episode_path IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                result[str(row["episode_path"])] = _state_from_row(row)
+    return result
+
+
 def save_episode_state(db_path: Path, state: EpisodeState) -> None:
     """Upsert one episode state into SQLite without writing findings."""
-    init_db(db_path)
     training_ready = None if state.training_ready is None else int(state.training_ready)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
+    session = _active_write_session(db_path)
+    if session is not None:
+        conn = session.get_connection()
+        _execute_episode_upsert(conn, state, training_ready)
+    else:
+        init_db(db_path)
+        with sqlite3.connect(db_path) as conn:
+            _execute_episode_upsert(conn, state, training_ready)
+
+
+def _execute_episode_upsert(
+    conn: sqlite3.Connection,
+    state: EpisodeState,
+    training_ready: int | None,
+) -> None:
+    conn.execute(
             """
-            INSERT OR REPLACE INTO episodes (
+            INSERT INTO episodes (
                 episode_path, task, date, operator, robot, controller,
                 phases_completed, phase_status, metrics, final_status,
                 training_ready, last_updated
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(episode_path) DO UPDATE SET
+                task=excluded.task, date=excluded.date, operator=excluded.operator,
+                robot=excluded.robot, controller=excluded.controller,
+                phases_completed=excluded.phases_completed,
+                phase_status=excluded.phase_status, metrics=excluded.metrics,
+                final_status=excluded.final_status,
+                training_ready=excluded.training_ready, last_updated=excluded.last_updated
             """,
             (
                 str(state.episode_path),
@@ -170,7 +315,7 @@ def save_episode_state(db_path: Path, state: EpisodeState) -> None:
                 training_ready,
                 state.last_updated,
             ),
-        )
+    )
 
 
 def save_findings(
@@ -195,30 +340,44 @@ def save_findings(
     """
     if not findings and phase is None:
         return
-    init_db(db_path)
     phase_to_clear = phase if phase is not None else findings[0].phase
     episode_path_to_clear = episode_path or (findings[0].episode_path if findings else None)
     if episode_path_to_clear is None:
         return
     insert_rows = [_finding_insert_row(finding) for finding in findings]
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
+    session = _active_write_session(db_path)
+    if session is not None:
+        _replace_findings(session.get_connection(), insert_rows, episode_path_to_clear, phase_to_clear)
+        session.episode_complete()
+    else:
+        init_db(db_path)
+        with sqlite3.connect(db_path) as conn:
+            _replace_findings(conn, insert_rows, episode_path_to_clear, phase_to_clear)
+
+
+def _replace_findings(
+    conn: sqlite3.Connection,
+    insert_rows: list[tuple[Any, ...]],
+    episode_path: str,
+    phase: int,
+) -> None:
+    conn.execute(
             """
             DELETE FROM findings
             WHERE episode_path = ? AND phase = ?
             """,
-            (episode_path_to_clear, phase_to_clear),
+            (episode_path, phase),
         )
-        if insert_rows:
-            conn.executemany(
+    if insert_rows:
+        conn.executemany(
                 """
                 INSERT INTO findings (
                     episode_path, phase, check_name, severity, status, message, details
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                insert_rows,
-            )
+            insert_rows,
+        )
 
 
 def load_all_states(db_path: Path) -> list[EpisodeState]:

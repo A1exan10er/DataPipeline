@@ -15,6 +15,7 @@ if str(QA_PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(QA_PIPELINE_ROOT))
 
 from QA_Pipeline.scripts.generate_operator_severe_report import (
+    EXCEL_FILENAME,
     generate_operator_severe_report,
     load_report_config,
 )
@@ -247,3 +248,80 @@ def test_invalid_criterion_configuration_is_rejected(tmp_path: Path) -> None:
         assert "Duplicate enabled criterion id" in str(exc)
     else:
         raise AssertionError("duplicate criterion id was accepted")
+
+
+def test_partial_snapshot_exposes_criterion_ready_evidence_and_comparable_ranking(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "qa.db"
+    output_dir = tmp_path / "snapshot"
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "criteria": [
+                    {
+                        "id": "duration",
+                        "label": "Duration",
+                        "phases": [2],
+                        "check_names": ["duration_extreme_long"],
+                        "statuses": ["fail"],
+                    },
+                    {
+                        "id": "motion",
+                        "label": "Motion",
+                        "phases": [7],
+                        "check_names": ["operator_standstill_excessive"],
+                        "statuses": ["fail"],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    _create_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("ALTER TABLE episodes ADD COLUMN phases_completed TEXT NOT NULL DEFAULT '[]'")
+        for path, operator, phases in (
+            ("/phase2", "Alice", [2]),
+            ("/phase7", "Bob", [7]),
+            ("/complete", "Carol", [2, 7]),
+        ):
+            conn.execute(
+                """
+                INSERT INTO episodes (
+                    episode_path, task, date, operator, robot, controller,
+                    final_status, phases_completed
+                ) VALUES (?, 'task', '20260710', ?, 'robot', 'controller', 'fail', ?)
+                """,
+                (path, operator, json.dumps(phases)),
+            )
+        _finding(conn, "/phase2", 2, "duration_extreme_long")
+        _finding(conn, "/phase7", 7, "operator_standstill_excessive")
+        _finding(conn, "/complete", 2, "duration_extreme_long")
+
+    paths = generate_operator_severe_report(
+        db_path,
+        output_dir,
+        config_path,
+        snapshot_state="partial",
+        scope_complete=False,
+        run_status="running",
+        include_excel=True,
+    )
+
+    report = json.loads((output_dir / "operator_severe_report.json").read_text(encoding="utf-8"))
+    assert {row["episode_path"] for row in report["evidence"]} == {
+        "/phase2",
+        "/phase7",
+        "/complete",
+    }
+    assert [row["operator"] for row in report["operator_ranking"]] == ["Carol"]
+    assert report["snapshot"]["state"] == "partial"
+    assert report["snapshot"]["scope_complete"] is False
+    assert report["snapshot"]["comparable_checked_episode_count"] == 1
+    coverage = {row["criterion_id"]: row for row in report["snapshot"]["criterion_coverage"]}
+    assert coverage["duration"]["checked_episode_count"] == 2
+    assert coverage["motion"]["checked_episode_count"] == 2
+    assert output_dir / EXCEL_FILENAME in paths
+    assert (output_dir / EXCEL_FILENAME).is_file()

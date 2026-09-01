@@ -65,6 +65,8 @@ from generate_work_session_report import (
 )
 from scripts.pipeline.issue_messages_zh import finding_presentation_zh
 from generate_operator_severe_report import (
+    DEFAULT_CONFIG_PATH as DEFAULT_OPERATOR_SEVERE_CONFIG,
+    EXCEL_FILENAME as OPERATOR_SEVERE_EXCEL,
     generate_operator_severe_report,
     load_report_config as load_operator_severe_report_config,
 )
@@ -98,6 +100,11 @@ OPERATOR_SEVERE_RANKING_CSV = "operator_severe_ranking.csv"
 OPERATOR_SEVERE_EVIDENCE_CSV = "operator_severe_evidence.csv"
 OPERATOR_SEVERE_FREQUENCY_CSV = "criteria_frequency.csv"
 OPERATOR_SEVERE_MARKDOWN = "operator_severe_report.md"
+OPERATOR_SEVERE_SNAPSHOT_ROOT = Path("reports") / "operator_severe"
+OPERATOR_SEVERE_MANIFEST = "current.json"
+OPERATOR_SEVERE_PUBLISHER_STATUS = "publisher_status.json"
+OPERATOR_SEVERE_POLL_SECONDS = 15.0
+OPERATOR_SEVERE_QUIET_SECONDS = 8.0
 
 
 @dataclass(frozen=True)
@@ -141,6 +148,9 @@ class DashboardState:
         self.failure_warning_cache: dict[str, Any] = {"count": 0, "warnings": [], "checked_jobs": 0}
         self.failure_warning_last_checked = 0.0
         self.failure_warning_refreshing = False
+        self.severe_publish_lock = threading.Lock()
+        self.severe_publish_fingerprints: dict[str, tuple[int, int, int, str]] = {}
+        self.severe_publish_forced: set[str] = set()
         init_registry(self.registry_db)
         init_issue_history(self.issue_history_db)
 
@@ -150,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     state = DashboardState(args)
     start_work_session_report_scheduler(state)
     start_event_listener_supervisor()
+    start_operator_severe_report_scheduler(state)
     server = DashboardHTTPServer((args.host, args.port), make_handler(state))
     print(f"QA control dashboard: http://{args.host}:{args.port}", flush=True)
     try:
@@ -215,6 +226,20 @@ def make_handler(state: DashboardState):
                 elif path == "/event-listener/device-failure-report.html":
                     query = parse_qs(parsed.query)
                     self._send_html(render_event_device_failure_report_html(query.get("report", [""])[0]))
+                elif path.startswith("/severe-reports/"):
+                    run_id = path.rsplit("/", 1)[-1]
+                    self._send_html(render_standalone_operator_severe_report(state, run_id))
+                elif path.startswith("/api/severe-reports/") and path.endswith("/download.xlsx"):
+                    run_id = path.split("/")[-2]
+                    file_path = operator_severe_download_path(state, run_id)
+                    self._send_binary(
+                        file_path.read_bytes(),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        f"{sanitize_id(run_id)}-severe-report.xlsx",
+                    )
+                elif path.startswith("/api/severe-reports/"):
+                    run_id = path.rsplit("/", 1)[-1]
+                    self._send_json(api_operator_severe_report(state, run_id))
                 elif path == "/api/status":
                     self._send_json(api_status(state))
                 elif path == "/api/runs":
@@ -280,6 +305,9 @@ def make_handler(state: DashboardState):
                     run_id = path.split("/")[-3]
                     clear_cache(state)
                     self._send_json(api_regenerate_operator_severe_report(state, run_id))
+                elif path.startswith("/api/severe-reports/") and path.endswith("/refresh"):
+                    run_id = path.split("/")[-2]
+                    self._send_json(api_refresh_operator_severe_report(state, run_id))
                 elif path.startswith("/api/stop/"):
                     run_id = path.rsplit("/", 1)[-1]
                     clear_cache(state)
@@ -331,6 +359,19 @@ def make_handler(state: DashboardState):
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
+        def _send_binary(self, body: bytes, content_type: str, filename: str) -> None:
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -529,7 +570,7 @@ def list_runs(state: DashboardState, limit: int | None = None) -> list[dict[str,
     for run in discovered:
         by_key[run["run_id"]] = run
     for run in registered:
-        run.update(run_summary(Path(run["db_path"]), Path(run["output_dir"])))
+        run.update(cached_run_summary(state, Path(run["db_path"]), Path(run["output_dir"])))
         run["manager"] = run_manager_name(run)
         run["manager_running"] = run_manager_running(run)
         run["tmux_running"] = run["manager"] == "tmux" and run["manager_running"]
@@ -603,7 +644,7 @@ def discover_output_runs(state: DashboardState) -> list[dict[str, Any]]:
             "operator_filter": "",
             "command": "",
         }
-        item.update(run_summary(db_path, output_dir))
+        item.update(cached_run_summary(state, db_path, output_dir))
         runs.append(item)
     return runs
 
@@ -883,10 +924,33 @@ def _date_from_path(episode_path: str) -> str:
 
 
 def find_run(state: DashboardState, run_id: str) -> dict[str, Any] | None:
+    registered = registered_run(state.registry_db, run_id)
+    if registered is not None:
+        db_path = Path(str(registered.get("db_path") or ""))
+        output_dir = Path(str(registered.get("output_dir") or ""))
+        registered.update(cached_run_summary(state, db_path, output_dir))
+        registered["manager"] = run_manager_name(registered)
+        registered["manager_running"] = run_manager_running(registered)
+        registered["tmux_running"] = (
+            registered["manager"] == "tmux" and registered["manager_running"]
+        )
+        return registered
     for run in list_runs(state):
         if run.get("run_id") == run_id:
             return run
     return None
+
+
+def cached_run_summary(
+    state: DashboardState,
+    db_path: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    if not hasattr(state, "cache_lock") or not hasattr(state, "cache"):
+        return run_summary(db_path, output_dir)
+    key = f"run_summary:{db_path.resolve(strict=False)}"
+    ttl = max(15.0, float(getattr(state, "refresh_seconds", 5.0)) * 6.0)
+    return cached_value(state, key, ttl, lambda: run_summary(db_path, output_dir))
 
 
 def registered_run(registry_db: Path, run_id: str) -> dict[str, Any] | None:
@@ -1218,7 +1282,18 @@ def api_resume_run(state: DashboardState, run_id: str) -> dict[str, Any]:
     if not output_dir.is_dir():
         raise ValueError(f"Cannot resume without the existing output directory: {output_dir}")
 
-    command = _resume_pipeline_command(run)
+    pipeline_script = PROJECT_ROOT / "QA_Pipeline" / "scripts" / "run_pipeline.py"
+    command = _resume_pipeline_command(
+        run,
+        qa_python=state.qa_python,
+        pipeline_script=pipeline_script,
+    )
+    if bool(run.get("severe_report_requested", False)):
+        config_path = _persistent_operator_severe_config(
+            run,
+            output_dir / OPERATOR_SEVERE_SNAPSHOT_ROOT,
+        )
+        _replace_command_option(command, "--operator-severe-config", str(config_path))
     validate_execution_requirements(state, Path(str(run.get("root_path") or "")), output_dir)
     command_path = output_dir / "dashboard_command.sh"
     log_path = output_dir / f"{run_id}_pipeline.log"
@@ -1271,23 +1346,59 @@ def api_resume_run(state: DashboardState, run_id: str) -> dict[str, Any]:
     }
 
 
-def _resume_pipeline_command(run: dict[str, Any]) -> list[str]:
+def _resume_pipeline_command(
+    run: dict[str, Any],
+    *,
+    qa_python: str | Path | None = None,
+    pipeline_script: str | Path | None = None,
+) -> list[str]:
     raw_command = str(run.get("command") or "").strip()
     if not raw_command:
         raise ValueError("Run has no saved pipeline command")
     command = shlex.split(raw_command)
     if not command:
         raise ValueError("Run has an empty saved pipeline command")
-    expected_script = (PROJECT_ROOT / "QA_Pipeline" / "scripts" / "run_pipeline.py").resolve(
-        strict=False
-    )
-    if len(command) < 2 or Path(command[1]).resolve(strict=False) != expected_script:
+    expected_script = Path(
+        pipeline_script or PROJECT_ROOT / "QA_Pipeline" / "scripts" / "run_pipeline.py"
+    ).resolve(strict=False)
+    if len(command) < 2 or not _saved_pipeline_entry_allowed(
+        Path(command[1]).resolve(strict=False),
+        expected_script,
+    ):
         raise ValueError("Saved command is not the configured QA pipeline entry point")
+    command[0] = str(_absolute_path(qa_python or command[0]))
+    command[1] = str(expected_script)
     command = [part for part in command if part != "--force-rerun"]
     _replace_command_option(command, "--db-path", str(run.get("db_path") or ""))
     _replace_command_option(command, "--output-dir", str(run.get("output_dir") or ""))
     _replace_command_option(command, "--run-id", str(run.get("run_id") or ""))
     return command
+
+
+def _saved_pipeline_entry_allowed(saved_script: Path, expected_script: Path) -> bool:
+    """Allow the current entry point or the same entry point in an older managed release."""
+    if saved_script == expected_script:
+        return True
+    saved_root = _managed_release_deploy_root(saved_script)
+    expected_root = _managed_release_deploy_root(expected_script)
+    return saved_root is not None and saved_root == expected_root
+
+
+def _managed_release_deploy_root(script: Path) -> tuple[str, ...] | None:
+    parts = script.parts
+    try:
+        releases_index = len(parts) - 1 - tuple(reversed(parts)).index("releases")
+    except ValueError:
+        return None
+    suffix = parts[releases_index + 1 :]
+    if len(suffix) != 4:
+        return None
+    release_sha, *entrypoint = suffix
+    if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
+        return None
+    if entrypoint != ["QA_Pipeline", "scripts", "run_pipeline.py"]:
+        return None
+    return parts[:releases_index]
 
 
 def _replace_command_option(command: list[str], option: str, value: str) -> None:
@@ -4344,13 +4455,17 @@ def load_operator_severe_report(
 ) -> dict[str, Any]:
     """Load severe-report summary data without breaking the full run detail."""
     output_dir = Path(output_dir)
-    json_path = output_dir / OPERATOR_SEVERE_REPORT_JSON
+    manifest = _operator_severe_manifest(output_dir)
+    publisher_status = _operator_severe_publisher_status(output_dir)
+    snapshot_dir = _operator_severe_manifest_directory(output_dir, manifest)
+    json_path = (snapshot_dir / OPERATOR_SEVERE_REPORT_JSON) if snapshot_dir else (output_dir / OPERATOR_SEVERE_REPORT_JSON)
     paths = {
         "report_json_path": str(json_path),
-        "ranking_csv_path": _existing_path(output_dir / OPERATOR_SEVERE_RANKING_CSV),
-        "evidence_csv_path": _existing_path(output_dir / OPERATOR_SEVERE_EVIDENCE_CSV),
-        "criterion_frequency_csv_path": _existing_path(output_dir / OPERATOR_SEVERE_FREQUENCY_CSV),
-        "markdown_path": _existing_path(output_dir / OPERATOR_SEVERE_MARKDOWN),
+        "ranking_csv_path": _existing_path((snapshot_dir or output_dir) / OPERATOR_SEVERE_RANKING_CSV),
+        "evidence_csv_path": _existing_path((snapshot_dir or output_dir) / OPERATOR_SEVERE_EVIDENCE_CSV),
+        "criterion_frequency_csv_path": _existing_path((snapshot_dir or output_dir) / OPERATOR_SEVERE_FREQUENCY_CSV),
+        "markdown_path": _existing_path((snapshot_dir or output_dir) / OPERATOR_SEVERE_MARKDOWN),
+        "excel_path": _existing_path((snapshot_dir or output_dir) / OPERATOR_SEVERE_EXCEL),
     }
     if not requested:
         return {"state": "not_requested", **paths}
@@ -4405,13 +4520,239 @@ def load_operator_severe_report(
     return {
         "state": "generated",
         "generation_time": str(report.get("generation_time") or ""),
+        "schema_version": int(report.get("schema_version") or 1),
+        "snapshot": report.get("snapshot", {}) if isinstance(report.get("snapshot", {}), dict) else {},
         "summary": summary,
         "severe_episode_count": severe_episode_count,
         "criteria": report.get("criteria", []) if isinstance(report.get("criteria", []), list) else [],
         "criterion_frequency": [row for row in frequency if isinstance(row, dict)],
         "operator_ranking": [row for row in ranking if isinstance(row, dict)],
+        "publisher_error": str(publisher_status.get("error") or "")
+        if publisher_status.get("ok") is False
+        else "",
         **paths,
     }
+
+
+def _operator_severe_manifest(output_dir: Path) -> dict[str, Any]:
+    manifest_path = Path(output_dir) / OPERATOR_SEVERE_SNAPSHOT_ROOT / OPERATOR_SEVERE_MANIFEST
+    try:
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _operator_severe_publisher_status(output_dir: Path) -> dict[str, Any]:
+    status_path = Path(output_dir) / OPERATOR_SEVERE_SNAPSHOT_ROOT / OPERATOR_SEVERE_PUBLISHER_STATUS
+    try:
+        value = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _operator_severe_manifest_directory(
+    output_dir: Path,
+    manifest: dict[str, Any],
+) -> Path | None:
+    snapshot_id = str(manifest.get("snapshot_id") or "").strip()
+    if not snapshot_id or sanitize_id(snapshot_id) != snapshot_id:
+        return None
+    root = (Path(output_dir) / OPERATOR_SEVERE_SNAPSHOT_ROOT).resolve(strict=False)
+    candidate = (root / "snapshots" / snapshot_id).resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_dir() else None
+
+
+def load_operator_severe_report_full(output_dir: Path) -> dict[str, Any]:
+    manifest = _operator_severe_manifest(output_dir)
+    snapshot_dir = _operator_severe_manifest_directory(output_dir, manifest)
+    json_path = (snapshot_dir / OPERATOR_SEVERE_REPORT_JSON) if snapshot_dir else Path(output_dir) / OPERATOR_SEVERE_REPORT_JSON
+    try:
+        report = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Severe report is not available: {exc}") from exc
+    if not isinstance(report, dict):
+        raise ValueError("Severe report JSON root must be an object")
+    report["download_xlsx_url"] = ""
+    report["publisher"] = _operator_severe_publisher_status(output_dir)
+    return report
+
+
+def start_operator_severe_report_scheduler(state: DashboardState) -> None:
+    thread = threading.Thread(
+        target=_operator_severe_report_scheduler_loop,
+        args=(state,),
+        name="operator-severe-report-publisher",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _operator_severe_report_scheduler_loop(state: DashboardState) -> None:
+    while True:
+        try:
+            sync_registered_run_statuses(state)
+            for run in registered_runs(state.registry_db):
+                if not bool(run.get("severe_report_requested", False)):
+                    continue
+                run_id = str(run.get("run_id") or "")
+                db_path = Path(str(run.get("db_path") or ""))
+                output_dir = Path(str(run.get("output_dir") or ""))
+                if not run_id or not db_path.is_file() or not output_dir.is_dir():
+                    continue
+                stat = db_path.stat()
+                status = str(run.get("status") or "")
+                fingerprint = (stat.st_mtime_ns, stat.st_size, int(stat.st_ino), status)
+                previous = state.severe_publish_fingerprints.get(run_id)
+                forced = run_id in state.severe_publish_forced
+                missing = not bool(_operator_severe_manifest(output_dir))
+                quiet = time.time() - stat.st_mtime >= OPERATOR_SEVERE_QUIET_SECONDS
+                if forced or missing or (fingerprint != previous and quiet):
+                    publish_operator_severe_snapshot(state, run, fingerprint)
+                    state.severe_publish_forced.discard(run_id)
+        except Exception as exc:
+            print(f"Warning: severe-report publisher cycle failed: {exc}", flush=True)
+        time.sleep(OPERATOR_SEVERE_POLL_SECONDS)
+
+
+def publish_operator_severe_snapshot(
+    state: DashboardState,
+    run: dict[str, Any],
+    fingerprint: tuple[int, int, int, str] | None = None,
+) -> dict[str, Any]:
+    """Publish one immutable snapshot without mutating the source QA DB."""
+    if not state.severe_publish_lock.acquire(blocking=False):
+        return {"ok": True, "queued": True}
+    run_id = str(run.get("run_id") or "")
+    output_dir = Path(str(run.get("output_dir") or ""))
+    db_path = Path(str(run.get("db_path") or ""))
+    report_root = output_dir / OPERATOR_SEVERE_SNAPSHOT_ROOT
+    snapshots_root = report_root / "snapshots"
+    tmp_dir = snapshots_root / f".tmp-{uuid.uuid4().hex}"
+    status_path = report_root / OPERATOR_SEVERE_PUBLISHER_STATUS
+    try:
+        if not bool(run.get("severe_report_requested", False)):
+            raise ValueError("This run did not request an operator severe report.")
+        if not db_path.is_file():
+            raise ValueError(f"Run database does not exist: {db_path}")
+        config_path = _persistent_operator_severe_config(run, report_root)
+        run_status = str(run.get("status") or "running")
+        snapshot_state = {
+            "complete": "final",
+            "stopped": "stopped_partial",
+            "failed": "failed_partial",
+        }.get(run_status, "partial")
+        scope_complete = run_status == "complete"
+        snapshots_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir.mkdir(parents=True, exist_ok=False)
+        generate_operator_severe_report(
+            db_path,
+            tmp_dir,
+            config_path,
+            snapshot_state=snapshot_state,
+            scope_complete=scope_complete,
+            run_status=run_status,
+            include_excel=True,
+        )
+        snapshot_id = sanitize_id(
+            datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f") + f"-{run_id}"
+        )
+        final_dir = snapshots_root / snapshot_id
+        tmp_dir.replace(final_dir)
+        manifest = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "snapshot_id": snapshot_id,
+            "published_at": now_iso(),
+            "run_status": run_status,
+        }
+        _write_json_file_atomic(report_root / OPERATOR_SEVERE_MANIFEST, manifest)
+        _write_json_file_atomic(status_path, {"ok": True, **manifest})
+        if fingerprint is None:
+            stat = db_path.stat()
+            fingerprint = (stat.st_mtime_ns, stat.st_size, int(stat.st_ino), run_status)
+        state.severe_publish_fingerprints[run_id] = fingerprint
+        return {"ok": True, "queued": False, **manifest}
+    except Exception as exc:
+        report_root.mkdir(parents=True, exist_ok=True)
+        _write_json_file_atomic(
+            status_path,
+            {"ok": False, "run_id": run_id, "recorded_at": now_iso(), "error": str(exc)},
+        )
+        print(f"Warning: severe-report snapshot failed for {run_id}: {exc}", flush=True)
+        return {"ok": False, "queued": False, "run_id": run_id, "error": str(exc)}
+    finally:
+        if tmp_dir.is_dir():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        state.severe_publish_lock.release()
+
+
+def _persistent_operator_severe_config(run: dict[str, Any], report_root: Path) -> Path:
+    destination = report_root / "report_config.json"
+    if destination.is_file():
+        load_operator_severe_report_config(destination)
+        return destination
+    configured = Path(str(run.get("severe_report_config") or ""))
+    source = configured if configured.is_file() else DEFAULT_OPERATOR_SEVERE_CONFIG
+    load_operator_severe_report_config(source)
+    report_root.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".json.tmp")
+    shutil.copyfile(source, temporary)
+    temporary.replace(destination)
+    return destination
+
+
+def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def api_refresh_operator_severe_report(state: DashboardState, run_id: str) -> dict[str, Any]:
+    run = registered_run(state.registry_db, run_id)
+    if not run:
+        raise ValueError(f"unknown registered run_id: {run_id}")
+    if not bool(run.get("severe_report_requested", False)):
+        raise ValueError("This run did not request an operator severe report.")
+    state.severe_publish_forced.add(run_id)
+    thread = threading.Thread(
+        target=publish_operator_severe_snapshot,
+        args=(state, run),
+        name=f"severe-report-refresh-{sanitize_id(run_id)}",
+        daemon=True,
+    )
+    thread.start()
+    return {"ok": True, "run_id": run_id, "queued": True}
+
+
+def api_operator_severe_report(state: DashboardState, run_id: str) -> dict[str, Any]:
+    run = find_run(state, run_id)
+    if not run:
+        raise ValueError(f"unknown run_id: {run_id}")
+    report = load_operator_severe_report_full(Path(str(run.get("output_dir") or "")))
+    report["download_xlsx_url"] = f"/api/severe-reports/{sanitize_id(run_id)}/download.xlsx"
+    return {"run_id": run_id, "report": report}
+
+
+def operator_severe_download_path(state: DashboardState, run_id: str) -> Path:
+    run = find_run(state, run_id)
+    if not run:
+        raise ValueError(f"unknown run_id: {run_id}")
+    output_dir = Path(str(run.get("output_dir") or ""))
+    manifest = _operator_severe_manifest(output_dir)
+    snapshot_dir = _operator_severe_manifest_directory(output_dir, manifest)
+    if snapshot_dir is None:
+        raise ValueError("No published severe-report snapshot is available")
+    path = snapshot_dir / OPERATOR_SEVERE_EXCEL
+    if not path.is_file():
+        raise ValueError("The published severe-report Excel file is missing")
+    return path
 
 
 def _existing_path(path: Path) -> str:
@@ -5083,6 +5424,121 @@ def human_bytes(value: int) -> str:
             return f"{amount:.1f}{unit}" if unit != "B" else f"{int(amount)}B"
         amount /= 1024
     return f"{amount:.1f}TB"
+
+
+def render_standalone_operator_severe_report(state: DashboardState, run_id: str) -> str:
+    run = find_run(state, run_id)
+    if not run:
+        raise ValueError(f"unknown run_id: {run_id}")
+    output_dir = Path(str(run.get("output_dir") or ""))
+    try:
+        report = load_operator_severe_report_full(output_dir)
+    except ValueError as exc:
+        title = html.escape(run_id)
+        message = html.escape(str(exc))
+        return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="20">
+<title>严重质检报告 - {title}</title><style>{_standalone_report_css()}</style></head>
+<body><main><h1>严重操作端质检报告</h1><div class="banner partial">正在准备当前可用结果</div>
+<p>{message}</p><p>页面会自动刷新；流水线无需完成即可生成部分结果。</p></main></body></html>"""
+
+    snapshot = report.get("snapshot", {}) if isinstance(report.get("snapshot"), dict) else {}
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    snapshot_state = str(snapshot.get("state") or "final")
+    final = snapshot_state == "final"
+    state_label = "完整结果 / Final" if final else "部分结果 / Partial"
+    banner_class = "final" if final else "partial"
+    discovered = int(snapshot.get("discovered_episode_count") or summary.get("episode_count") or 0)
+    comparable = int(snapshot.get("comparable_checked_episode_count") or summary.get("comparable_checked_episode_count") or 0)
+    incomplete = int(snapshot.get("known_incomplete_episode_count") or 0)
+    severe_count = len({
+        str(row.get("episode_path"))
+        for row in report.get("evidence", [])
+        if isinstance(row, dict) and row.get("episode_path")
+    })
+    coverage_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('criterion_label') or row.get('criterion_id') or ''))}</td>"
+        f"<td>{int(row.get('checked_episode_count') or 0):,}</td>"
+        f"<td>{int(row.get('known_incomplete_episode_count') or 0):,}</td>"
+        "</tr>"
+        for row in snapshot.get("criterion_coverage", [])
+        if isinstance(row, dict)
+    )
+    frequency_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('criterion_label') or row.get('criterion_id') or ''))}</td>"
+        f"<td>{int(row.get('affected_episode_count') or 0):,}</td>"
+        f"<td>{int(row.get('affected_named_operator_count') or row.get('affected_operator_count') or 0):,}</td>"
+        "</tr>"
+        for row in report.get("criterion_frequency", [])
+        if isinstance(row, dict)
+    )
+    ranking_rows = "".join(
+        "<tr>"
+        f"<td>{int(row.get('rank') or 0)}</td>"
+        f"<td>{html.escape(str(row.get('operator') or ''))}</td>"
+        f"<td>{int(row.get('total_episode_count') or 0):,}</td>"
+        f"<td>{int(row.get('severe_episode_count') or 0):,}</td>"
+        f"<td>{float(row.get('severe_episode_rate_percent') or 0):.2f}%</td>"
+        f"<td>{html.escape(str(row.get('top_reasons') or ''))}</td>"
+        "</tr>"
+        for row in report.get("operator_ranking", [])
+        if isinstance(row, dict)
+    )
+    evidence_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('operator') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('date') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('task') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('criterion_label') or row.get('criterion_id') or ''))}</td>"
+        f"<td>{html.escape(Path(str(row.get('episode_path') or '')).name)}</td>"
+        f"<td>{html.escape(str(row.get('messages') or row.get('source_check_names') or ''))}</td>"
+        "</tr>"
+        for row in report.get("evidence", [])[:1000]
+        if isinstance(row, dict)
+    )
+    escaped_run_id = html.escape(run_id)
+    generated = html.escape(str(report.get("generation_time") or ""))
+    publisher = report.get("publisher", {}) if isinstance(report.get("publisher"), dict) else {}
+    publisher_warning = (
+        '<div class="banner partial"><b>刷新失败，当前显示上一次有效快照。</b><br>'
+        + html.escape(str(publisher.get("error") or ""))
+        + "</div>"
+        if publisher.get("ok") is False
+        else ""
+    )
+    download_url = f"/api/severe-reports/{sanitize_id(run_id)}/download.xlsx"
+    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>严重质检报告 - {escaped_run_id}</title>
+<style>{_standalone_report_css()}</style></head><body><main>
+<header><div><h1>严重操作端质检报告</h1><div class="muted">Severe operator QA evidence report · {escaped_run_id}</div></div>
+<div class="actions"><a class="button" href="{download_url}">下载 Excel</a><button onclick="refreshReport()">刷新结果</button></div></header>
+<div class="banner {banner_class}"><b>{state_label}</b> · 生成于 {generated}<br>
+当前报告包含各判定项已经完成检查的结果。流水线运行期间，数量和排名可能继续变化。</div>
+{publisher_warning}
+<section class="cards"><div><b>{discovered:,}</b><span>已发现 episode</span></div><div><b>{comparable:,}</b><span>可比较的完整检查</span></div><div><b>{incomplete:,}</b><span>已知尚未完整检查</span></div><div><b>{severe_count:,}</b><span>当前严重 episode</span></div></section>
+<section><h2>判定项检查覆盖</h2><table><thead><tr><th>判定项</th><th>已检查</th><th>已知未完成</th></tr></thead><tbody>{coverage_rows}</tbody></table></section>
+<section><h2>判定项结果</h2><table><thead><tr><th>判定项</th><th>影响 episode</th><th>涉及实名人员</th></tr></thead><tbody>{frequency_rows}</tbody></table></section>
+<section><h2>人员汇总（仅使用完成全部相关检查的可比较数据）</h2><table><thead><tr><th>排名</th><th>人员</th><th>已检查</th><th>严重</th><th>比例</th><th>主要原因</th></tr></thead><tbody>{ranking_rows}</tbody></table></section>
+<section><h2>当前可用证据</h2><div class="muted">页面最多显示 1,000 行；完整内容请下载 Excel。</div><input id="evidenceSearch" class="search" placeholder="搜索人员、任务、判定项或 episode" oninput="filterEvidence()"><table><thead><tr><th>人员</th><th>日期</th><th>任务</th><th>判定项</th><th>Episode</th><th>说明</th></tr></thead><tbody id="evidenceRows">{evidence_rows}</tbody></table></section>
+<footer>本报告列出质检证据，不直接作出人员管理或劳动决定。</footer></main>
+<script>async function refreshReport(){{await fetch('/api/severe-reports/{sanitize_id(run_id)}/refresh',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:'{{}}'}});setTimeout(()=>location.reload(),1500);}}function filterEvidence(){{const q=document.getElementById('evidenceSearch').value.trim().toLowerCase();for(const row of document.querySelectorAll('#evidenceRows tr'))row.hidden=q&&!row.textContent.toLowerCase().includes(q);}}</script>
+</body></html>"""
+
+
+def _standalone_report_css() -> str:
+    return """
+:root{font-family:Inter,"Noto Sans SC",Arial,sans-serif;color:#172033;background:#f4f7fb}*{box-sizing:border-box}
+body{margin:0}main{max-width:1280px;margin:auto;padding:28px}header{display:flex;justify-content:space-between;gap:20px;align-items:center}
+h1{margin:0 0 4px}h2{font-size:18px;margin-top:0}.muted{color:#667085;font-size:13px}.actions{display:flex;gap:8px}
+.button,button{border:0;border-radius:7px;background:#1769e0;color:#fff;padding:10px 14px;text-decoration:none;cursor:pointer;font-size:14px}
+.search{width:min(520px,100%);padding:10px 12px;margin:12px 0;border:1px solid #cfd7e6;border-radius:7px}
+.banner{margin:22px 0;padding:14px 16px;border-radius:8px;line-height:1.6}.partial{background:#fff4d6;border:1px solid #e8bc52}.final{background:#e8f7ee;border:1px solid #65ad7d}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.cards div,section{background:#fff;border:1px solid #dfe5ef;border-radius:9px;padding:16px}.cards b{display:block;font-size:25px}.cards span{color:#667085}
+section{margin-top:16px;overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:9px;border-bottom:1px solid #e9edf3;vertical-align:top}th{background:#f8fafc;white-space:nowrap}footer{margin:22px 0;color:#667085}
+@media(max-width:800px){main{padding:16px}header{align-items:flex-start;flex-direction:column}.cards{grid-template-columns:1fr 1fr}}
+"""
 
 
 def render_index_html(state: DashboardState) -> str:
@@ -6480,6 +6936,7 @@ async function loadRun(runId, select) {{
   const run = data.run || {{}};
   const counts = run.status_counts || {{}};
   const live = run.live_status || run.run_status || {{}};
+  const throughput = live.throughput || {{}};
   const issueEpisodes = run.issue_episodes || [];
   const report = run.latest_work_session_report || {{}};
   const severeReport = run.operator_severe_report || {{state: 'not_requested'}};
@@ -6494,6 +6951,7 @@ async function loadRun(runId, select) {{
     `<div>Episodes: ${{run.episode_count || 0}} | Issues: ${{run.finding_count || 0}}</div>` +
     `<div>Pass: ${{counts.pass || 0}} Warning: ${{counts.warning || 0}} Fail: ${{counts.fail || 0}} Review: ${{counts.needs_review || 0}}</div>` +
     `<div>Phase: ${{live.current_phase || '-'}} ${{live.current_phase_processed || 0}}/${{live.current_phase_total || 0}}</div>` +
+    `<div>Speed: current ${{Number(throughput.current_phase_per_second || 0).toFixed(2)}} episode/s · overall 5m ${{Number(throughput.overall_5m_per_second || 0).toFixed(2)}} phase-episode/s · overall 15m ${{Number(throughput.overall_15m_per_second || 0).toFixed(2)}} phase-episode/s</div>` +
     `<h3>中文质检报告</h3>` +
     `<div class="row">
       <select id="workSessionSelect" style="width:160px">
@@ -6520,14 +6978,20 @@ function renderOperatorSevereReport(report, run) {{
   selectedSevereReport = report;
   selectedSevereRun = run;
   const state = report.state || 'not_requested';
+  const standaloneLink = run && run.run_id
+    ? `<a class="button-link" href="/severe-reports/${{encodeURIComponent(run.run_id)}}" target="_blank" rel="noopener">Open standalone report / 打开独立报告</a>`
+    : '';
   if (state === 'not_requested') return '<div class="muted">Report state: not_requested</div>';
-  if (state === 'pending') return '<div class="status-pending">The pipeline is still running. The severe report will be generated after successful completion.</div>';
+  if (state === 'pending') return `<div class="status-pending">The pipeline is still running. A partial severe report is being prepared from checked data.</div><div class="row" style="margin-top:8px">${{standaloneLink}}</div>`;
   const regenerateButton = run && run.status === 'complete'
     ? `<button onclick="regenerateOperatorSevereReport(${{jsArg(run.run_id)}})">Regenerate report / 重新生成报告</button><span id="severeReportActionMsg" class="muted"></span>`
     : '';
   if (state === 'missing') return `<div class="status-warning">The run completed, but the requested severe report is missing.</div><div class="row" style="margin-top:8px">${{regenerateButton}}</div>`;
   if (state === 'invalid') return `<div class="status-fail">Invalid severe report: ${{esc(report.error || 'unknown parsing error')}}</div><div class="row" style="margin-top:8px">${{regenerateButton}}</div>`;
   const summary = report.summary || {{}};
+  const snapshot = report.snapshot || {{}};
+  const snapshotState = snapshot.state || 'final';
+  const snapshotLabel = snapshotState === 'final' ? '完整结果 / Final' : '部分结果 / Partial';
   const frequency = report.criterion_frequency || [];
   const ranking = report.operator_ranking || [];
   const criteria = (report.criteria || []).filter(item => item && item.id);
@@ -6564,6 +7028,7 @@ function renderOperatorSevereReport(report, run) {{
     ${{criterionColumns.map(column => `<td class="numeric-cell">${{row[column.field] || 0}}</td>`).join('')}}
   </tr>`).join('') : `<tr><td colspan="${{5 + criterionColumns.length}}" class="muted">${{Number(report.severe_episode_count || 0) > 0 ? 'Selected severe findings exist, but no named operator is eligible for ranking. Unknown operators are excluded by configuration.' : 'No selected severe findings were found in this run.'}}</td></tr>`;
   const files = [
+    ['Excel', report.excel_path],
     ['JSON', report.report_json_path],
     ['Ranking CSV', report.ranking_csv_path],
     ['Evidence CSV', report.evidence_csv_path],
@@ -6571,7 +7036,8 @@ function renderOperatorSevereReport(report, run) {{
     ['Markdown', report.markdown_path]
   ].filter(item => item[1]).map(item => `<div class="muted">${{esc(item[0])}}: ${{esc(item[1])}}</div>`).join('');
   return `<div>
-    <div class="row"><span class="status-complete">generated</span><span class="muted">${{esc(report.generation_time || '')}}</span>${{regenerateButton}}</div>
+    <div class="row"><span class="${{snapshotState === 'final' ? 'status-complete' : 'status-pending'}}">${{snapshotLabel}}</span><span class="muted">${{esc(report.generation_time || '')}}</span>${{standaloneLink}}${{regenerateButton}}</div>
+    <div class="muted">Discovered: ${{snapshot.discovered_episode_count ?? summary.episode_count ?? 0}} · Fully comparable checked: ${{snapshot.comparable_checked_episode_count ?? summary.comparable_checked_episode_count ?? summary.episode_count ?? 0}} · Known incomplete: ${{snapshot.known_incomplete_episode_count ?? 0}}</div>
     <div>Episodes: ${{summary.episode_count || 0}} | Named operators: ${{summary.named_operator_count || 0}} | Unknown-operator episodes: ${{summary.unknown_operator_episode_count || 0}} | Severe episodes: ${{report.severe_episode_count ?? '-'}} | Named severe episodes: ${{summary.named_severe_episode_count ?? '-'}} | Unknown severe episodes: ${{summary.unknown_operator_severe_episode_count ?? '-'}}</div>
     <div class="muted" style="margin-top:6px">Ranking includes only configured severe criteria and only their selected statuses (normally fail). Raw Top Issues below use a broader non-pass definition.</div>
     <h3>Criterion definitions / 判定标准</h3>${{criterionCards || '<div class="muted">No criterion definitions found.</div>'}}
@@ -6595,8 +7061,9 @@ async function regenerateOperatorSevereReport(runId) {{
   const msg = document.getElementById('severeReportActionMsg');
   if (msg) msg.textContent = 'Regenerating...';
   try {{
-    await postJson('/api/runs/' + encodeURIComponent(runId) + '/operator-severe-report/regenerate', {{}});
-    await loadRun(runId, false);
+    await postJson('/api/severe-reports/' + encodeURIComponent(runId) + '/refresh', {{}});
+    if (msg) msg.textContent = 'Refresh queued. The last valid snapshot remains available.';
+    setTimeout(() => loadRun(runId, false), 1500);
   }} catch (error) {{
     if (msg) msg.textContent = error.message || String(error);
   }}

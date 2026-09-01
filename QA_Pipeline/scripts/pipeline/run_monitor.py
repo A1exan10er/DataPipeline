@@ -6,7 +6,7 @@ import csv
 import json
 import sqlite3
 import time
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -71,12 +71,19 @@ class RunMonitor:
         self.severity_counts: Counter[str] = Counter()
         self.status_counts: Counter[str] = Counter()
         self.latest_issue: dict[str, Any] | None = None
+        self.episode_stats: dict[str, tuple[str, str, float]] = {}
+        self.final_status_counts: Counter[str] = Counter()
+        self.duration_by_robot: dict[str, list[float]] = {}
+        self.throughput_samples: deque[tuple[float, int]] = deque(maxlen=10_000)
+        self.throughput_samples.append((self.started_perf, 0))
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.dcs_notifier = DcsIssueNotifier(self.run_dir, self.run_id)
         self._initialize_files()
 
     def start(self, states: list[EpisodeState]) -> None:
         self.last_finding_id = self._max_finding_id()
+        self._bootstrap_aggregate_cache()
+        self._sync_state_aggregates(states)
         self._write_latest_run_pointer()
         self._write_run_status(states, "running")
         self._write_live_summary(states)
@@ -106,6 +113,11 @@ class RunMonitor:
         self.overall_processed = max(0, int(processed))
         self.overall_total = max(0, int(total))
         self.overall_label = label
+        now = time.perf_counter()
+        if not self.throughput_samples or self.throughput_samples[-1][1] != self.overall_processed:
+            self.throughput_samples.append((now, self.overall_processed))
+        while self.throughput_samples and now - self.throughput_samples[0][0] > 1800:
+            self.throughput_samples.popleft()
 
     def finish_phase(self, phase_number: int, states: list[EpisodeState]) -> None:
         self.current_phase = phase_number
@@ -133,6 +145,7 @@ class RunMonitor:
         now_perf = time.perf_counter()
         if not force and now_perf - self.last_refresh_perf < self.refresh_interval_seconds:
             return
+        self._sync_state_aggregates(states)
         new_events = self._poll_issue_events()
         if new_events:
             self._append_issue_events(new_events)
@@ -230,6 +243,7 @@ class RunMonitor:
             file_obj.write(json.dumps(event, ensure_ascii=False) + "\n")
 
     def _write_run_status(self, states: list[EpisodeState], status: str) -> None:
+        self._sync_state_aggregates(states)
         elapsed = time.perf_counter() - self.started_perf
         payload = {
             "run_id": self.run_id,
@@ -250,17 +264,24 @@ class RunMonitor:
             "overall_total": self.overall_total,
             "overall_elapsed_seconds": self._overall_elapsed_seconds(),
             "overall_eta_seconds": self._overall_eta_seconds(),
-            "final_status_counts": _final_counts(states, self.db_path),
+            "throughput": {
+                "current_phase_per_second": self._current_phase_rate(),
+                "overall_1m_per_second": self._rolling_overall_rate(60.0),
+                "overall_5m_per_second": self._rolling_overall_rate(300.0),
+                "overall_15m_per_second": self._rolling_overall_rate(900.0),
+            },
+            "final_status_counts": dict(self.final_status_counts),
             "issue_counts": dict(self.issue_counts),
             "severity_counts": dict(self.severity_counts),
             "finding_status_counts": dict(self.status_counts),
-            "robot_duration": _duration_by_robot(self.db_path),
+            "robot_duration": self._robot_duration_rows(),
             "latest_issue": self.latest_issue,
             "run_dir": str(self.run_dir),
         }
         _write_json_atomic(self.run_dir / "run_status.json", payload)
 
     def _write_live_summary(self, states: list[EpisodeState]) -> None:
+        self._sync_state_aggregates(states)
         lines = [
             "# Live QA Run Summary",
             "",
@@ -276,10 +297,10 @@ class RunMonitor:
             "## Final Status Counts",
             "",
         ]
-        for status, count in sorted(_final_counts(states, self.db_path).items()):
+        for status, count in sorted(self.final_status_counts.items()):
             lines.append(f"- `{status}`: {count}")
         lines.extend(["", "## Duration By Robot", ""])
-        robot_duration = _duration_by_robot(self.db_path)
+        robot_duration = self._robot_duration_rows()
         if robot_duration:
             for row in robot_duration:
                 lines.append(
@@ -313,6 +334,87 @@ class RunMonitor:
             row = conn.execute("SELECT MAX(id) FROM findings").fetchone()
         return int(row[0] or 0)
 
+    def _bootstrap_aggregate_cache(self) -> None:
+        """Scan historical state once; later refreshes apply only batch deltas."""
+        if not self.db_path.exists():
+            return
+        with sqlite3.connect(self.db_path) as conn:
+            try:
+                rows = conn.execute(
+                    "SELECT episode_path, final_status, robot, metrics FROM episodes"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return
+        for episode_path, final_status, robot, metrics_json in rows:
+            metrics = _json_dict(metrics_json)
+            try:
+                duration = float(metrics.get("p2_duration_seconds") or 0.0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            self._replace_episode_stat(
+                str(episode_path),
+                str(final_status or "pending"),
+                str(robot or "(unknown)"),
+                max(0.0, duration),
+            )
+
+    def _sync_state_aggregates(self, states: list[EpisodeState]) -> None:
+        for state in states:
+            try:
+                duration = float(state.metrics.get("p2_duration_seconds") or 0.0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            self._replace_episode_stat(
+                str(state.episode_path),
+                str(state.final_status or "pending"),
+                str(state.robot or "(unknown)"),
+                max(0.0, duration),
+            )
+
+    def _replace_episode_stat(
+        self,
+        episode_path: str,
+        status: str,
+        robot: str,
+        duration: float,
+    ) -> None:
+        previous = self.episode_stats.get(episode_path)
+        current = (status, robot, duration)
+        if previous == current:
+            return
+        if previous is not None:
+            previous_status, previous_robot, previous_duration = previous
+            self.final_status_counts[previous_status] -= 1
+            if self.final_status_counts[previous_status] <= 0:
+                self.final_status_counts.pop(previous_status, None)
+            if previous_duration > 0:
+                values = self.duration_by_robot.get(previous_robot)
+                if values is not None:
+                    values[0] -= 1
+                    values[1] -= previous_duration
+                    if values[0] <= 0:
+                        self.duration_by_robot.pop(previous_robot, None)
+        self.episode_stats[episode_path] = current
+        self.final_status_counts[status] += 1
+        if duration > 0:
+            values = self.duration_by_robot.setdefault(robot, [0.0, 0.0])
+            values[0] += 1
+            values[1] += duration
+
+    def _robot_duration_rows(self) -> list[dict[str, Any]]:
+        rows = [
+            {
+                "robot": robot,
+                "episodes": int(values[0]),
+                "duration_seconds": round(float(values[1]), 3),
+                "duration_hours": round(float(values[1]) / 3600.0, 3),
+            }
+            for robot, values in self.duration_by_robot.items()
+            if values[0] > 0
+        ]
+        rows.sort(key=lambda row: (-float(row["duration_seconds"]), str(row["robot"])))
+        return rows
+
     def _phase_elapsed_seconds(self) -> float:
         if not self.current_phase_started_perf:
             return 0.0
@@ -326,6 +428,23 @@ class RunMonitor:
 
     def _overall_eta_seconds(self) -> float:
         return _eta_seconds(self.overall_processed, self.overall_total, self._overall_elapsed_seconds())
+
+    def _current_phase_rate(self) -> float:
+        elapsed = self._phase_elapsed_seconds()
+        return round(self.current_phase_processed / elapsed, 4) if elapsed > 0 else 0.0
+
+    def _rolling_overall_rate(self, window_seconds: float) -> float:
+        if len(self.throughput_samples) < 2:
+            return 0.0
+        latest_time, latest_count = self.throughput_samples[-1]
+        earliest_time, earliest_count = self.throughput_samples[0]
+        threshold = latest_time - window_seconds
+        for sample_time, sample_count in self.throughput_samples:
+            if sample_time >= threshold:
+                earliest_time, earliest_count = sample_time, sample_count
+                break
+        elapsed = latest_time - earliest_time
+        return round((latest_count - earliest_count) / elapsed, 4) if elapsed > 0 else 0.0
 
 
 def _issue_csv_row(event: dict[str, Any]) -> dict[str, Any]:

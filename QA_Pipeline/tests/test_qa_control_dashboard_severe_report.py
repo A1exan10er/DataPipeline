@@ -343,6 +343,61 @@ def test_resume_command_preserves_scope_and_removes_force_rerun(tmp_path: Path) 
     assert command[command.index("--run-id") + 1] == run["run_id"]
 
 
+def test_resume_command_rebinds_managed_old_release_to_current_release(tmp_path: Path) -> None:
+    deploy_root = tmp_path / "DataPipeline-deploy"
+    old_sha = "a" * 40
+    new_sha = "b" * 40
+    old_script = deploy_root / "releases" / old_sha / "QA_Pipeline" / "scripts" / "run_pipeline.py"
+    new_script = deploy_root / "releases" / new_sha / "QA_Pipeline" / "scripts" / "run_pipeline.py"
+    new_python = deploy_root / "releases" / new_sha / "datapipeline-env" / "bin" / "python"
+    run = {
+        "run_id": "date-run",
+        "db_path": str(tmp_path / "out" / "qa.db"),
+        "output_dir": str(tmp_path / "out"),
+        "command": dashboard.shell_command(
+            [
+                str(deploy_root / "releases" / old_sha / "datapipeline-env" / "bin" / "python"),
+                str(old_script),
+                "--roots",
+                str(tmp_path / "root"),
+                "--db-path",
+                "/old/qa.db",
+                "--output-dir",
+                "/old/out",
+                "--run-id",
+                "old-run",
+                "--force-rerun",
+            ]
+        ),
+    }
+
+    command = dashboard._resume_pipeline_command(
+        run,
+        qa_python=new_python,
+        pipeline_script=new_script,
+    )
+
+    assert command[0] == str(new_python)
+    assert command[1] == str(new_script)
+    assert "--force-rerun" not in command
+    assert command[command.index("--db-path") + 1] == run["db_path"]
+    assert command[command.index("--output-dir") + 1] == run["output_dir"]
+
+
+def test_resume_command_rejects_pipeline_from_unmanaged_path(tmp_path: Path) -> None:
+    run = {
+        "run_id": "unsafe-run",
+        "db_path": str(tmp_path / "out" / "qa.db"),
+        "output_dir": str(tmp_path / "out"),
+        "command": dashboard.shell_command(
+            [sys.executable, str(tmp_path / "unmanaged" / "run_pipeline.py")]
+        ),
+    }
+
+    with pytest.raises(ValueError, match="configured QA pipeline entry point"):
+        dashboard._resume_pipeline_command(run)
+
+
 def test_api_resume_reuses_database_and_starts_new_manager(monkeypatch, tmp_path: Path) -> None:
     root = tmp_path / "samples"
     root.mkdir()
@@ -768,7 +823,7 @@ def test_pipeline_completion_paths_use_one_shared_report_helper() -> None:
         assert source.index("_export_reports(") < source.index("_maybe_generate_operator_severe_report(")
 
 
-def test_pipeline_report_helper_skips_dry_run_and_surfaces_failure(monkeypatch, tmp_path: Path) -> None:
+def test_pipeline_report_helper_skips_dry_run_and_keeps_qa_success_retryable(monkeypatch, tmp_path: Path) -> None:
     calls = []
     args = SimpleNamespace(
         dry_run=True,
@@ -788,7 +843,111 @@ def test_pipeline_report_helper_skips_dry_run_and_surfaces_failure(monkeypatch, 
         "generate_operator_severe_report",
         lambda *values: (_ for _ in ()).throw(RuntimeError("report failed")),
     )
-    assert not run_pipeline._maybe_generate_operator_severe_report(args, tmp_path / "qa.db", tmp_path)
+    assert run_pipeline._maybe_generate_operator_severe_report(args, tmp_path / "qa.db", tmp_path)
+
+
+def test_legacy_running_database_publishes_partial_snapshots_without_source_writes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "verified"
+    root.mkdir()
+    state = _state(tmp_path, root)
+    state.severe_publish_lock = __import__("threading").Lock()
+    state.severe_publish_fingerprints = {}
+    state.severe_publish_forced = set()
+    output = state.output_root / "legacy-running"
+    output.mkdir(parents=True)
+    db_path = output / "qa.db"
+    config = _config(tmp_path / "old-release" / "operator_severe.json", phases=[2])
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE episodes (
+                episode_path TEXT PRIMARY KEY, task TEXT, date TEXT, operator TEXT,
+                robot TEXT, controller TEXT, phases_completed TEXT,
+                final_status TEXT, last_updated TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, episode_path TEXT, phase INTEGER,
+                check_name TEXT, severity TEXT, status TEXT, message TEXT, details TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO episodes VALUES ('/episode_1', 'task', '20260831', 'alice', 'ur', 'none', '[2]', 'fail', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO findings (episode_path, phase, check_name, severity, status, message, details) VALUES ('/episode_1', 2, 'check', 'major', 'fail', 'first', '{}')"
+        )
+    dashboard.record_run(
+        state.registry_db,
+        {
+            "run_id": "legacy-running",
+            "mode": "date_range",
+            "output_dir": str(output),
+            "db_path": str(db_path),
+            "command": "legacy command",
+            "status": "running",
+            "phases": "1,2,7",
+            "workers": 2,
+            "batch_size": 100,
+            "root_path": str(root),
+            "date_from": "20260801",
+            "date_to": "20260831",
+            "task_filter": "",
+            "operator_filter": "",
+            "started_at": dashboard.now_iso(),
+            "finished_at": "",
+            "updated_at": dashboard.now_iso(),
+            "notes": "",
+            "severe_report_requested": 1,
+            "severe_report_config": str(config),
+            "continue_after_fail": 1,
+        },
+    )
+    run = dashboard.registered_run(state.registry_db, "legacy-running")
+    assert run is not None
+    source_before = db_path.read_bytes()
+
+    first = dashboard.publish_operator_severe_snapshot(state, run)
+
+    assert first["ok"] is True
+    assert db_path.read_bytes() == source_before
+    loaded = dashboard.load_operator_severe_report(output, True, "running")
+    assert loaded["state"] == "generated"
+    assert loaded["snapshot"]["state"] == "partial"
+    assert loaded["severe_episode_count"] == 1
+    assert Path(loaded["excel_path"]).is_file()
+    persisted_config = output / dashboard.OPERATOR_SEVERE_SNAPSHOT_ROOT / "report_config.json"
+    assert persisted_config.is_file()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO episodes VALUES ('/episode_2', 'task', '20260831', 'bob', 'ur', 'none', '[2]', 'fail', 'later')"
+        )
+        conn.execute(
+            "INSERT INTO findings (episode_path, phase, check_name, severity, status, message, details) VALUES ('/episode_2', 2, 'check', 'major', 'fail', 'second', '{}')"
+        )
+    second = dashboard.publish_operator_severe_snapshot(state, run)
+    assert second["ok"] is True and second["snapshot_id"] != first["snapshot_id"]
+    snapshots = output / dashboard.OPERATOR_SEVERE_SNAPSHOT_ROOT / "snapshots"
+    assert (snapshots / first["snapshot_id"] / "operator_severe_report.json").is_file()
+    assert dashboard.load_operator_severe_report(output, True, "running")["severe_episode_count"] == 2
+    page = dashboard.render_standalone_operator_severe_report(state, "legacy-running")
+    assert "部分结果 / Partial" in page
+    assert "下载 Excel" in page
+
+    persisted_config.write_text("{broken", encoding="utf-8")
+    failed_refresh = dashboard.publish_operator_severe_snapshot(state, run)
+    assert failed_refresh["ok"] is False
+    last_good = dashboard.load_operator_severe_report(output, True, "running")
+    assert last_good["state"] == "generated"
+    assert last_good["severe_episode_count"] == 2
+    assert "Could not load" in last_good["publisher_error"]
 
 
 @pytest.mark.local_data

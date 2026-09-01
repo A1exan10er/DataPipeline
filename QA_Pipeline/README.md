@@ -92,6 +92,20 @@ python3 QA_Pipeline/scripts/generate_operator_severe_report.py \
   --config QA_Pipeline/configs/operator_severe_report.json
 ```
 
+Dashboard-requested severe reports are also published while a run is active.
+The publisher reads the QA database without changing it and creates immutable
+snapshots under `reports/operator_severe/`. Evidence becomes available as soon
+as the phase required by its criterion has completed. Combined operator rates
+use only episodes that completed every enabled report phase, so partial data
+does not distort rankings.
+
+Open the Chinese-first standalone view at
+`http://<server>:4131/severe-reports/<run-id>`. It omits pipeline controls and
+technical server details and provides an Excel download for the exact displayed
+snapshot. A running legacy process is supported: after a dashboard deployment,
+its already-committed results are published without restarting the run or
+migrating its active database.
+
 Current default behavior:
 
 - episodes with `quality.labels` containing `完全正常` are normal, `测试任务`
@@ -101,6 +115,9 @@ Current default behavior:
   `hidden_directory_skipped`;
 - batch mode limits the number of loaded episode states, and `group-aware`
   batching keeps Phase 2/3 outlier groups complete;
+- pipeline phase writes use bounded SQLite transactions and the live monitor
+  updates cached aggregates from changed episode states, avoiding historical
+  full-table scans as a run grows;
 - the dashboard can run as a separate process with
   `QA_Pipeline/scripts/live_dashboard.py`; it updates `dashboard.html` plus
   `dashboard_data.json` from the SQLite DB and can serve the output directory
