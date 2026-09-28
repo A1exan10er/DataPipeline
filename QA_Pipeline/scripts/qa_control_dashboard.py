@@ -2824,6 +2824,23 @@ def event_listener_job_detail(job_id: int, verified_root: Path) -> dict[str, Any
             """,
             (job_id,),
         ).fetchone()
+        try:
+            history_rows = conn.execute(
+                """
+                SELECT id, reason, previous_status, previous_attempts,
+                       previous_run_id, previous_output_dir, previous_db_path,
+                       previous_error, previous_started_at, previous_finished_at,
+                       previous_updated_at, requeued_at
+                FROM job_reprocess_history
+                WHERE job_id = ?
+                ORDER BY id DESC
+                """,
+                (job_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Older listener databases may not have been initialized with the
+            # audit table yet. Keep job details readable during that rollout.
+            history_rows = []
     if row is None:
         raise ValueError(f"unknown event job id: {job_id}")
     job = dict(row)
@@ -2831,6 +2848,7 @@ def event_listener_job_detail(job_id: int, verified_root: Path) -> dict[str, Any
     job["nas_internal_path"] = nas_internal_verified_path(str(job.get("mounted_path") or ""), verified_root)
     job["task"] = task_from_episode_path(str(job.get("mounted_path") or ""))
     job["robot"] = robot_from_episode_path(str(job.get("mounted_path") or ""))
+    job["reprocess_history"] = [dict(history_row) for history_row in history_rows]
     job.update(job_episode_result(job, include_findings=True))
     output_dir = Path(str(job.get("output_dir") or ""))
     if output_dir:
@@ -5264,8 +5282,8 @@ def nas_internal_verified_path(raw: str, verified_root: Path) -> str:
 
 def validate_phases(value: str) -> str:
     stripped = value.strip()
-    if not re.fullmatch(r"[1-7](,[1-7])*", stripped):
-        raise ValueError("phases must look like 1,2,3,7")
+    if not re.fullmatch(r"[1-8](,[1-8])*", stripped):
+        raise ValueError("phases must look like 1,2,3,7,8")
     return ",".join(sorted(set(stripped.split(",")), key=int))
 
 
@@ -6900,6 +6918,13 @@ async function loadEventJob(jobId, openModal) {{
   const topIssues = (job.top_issues || []).map(i => `${{esc(i.issue_title_zh || i.check_name)}}(${{i.count}})`).join(', ') || '无';
   const pipelineError = job.pipeline_error ? `<div><b>流程错误：</b> <span class="status-failed">${{esc(job.pipeline_error)}}</span></div>` : '';
   const qaMissing = job.qa_result_missing ? `<div><b>质检结果：</b> <span class="status-warning">${{esc(job.qa_missing_reason || '未生成质检结果。')}}</span></div>` : '';
+  const reprocessHistory = job.reprocess_history || [];
+  const reprocessRows = reprocessHistory.map(item =>
+    `<tr><td>${{localTimestamp(item.requeued_at)}}</td><td>${{esc(item.reason || '')}}</td><td>${{esc(item.previous_status || '')}}</td><td>${{item.previous_attempts || 0}}</td><td>${{esc(item.previous_run_id || '')}}</td><td title="${{esc(item.previous_output_dir || '')}}">${{esc(item.previous_output_dir || '')}}</td></tr>`
+  ).join('');
+  const reprocessHistoryHtml = reprocessRows
+    ? `<h3>重新处理历史</h3><div class="table-scroll"><table><thead><tr><th>重新入队时间</th><th>原因</th><th>原状态</th><th>原尝试次数</th><th>原运行</th><th>原输出目录</th></tr></thead><tbody>${{reprocessRows}}</tbody></table></div>`
+    : '';
   const mountedPath = job.mounted_path || '';
   const copyPath = job.nas_internal_path || mountedPath;
   document.getElementById('eventJobDetail').innerHTML =
@@ -6913,7 +6938,8 @@ async function loadEventJob(jobId, openModal) {{
     `<div><b>主要问题：</b>${{topIssues}}</div>` +
     `<div><b>输出目录：</b>${{esc(job.output_dir || '')}}</div>` +
     `<h3>Episode 问题明细</h3>` +
-    `<div class="table-scroll"><table><thead><tr><th>阶段</th><th>问题</th><th>严重程度</th><th>状态</th><th>发生情况与原因</th></tr></thead><tbody>${{issueRows}}</tbody></table></div>`;
+    `<div class="table-scroll"><table><thead><tr><th>阶段</th><th>问题</th><th>严重程度</th><th>状态</th><th>发生情况与原因</th></tr></thead><tbody>${{issueRows}}</tbody></table></div>` +
+    reprocessHistoryHtml;
   if (openModal) {{
     selectedEventJob = jobId;
     document.getElementById('eventJobModal').classList.add('open');

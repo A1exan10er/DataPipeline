@@ -219,6 +219,19 @@ def resolve_event_date_filter(value: str) -> str:
     return normalized
 
 
+def _quality_evidence_current(path: Path, database: str) -> bool:
+    """A duplicate upload event may refer to changed files at the same path."""
+    if not database or not Path(database).is_file():return False
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'QA_Pipeline'))
+    from scripts.pipeline.quality_contract import manifest, rules_version
+    try:
+        with sqlite3.connect('file:'+str(Path(database).resolve())+'?mode=ro',uri=True) as db:
+            row=db.execute('SELECT metrics FROM episodes WHERE episode_path=?',(str(path),)).fetchone()
+        pin=json.loads(row[0]).get('qc_input',{}) if row else {}
+        return pin.get('manifest')==manifest(path) and pin.get('rules')==rules_version()
+    except (OSError,ValueError,sqlite3.Error):return False
+
+
 def enqueue_job(
     job_db: Path,
     *,
@@ -253,6 +266,13 @@ def enqueue_job(
                 ),
             )
         except sqlite3.IntegrityError:
+            if os.getenv('QA_QC_FEED_DIR'):
+                conn.row_factory=sqlite3.Row
+                old=conn.execute('SELECT * FROM jobs WHERE event_id=? OR mounted_path=?',(event_id,str(mounted_path))).fetchone()
+                if old and old['status'] in ('done','failed','skipped') and not _quality_evidence_current(mounted_path,old['db_path']):
+                    conn.execute("INSERT INTO job_reprocess_history(job_id,reason,previous_status,previous_attempts,previous_run_id,previous_output_dir,previous_db_path,previous_error,previous_started_at,previous_finished_at,previous_updated_at,requeued_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (old['id'],'quality_evidence_changed',old['status'],old['attempts'],old['run_id'],old['output_dir'],old['db_path'],old['error'],old['started_at'],old['finished_at'],old['updated_at'],now))
+                    conn.execute("UPDATE jobs SET status='pending',attempts=0,run_id='',output_dir='',db_path='',error='',started_at=NULL,finished_at=NULL WHERE id=?",(old['id'],))
             conn.execute(
                 """
                 UPDATE jobs

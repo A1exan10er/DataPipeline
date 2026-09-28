@@ -1,0 +1,56 @@
+{
+  "DataPipeline": {
+    "commit": "4bd1b8b752f02d602f392e65335a964d9b16b8f0",
+    "ref": "refs/heads/codex/backup-complete-trajectory-20260928-v2",
+    "files": 1224,
+    "bytes": 367074550,
+    "restore_verified": true,
+    "gitlinks": 0,
+    "github": {
+      "commit": "4bd1b8b752f02d602f392e65335a964d9b16b8f0",
+      "restore_verified": true,
+      "files": 1224
+    },
+    "gitea": {
+      "commit": "4bd1b8b752f02d602f392e65335a964d9b16b8f0",
+      "restore_verified": true,
+      "files": 1224
+    }
+  },
+  "DataQualityControlLoop": {
+    "commit": "e0acbe7c25eec2f5cad789241a349409094bff3d",
+    "ref": "refs/heads/codex/backup-complete-trajectory-20260928-v2",
+    "files": 2144,
+    "bytes": 406027328,
+    "restore_verified": true,
+    "gitlinks": 0,
+    "github": {
+      "commit": "e0acbe7c25eec2f5cad789241a349409094bff3d",
+      "restore_verified": true,
+      "files": 2144
+    },
+    "gitea": {
+      "commit": "e0acbe7c25eec2f5cad789241a349409094bff3d",
+      "restore_verified": true,
+      "files": 2144
+    }
+  },
+  "QualityCheck": {
+    "commit": "10e9915f10894229486987d691c8524be61b20c1",
+    "ref": "refs/heads/codex/backup-complete-trajectory-20260928-v2",
+    "files": 163,
+    "bytes": 4326805,
+    "restore_verified": true,
+    "gitlinks": 0,
+    "github": {
+      "commit": "10e9915f10894229486987d691c8524be61b20c1",
+      "restore_verified": true,
+      "files": 163
+    },
+    "gitea": {
+      "commit": "10e9915f10894229486987d691c8524be61b20c1",
+      "restore_verified": true,
+      "files": 163
+    }
+  }
+}

@@ -621,7 +621,8 @@ def _read_image_timestamps(path: Path) -> list[float] | None:
     rows = _read_timestamp_rows(path)
     if rows is None:
         return None
-    return [timestamp for timestamp, is_new in rows if is_new == "1"]
+    values = [timestamp for timestamp, is_new in rows if _normalized_is_new(is_new) == "1"]
+    return values or None  # No usable timestamp evidence must never count as a pass.
 
 
 def _read_data_timestamps(path: Path) -> list[float] | None:
