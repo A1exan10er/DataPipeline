@@ -1,0 +1,26 @@
+{
+  "date": "2026-09-28",
+  "scope": "Local implementation acceptance; no production deployment, physical robot execution, or real collector-PC notification",
+  "python_tests": {
+    "DataPipeline": {"passed": 168, "skipped": 7, "scope": "QA_Pipeline test suite"},
+    "QualityCheck": {"passed": 97, "scope": "pipeline quality, filter index, duration and review regression tests"},
+    "DataQualityControlLoop": {"passed": 65, "scope": "selected detector, notification, review and attribution regression tests"}
+  },
+  "frontend": {"tests_passed": 4, "typescript_check": "passed", "vite_build": "passed"},
+  "browser_acceptance": {
+    "url": "http://127.0.0.1:1344",
+    "input": "six synthetic recordings processed by DataPipeline phases 1, 2, 3, 7, 8",
+    "default_queue": ["clear", "small", "large", "pause"],
+    "hidden_failures_view": ["hard_metadata", "hard_timestamp"],
+    "brief_issue_descriptions": "visible in both main dashboard and review workbench",
+    "large_drift_review": "302.3 mm maximum step; target test PC and device displayed",
+    "test_only_approval": "rejected by server; notification register remained empty",
+    "operator_delivery_enabled": false
+  },
+  "remaining_acceptance": [
+    "Independent held-out recordings labelled by device and task",
+    "Actual robot conversion and replay validation against controller constraints",
+    "User-confirmed rollout and supervised delivery to a designated real collector PC",
+    "Production feed/history retention budget and shadow-import comparison"
+  ]
+}

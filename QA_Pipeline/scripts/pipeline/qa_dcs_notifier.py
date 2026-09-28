@@ -96,6 +96,8 @@ class DcsIssueNotifier:
             self._audit("error", payload, error=str(exc), traceback=traceback.format_exc(limit=8))
 
     def _decision(self, event: dict[str, Any]) -> str:
+        if str(event.get("phase")) == "8" or str(event.get("check_name", "")).startswith("umi_trajectory_"):
+            return "human_review_required"
         check_name = str(event.get("check_name") or "")
         status = str(event.get("status") or "").lower()
         if check_name in self.exclude_checks:
