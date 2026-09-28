@@ -1,0 +1,209 @@
+{
+  "scope": "53 retained development examples, not independent accuracy validation",
+  "results": {
+    "0.25": {
+      "1.小型局部跳跃": {
+        "episodes": 11,
+        "observed": 11,
+        "review_recommended": 2,
+        "large": 0,
+        "intervals": 36
+      },
+      "2.大型局部跳跃": {
+        "episodes": 11,
+        "observed": 11,
+        "review_recommended": 11,
+        "large": 11,
+        "intervals": 54
+      },
+      "3.小型和大型局部综合跳跃": {
+        "episodes": 10,
+        "observed": 10,
+        "review_recommended": 10,
+        "large": 10,
+        "intervals": 246
+      },
+      "4.大型全局跳跃": {
+        "episodes": 13,
+        "observed": 13,
+        "review_recommended": 13,
+        "large": 13,
+        "intervals": 816
+      },
+      "normal": {
+        "episodes": 3,
+        "observed": 0,
+        "review_recommended": 0,
+        "large": 0,
+        "intervals": 0
+      },
+      "tiny-confirmed-20260921": {
+        "episodes": 2,
+        "observed": 2,
+        "review_recommended": 0,
+        "large": 0,
+        "intervals": 3
+      },
+      "normal-20260921": {
+        "episodes": 3,
+        "observed": 0,
+        "review_recommended": 0,
+        "large": 0,
+        "intervals": 0
+      }
+    },
+    "0.5": {
+      "1.小型局部跳跃": {
+        "episodes": 11,
+        "observed": 11,
+        "review_recommended": 7,
+        "large": 0,
+        "intervals": 36
+      },
+      "2.大型局部跳跃": {
+        "episodes": 11,
+        "observed": 11,
+        "review_recommended": 11,
+        "large": 11,
+        "intervals": 54
+      },
+      "3.小型和大型局部综合跳跃": {
+        "episodes": 10,
+        "observed": 10,
+        "review_recommended": 10,
+        "large": 10,
+        "intervals": 246
+      },
+      "4.大型全局跳跃": {
+        "episodes": 13,
+        "observed": 13,
+        "review_recommended": 13,
+        "large": 13,
+        "intervals": 816
+      },
+      "normal": {
+        "episodes": 3,
+        "observed": 0,
+        "review_recommended": 0,
+        "large": 0,
+        "intervals": 0
+      },
+      "tiny-confirmed-20260921": {
+        "episodes": 2,
+        "observed": 2,
+        "review_recommended": 1,
+        "large": 0,
+        "intervals": 3
+      },
+      "normal-20260921": {
+        "episodes": 3,
+        "observed": 0,
+        "review_recommended": 0,
+        "large": 0,
+        "intervals": 0
+      }
+    },
+    "1": {
+      "1.小型局部跳跃": {
+        "episodes": 11,
+        "observed": 11,
+        "review_recommended": 11,
+        "large": 0,
+        "intervals": 36
+      },
+      "2.大型局部跳跃": {
+        "episodes": 11,
+        "observed": 11,
+        "review_recommended": 11,
+        "large": 11,
+        "intervals": 54
+      },
+      "3.小型和大型局部综合跳跃": {
+        "episodes": 10,
+        "observed": 10,
+        "review_recommended": 10,
+        "large": 10,
+        "intervals": 246
+      },
+      "4.大型全局跳跃": {
+        "episodes": 13,
+        "observed": 13,
+        "review_recommended": 13,
+        "large": 13,
+        "intervals": 816
+      },
+      "normal": {
+        "episodes": 3,
+        "observed": 0,
+        "review_recommended": 0,
+        "large": 0,
+        "intervals": 0
+      },
+      "tiny-confirmed-20260921": {
+        "episodes": 2,
+        "observed": 2,
+        "review_recommended": 2,
+        "large": 0,
+        "intervals": 3
+      },
+      "normal-20260921": {
+        "episodes": 3,
+        "observed": 0,
+        "review_recommended": 0,
+        "large": 0,
+        "intervals": 0
+      }
+    },
+    "2": {
+      "1.小型局部跳跃": {
+        "episodes": 11,
+        "observed": 11,
+        "review_recommended": 11,
+        "large": 0,
+        "intervals": 64
+      },
+      "2.大型局部跳跃": {
+        "episodes": 11,
+        "observed": 11,
+        "review_recommended": 11,
+        "large": 11,
+        "intervals": 74
+      },
+      "3.小型和大型局部综合跳跃": {
+        "episodes": 10,
+        "observed": 10,
+        "review_recommended": 10,
+        "large": 10,
+        "intervals": 293
+      },
+      "4.大型全局跳跃": {
+        "episodes": 13,
+        "observed": 13,
+        "review_recommended": 13,
+        "large": 13,
+        "intervals": 845
+      },
+      "normal": {
+        "episodes": 3,
+        "observed": 1,
+        "review_recommended": 1,
+        "large": 0,
+        "intervals": 2
+      },
+      "tiny-confirmed-20260921": {
+        "episodes": 2,
+        "observed": 2,
+        "review_recommended": 2,
+        "large": 0,
+        "intervals": 3
+      },
+      "normal-20260921": {
+        "episodes": 3,
+        "observed": 1,
+        "review_recommended": 1,
+        "large": 0,
+        "intervals": 2
+      }
+    }
+  }
+}

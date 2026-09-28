@@ -1,5 +1,7 @@
 # DataPipeline
 
+**2026-09-28 本地开发：** 新增 UMI Phase 8 与可选 QualityCheck 结果 feed；大小漂移通知必须人工批准。小漂移观察保留，灵敏度调整复核提示，硬失败默认筛选与标定复检见 [实施计划](docs/trajectory-review-plan.md)。未部署服务器。
+
 <p align="right">
   <a href="README.md"><kbd>中文</kbd></a>
   <a href="README_EN.md"><kbd>English</kbd></a>

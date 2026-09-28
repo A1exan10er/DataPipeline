@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -26,6 +27,7 @@ from scripts.pipeline import (
     phase5_robot_state,
     phase6_umi_processing,
     phase7_standstill,
+    phase8_umi_trajectory,
     task_catalog,
 )
 try:
@@ -84,6 +86,7 @@ PHASE_RUNNERS: dict[int, Callable[..., list[EpisodeState]]] = {
     5: phase5_robot_state.run_phase,
     6: phase6_umi_processing.run_phase,
     7: phase7_standstill.run_phase,
+    8: phase8_umi_trajectory.run_phase,
 }
 
 PHASE_MODULES = {
@@ -94,13 +97,21 @@ PHASE_MODULES = {
     5: phase5_robot_state,
     6: phase6_umi_processing,
     7: phase7_standstill,
+    8: phase8_umi_trajectory,
 }
 
 EPISODE_SELECTION_CACHE = "selected_episodes.jsonl"
 EPISODE_SELECTION_META = "selected_episodes_meta.json"
 STREAMING_PROGRESS_INTERVAL_SECONDS = 10.0
 STREAMING_PROGRESS_INTERVAL_SCANNED = 5000
-NON_BLOCKING_PRIOR_FAIL_CHECKS = {"quality_labels_missing"}
+NON_BLOCKING_PRIOR_FAIL_CHECKS = set("""quality_labels_missing quality_label_unexpected
+    duration_absolute_too_long duration_absolute_too_short duration_extreme_long duration_task_outlier
+    duration_training_limit_exceeded duration_under_5s duration_official_out_of_range
+    operator_standstill_excessive operator_standstill_motion_too_short operator_standstill_start
+    operator_standstill_middle operator_standstill_end operator_standstill_leading operator_standstill_trailing
+    operator_standstill_internal equipment_standstill_excessive equipment_standstill_motion_too_short
+    operator_sustained_slow_motion equipment_motion_response_slow equipment_motion_response_stalled
+    slow_motion_cause_uncertain standstill_cause_uncertain""".split())
 
 
 class GracefulStopRequested(RuntimeError):
@@ -773,7 +784,7 @@ def _run_streaming_discovery(
     max_selected = args.max_episodes
     completed_episode_paths = (
         _streaming_completed_episode_paths(db_path, phases)
-        if not args.force_rerun and 6 not in phases
+        if not args.force_rerun and 6 not in phases and not os.getenv("QA_QC_FEED_DIR")
         else None
     )
 
@@ -1589,6 +1600,8 @@ def _load_or_create_states(
                 ]
             else:
                 state.phases_completed = []
+        from scripts.pipeline.quality_contract import prepare_state
+        prepare_state(state)
         states.append(state)
         if (index + 1) % 500 == 0 or (index + 1) == total:
             current = index + 1
@@ -1832,6 +1845,8 @@ def _export_reports(db_path: Path, output_dir: Path) -> list[Path]:
     export_findings_jsonl(db_path, findings_jsonl)
     export_summary_md(db_path, summary_md)
     generate_dashboard(db_path, dashboard_html)
+    from scripts.pipeline.quality_contract import export_results
+    export_results(db_path)
     return [quality_report, findings_jsonl, summary_md, dashboard_html]
 
 
