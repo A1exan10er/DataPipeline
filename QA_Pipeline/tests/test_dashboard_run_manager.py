@@ -120,6 +120,27 @@ def test_process_launcher_tracks_identity_and_stops_process_group(tmp_path: Path
                 pass
 
 
+def test_launcher_waits_for_transient_empty_command_line(monkeypatch, tmp_path: Path) -> None:
+    command = tmp_path / "dashboard_command.sh"
+    command.write_text("#!/usr/bin/env bash\nsleep 30\n")
+    original = dashboard.process_cmdline
+    calls = []
+
+    def during_exec(pid):
+        calls.append(pid)
+        return [] if len(calls) <= 2 else original(pid)
+
+    monkeypatch.setattr(dashboard, "process_cmdline", during_exec)
+    handle = dashboard.launch_process_run(command)
+    run = dict(manager="process", manager_pid=handle.manager_pid,
+               manager_start_ticks=handle.manager_start_ticks, output_dir=str(tmp_path))
+    try:
+        assert len(calls) >= 3
+        assert dashboard.managed_run_process_pid(run) == handle.manager_pid
+    finally:
+        dashboard.stop_run_manager(run)
+
+
 def test_process_identity_rejects_reused_pid(monkeypatch, tmp_path: Path) -> None:
     run = {
         "manager": "process",

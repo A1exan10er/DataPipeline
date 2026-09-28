@@ -1,0 +1,56 @@
+{
+  "DataPipeline": {
+    "commit": "6be5e41a7596ae1ec965fc270c33bf5443f3c468",
+    "ref": "refs/heads/codex/backup-focused-review-resume-20260928",
+    "files": 1229,
+    "bytes": 367103819,
+    "restore_verified": true,
+    "gitlinks": 0,
+    "github": {
+      "commit": "6be5e41a7596ae1ec965fc270c33bf5443f3c468",
+      "restore_verified": true,
+      "files": 1229
+    },
+    "gitea": {
+      "commit": "6be5e41a7596ae1ec965fc270c33bf5443f3c468",
+      "restore_verified": true,
+      "files": 1229
+    }
+  },
+  "DataQualityControlLoop": {
+    "commit": "93df6d39ebbaafb6d00d66e1a220471cffa02248",
+    "ref": "refs/heads/codex/backup-focused-review-resume-20260928",
+    "files": 2144,
+    "bytes": 406027410,
+    "restore_verified": true,
+    "gitlinks": 0,
+    "github": {
+      "commit": "93df6d39ebbaafb6d00d66e1a220471cffa02248",
+      "restore_verified": true,
+      "files": 2144
+    },
+    "gitea": {
+      "commit": "93df6d39ebbaafb6d00d66e1a220471cffa02248",
+      "restore_verified": true,
+      "files": 2144
+    }
+  },
+  "QualityCheck": {
+    "commit": "48d1eb0697b1f653b822fd993b0b2e2968450c1f",
+    "ref": "refs/heads/codex/backup-focused-review-resume-20260928",
+    "files": 188,
+    "bytes": 5637164,
+    "restore_verified": true,
+    "gitlinks": 0,
+    "github": {
+      "commit": "48d1eb0697b1f653b822fd993b0b2e2968450c1f",
+      "restore_verified": true,
+      "files": 188
+    },
+    "gitea": {
+      "commit": "48d1eb0697b1f653b822fd993b0b2e2968450c1f",
+      "restore_verified": true,
+      "files": 188
+    }
+  }
+}

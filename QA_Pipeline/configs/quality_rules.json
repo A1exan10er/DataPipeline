@@ -9,7 +9,10 @@
     "checksum": {
       "required": true,
       "verify_hashes": false,
-      "accepted_algorithms": ["sha256", "md5"],
+      "accepted_algorithms": [
+        "sha256",
+        "md5"
+      ],
       "max_missing_paths_in_details": 50
     },
     "modalities": {
@@ -18,21 +21,59 @@
       "singular_action_status": "pass"
     },
     "task_robot_tokens": {
-      "umi": ["umi"],
-      "ur": ["ur", "ur5", "ur5e"],
-      "arx": ["arx", "arx5"],
-      "arx5": ["arx", "arx5"],
-      "flexiv": ["flexiv"],
-      "aloha": ["aloha"]
+      "umi": [
+        "umi"
+      ],
+      "ur": [
+        "ur",
+        "ur5",
+        "ur5e"
+      ],
+      "arx": [
+        "arx",
+        "arx5"
+      ],
+      "arx5": [
+        "arx",
+        "arx5"
+      ],
+      "flexiv": [
+        "flexiv"
+      ],
+      "aloha": [
+        "aloha"
+      ]
     },
     "robot_device_categories": {
-      "single_arm": ["ur", "ur5", "ur5e", "ur7e", "franka", "fr3", "fr3v2", "flexiv", "flexiv_rizon4"],
-      "dual_arm": ["arx", "arx5", "aloha", "piper", "aloha_piper"],
-      "umi": ["umi"]
+      "single_arm": [
+        "ur",
+        "ur5",
+        "ur5e",
+        "ur7e",
+        "franka",
+        "fr3",
+        "fr3v2",
+        "flexiv",
+        "flexiv_rizon4"
+      ],
+      "dual_arm": [
+        "arx",
+        "arx5",
+        "aloha",
+        "piper",
+        "aloha_piper"
+      ],
+      "umi": [
+        "umi"
+      ]
     },
     "quality_labels": {
-      "normal_labels": ["完全正常"],
-      "allowed_non_error_labels": ["测试任务"],
+      "normal_labels": [
+        "完全正常"
+      ],
+      "allowed_non_error_labels": [
+        "测试任务"
+      ],
       "missing_status": "fail",
       "unexpected_status": "needs_review"
     }
@@ -43,7 +84,10 @@
     },
     "extreme_long": {
       "enabled": true,
-      "group_by": ["task", "robot"],
+      "group_by": [
+        "task",
+        "robot"
+      ],
       "min_group_size": 5,
       "ratio_fail": 4.0,
       "iqr_distance_fail": 5.0
@@ -58,13 +102,13 @@
   },
   "phase3_timestamp": {
     "abnormal_fps": {
-      "loss_fail_ratio": 0.10,
-      "normal_video_loss_fail_ratio": 0.10,
+      "loss_fail_ratio": 0.1,
+      "normal_video_loss_fail_ratio": 0.1,
       "tactile_video_loss_fail_ratio": 0.15,
-      "gain_warning_ratio": 0.10
+      "gain_warning_ratio": 0.1
     },
     "frame_drops": {
-      "normal_video_drop_ratio_fail": 0.10,
+      "normal_video_drop_ratio_fail": 0.1,
       "tactile_video_drop_ratio_fail": 0.15,
       "max_consecutive_fail": 25,
       "max_consecutive_warn": 10
@@ -76,10 +120,16 @@
     },
     "robots": {
       "aloha": {
-        "gripper_limits_m": [0.0, 0.1]
+        "gripper_limits_m": [
+          0.0,
+          0.1
+        ]
       },
       "arx5": {
-        "gripper_limits_m": [0.0, 0.082]
+        "gripper_limits_m": [
+          0.0,
+          0.082
+        ]
       }
     }
   },
@@ -96,7 +146,9 @@
     "fps": null,
     "status_for_repaired": "warning",
     "trajectory_first_gate": true,
-    "trajectory_pass_labels": ["smooth"],
+    "trajectory_pass_labels": [
+      "smooth"
+    ],
     "trajectory_nonpass_status": "fail",
     "run_executability": false,
     "max_concurrent_episodes": 4,
@@ -121,7 +173,9 @@
       "samples": 80000,
       "extra_args": ""
     },
-    "umi_tokens": ["umi"],
+    "umi_tokens": [
+      "umi"
+    ],
     "required_modalities": [],
     "preprocess_config": null,
     "smooth_config": null,
@@ -134,8 +188,8 @@
     "warn_segment_ms": 5000,
     "review_segment_ms": 10000,
     "fail_segment_ms": 30000,
-    "review_excess_ratio": 0.20,
-    "fail_excess_ratio": 0.40,
+    "review_excess_ratio": 0.2,
+    "fail_excess_ratio": 0.4,
     "edge_tolerance_ms": 1000,
     "min_useful_motion_ms": 5000,
     "source_modalities": [
@@ -149,7 +203,10 @@
   "phase7_slow_motion": {
     "enabled": true,
     "observation_modality": "observation.state.eef_pose",
-    "action_modalities": ["actions.eef_pose", "action.eef_pose"],
+    "action_modalities": [
+      "actions.eef_pose",
+      "action.eef_pose"
+    ],
     "window_seconds": 1.0,
     "min_speed_cm_s": 0.1,
     "max_speed_cm_s": 3.0,
@@ -167,7 +224,13 @@
     "gripper_slow_min_duration_seconds": 15.0,
     "joint_rotation_min_window_motion": 1.5,
     "joint_rotation_min_avg_speed": 0.1,
-    "raw_rotation_task_patterns": ["*rice*", "*pour*", "*tea*", "*cup*", "*water*"],
+    "raw_rotation_task_patterns": [
+      "*rice*",
+      "*pour*",
+      "*tea*",
+      "*cup*",
+      "*water*"
+    ],
     "raw_rotation_min_window_motion": 1.0,
     "raw_rotation_min_avg_speed": 0.07,
     "task_overrides": {}
@@ -179,7 +242,7 @@
     "edge_tolerance_ms": 1000,
     "keep_context_ms": 500,
     "min_remaining_duration_ms": 5000,
-    "max_trim_ratio": 0.40,
+    "max_trim_ratio": 0.4,
     "source_modalities": [
       "observation.state.joint_position",
       "actions.joint_position",
@@ -193,8 +256,12 @@
     "dry_run": false,
     "wait": false,
     "event_name": "qa.episode_abnormal.detected",
-    "notify_statuses": ["fail"],
-    "actionable_statuses": ["needs_review"],
+    "notify_statuses": [
+      "fail"
+    ],
+    "actionable_statuses": [
+      "needs_review"
+    ],
     "actionable_check_names": [
       "abnormal_fps_loss",
       "frame_drop_ratio",
@@ -206,6 +273,14 @@
       "trajectory_not_smooth",
       "ik_executability_failed"
     ],
-    "exclude_check_names": ["timestamps_raw_inconsistency", "quality_label_unexpected"]
+    "exclude_check_names": [
+      "timestamps_raw_inconsistency",
+      "quality_label_unexpected"
+    ]
+  },
+  "phase8_umi_trajectory": {
+    "detector": {
+      "small_drift_sensitivity": 0.5
+    }
   }
 }

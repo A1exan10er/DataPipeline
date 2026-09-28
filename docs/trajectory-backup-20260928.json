@@ -1,0 +1,56 @@
+{
+  "DataPipeline": {
+    "source": "/home/tianyu/Projects/DataPipeline",
+    "snapshot": "/tmp/trajectory-backup-20260928/DataPipeline",
+    "commit": "c0d59e37c2429a7b7c8f94b4681dd696e285902c",
+    "tree": "fcb530cb97d3dced6b98288a3a37d4028522f7af",
+    "parent": "0f21b4a607b162ef5805cff0f60a621f6e278036",
+    "ref": "refs/heads/codex/backup-before-trajectory-20260928",
+    "verified": {
+      "github": {
+        "url": "ssh://git@ssh.github.com:443/A1exan10er/DataPipeline.git",
+        "commit": "c0d59e37c2429a7b7c8f94b4681dd696e285902c"
+      },
+      "gitea": {
+        "url": "https://git.neoteai.com/yangtianyu/DataPipeline.git",
+        "commit": "c0d59e37c2429a7b7c8f94b4681dd696e285902c"
+      }
+    }
+  },
+  "DataQualityControlLoop": {
+    "source": "/home/tianyu/Projects/DataQualityControlLoop",
+    "snapshot": "/tmp/trajectory-backup-20260928/DataQualityControlLoop",
+    "commit": "317968ca40756072cecc5958b3d3b92b0fae0c70",
+    "tree": "ea945f6615ab272b7e9767a49cf70f44f1651595",
+    "parent": "2b710c3c6b3e4b00f75e9c490086432f085460d7",
+    "ref": "refs/heads/codex/backup-before-trajectory-20260928",
+    "verified": {
+      "github": {
+        "url": "ssh://git@ssh.github.com:443/A1exan10er/DataQualityControlLoop.git",
+        "commit": "317968ca40756072cecc5958b3d3b92b0fae0c70"
+      },
+      "gitea": {
+        "url": "https://git.neoteai.com/yangtianyu/DataQualityControlLoop.git",
+        "commit": "317968ca40756072cecc5958b3d3b92b0fae0c70"
+      }
+    }
+  },
+  "QualityCheck": {
+    "source": "/home/tianyu/Projects/QualityCheck",
+    "snapshot": "/tmp/trajectory-backup-20260928/QualityCheck",
+    "commit": "1ad28873c1a26ca67d32c022e188148ba09431ad",
+    "tree": "43dbe1ebe693a30894eba57a024ac11df734cfe0",
+    "parent": "07b61383650120cd0c48340dcc3ab55be6bcfe84",
+    "ref": "refs/heads/codex/backup-before-trajectory-20260928",
+    "verified": {
+      "github": {
+        "url": "ssh://git@ssh.github.com:443/A1exan10er/QualityCheck.git",
+        "commit": "1ad28873c1a26ca67d32c022e188148ba09431ad"
+      },
+      "gitea": {
+        "url": "https://git.neoteai.com/yangtianyu/Quality_Assurance.git",
+        "commit": "1ad28873c1a26ca67d32c022e188148ba09431ad"
+      }
+    }
+  }
+}
